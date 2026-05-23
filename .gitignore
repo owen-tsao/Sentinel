@@ -1,0 +1,45 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ML / data artifacts
+*.pt
+*.pth
+*.onnx
+checkpoints/
+runs/
+wandb/
+data/raw/
+data/processed/*.jsonl
+!data/processed/.gitkeep
+
+# IDE and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Logs and local AWS/Terraform
+*.log
+.terraform/
+*.tfstate
+*.tfstate.*
