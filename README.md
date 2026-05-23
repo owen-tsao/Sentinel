@@ -5,11 +5,13 @@ Agentic security proxy for AI agents: score shell commands with a trained model,
 ## Docs
 
 - [Weekly Structure.md](./Weekly%20Structure.md) — 12-week summer roadmap
-- [Draft Plan.md](./Draft%20Plan.md) — architecture and component specs
+- [Final Plan.md](./Final%20Plan.md) — architecture and component specs
+- [docs/week1_threat_model.md](./docs/week1_threat_model.md) — initial threat model and risk categories
+- [docs/data_strategy.md](./docs/data_strategy.md) — dataset strategy and labeling guidance
 
 ## Status
 
-Early planning phase. Implementation follows the weekly roadmap.
+Week 1 scaffolding phase. The current focus is threat modeling, starter data, and repository structure.
 
 ## Stack (planned)
 

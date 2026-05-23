@@ -1,0 +1,41 @@
+# Cursor Rules for Project Sentinel
+
+## Project Intent
+- Sentinel is a backend security API for AI-agent command execution, not a website.
+- Follow `Final Plan.md` for architecture decisions and `Weekly Structure.md` for implementation order.
+- Optimize for a strong summer portfolio project: measurable behavior, clear explanations, and focused scope.
+
+## Working Style
+- When generating complex code, explain the underlying logic in chat so the user can learn and catch mistakes.
+- Do not create extra docs for every question. Answer conceptual questions in chat unless the user asks for persistent project artifacts or the decision affects long-term project direction.
+- When the user mentions a new idea, first review whether it should be accepted, rejected, or deferred before modifying project files.
+- Prefer small, understandable implementations over clever abstractions.
+- Keep changes aligned with the current week of the roadmap unless the user explicitly asks to jump ahead.
+
+## Core Product Rules
+- Always distinguish malicious behavior from destructive but authorized behavior.
+- Labels and decisions must depend on `context`, `command`, and `environment`, not command text alone.
+- Use risk tiers: `allow`, `warn`, `confirm_required`, and `block`.
+- High-risk but possibly legitimate actions should require confirmation instead of being blindly allowed or permanently blocked.
+- Critical actions such as root deletion, credential theft, exfiltration, broad production deletion, or defense evasion should block.
+- Block/confirm responses should include clear reasons and agent-facing guidance so well-behaved agents can recover instead of retrying the same mistake.
+
+## Python/API Standards
+- Use Python 3.11+, type hints, and Pydantic models for API schemas.
+- Use FastAPI for service endpoints.
+- Return structured responses with request IDs, verdicts, reasons, risk scores, and execution metadata.
+- Write tests for decision logic, rules, API behavior, and sandbox execution.
+- Add comments/docstrings only where they explain non-obvious reasoning or safety constraints.
+
+## ML/Data Standards
+- Use PyTorch for training and ONNX Runtime for serving when practical.
+- Start with the curated seed dataset as the label policy, then expand with benchmarks and generated data.
+- Track metrics beyond accuracy: dangerous recall, false positive rate, confusion matrix by risk category, and latency.
+- Do not trust GPT-generated data without validation or sampling.
+
+## Docker/AWS/Security Standards
+- Approved commands must run in a restricted Docker executor, not directly on the host.
+- Use non-root users, timeouts, resource limits, restricted mounts, and no network by default for execution.
+- Use DynamoDB for audit logging when configured, with a local JSONL fallback for development.
+- Avoid expensive always-on AWS infrastructure unless explicitly requested.
+- Never commit secrets, credentials, large raw datasets, model checkpoints, or generated model files.
