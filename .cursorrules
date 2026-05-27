@@ -14,11 +14,12 @@
 
 ## Core Product Rules
 - Always distinguish malicious behavior from destructive but authorized behavior.
-- Labels and decisions must depend on `context`, `command`, and `environment`, not command text alone.
+- Labels and decisions must depend on `context`, `recent_actions`, `command`, and `environment`, not command text alone.
 - Use risk tiers: `allow`, `warn`, `confirm_required`, and `block`.
 - High-risk but possibly legitimate actions should require confirmation instead of being blindly allowed or permanently blocked.
 - Critical actions such as root deletion, credential theft, exfiltration, broad production deletion, or defense evasion should block.
 - Block/confirm responses should include clear reasons and agent-facing guidance so well-behaved agents can recover instead of retrying the same mistake.
+- Deterministic rules and environment policy should short-circuit obvious allow/block decisions before model inference; invoke ONNX only for gray-area requests.
 
 ## Python/API Standards
 - Use Python 3.11+, type hints, and Pydantic models for API schemas.
@@ -31,6 +32,7 @@
 - Use PyTorch for training and ONNX Runtime for serving when practical.
 - Start with the curated seed dataset as the label policy, then expand with benchmarks and generated data.
 - Track metrics beyond accuracy: dangerous recall, false positive rate, confusion matrix by risk category, and latency.
+- Include sequence-aware evaluation cases where recent actions change the risk of the current command.
 - Do not trust GPT-generated data without validation or sampling.
 
 ## Docker/AWS/Security Standards

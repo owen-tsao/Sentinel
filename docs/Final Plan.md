@@ -2,16 +2,16 @@
 
 ## 1. Executive Summary
 
-Project Sentinel is a backend security service for autonomous AI agents that can execute shell commands, Python snippets, AWS CLI calls, or other high-impact tool actions. Sentinel sits between the agent and the execution environment. Before a command runs, the agent sends Sentinel the user objective, agent context, proposed command, and target environment. Sentinel scores the request, applies policy rules, decides whether to allow, block, or require confirmation, executes approved commands inside a Docker sandbox, and logs every decision for auditing.
+Project Sentinel is a backend security service for autonomous AI agents that can execute shell commands, Python snippets, AWS CLI calls, or other high-impact tool actions. Sentinel sits between the agent and the execution environment. Before a command runs, the agent sends Sentinel the user objective, recent action history, proposed command, and target environment. Sentinel applies deterministic policy rules first, invokes the ML model only for gray-area requests, decides whether to allow, block, or require confirmation, executes approved commands inside a local Docker sandbox for the Summer MVP, and logs every decision for auditing.
 
-The project is not a website and does not require a full UI for v1. It is an API service that other programs call. The initial user is an agent framework or a test client. A small confirmation endpoint and optional API docs are enough for v1.
+The project is not a website and does not require a full UI for v1. It is an API service plus a developer-facing CLI. The initial user is a DevOps or security engineer testing agent commands, local policies, and blocked-command logs from the terminal.
 
 The core value is not "AI magically knows what is bad." The core value is a layered guardrail:
 
-- A trained model estimates whether a command is risky relative to the stated context.
-- Deterministic policy rules catch obvious high-risk patterns.
+- Deterministic policy rules catch obvious high-risk patterns before model inference.
+- A trained model estimates whether gray-area commands are risky relative to the stated context and recent action history.
 - Risk tiers separate safe actions, suspicious actions, and actions that need human confirmation.
-- Docker limits the blast radius of commands that are allowed to run.
+- Docker limits the blast radius of commands that are allowed to run in the Summer MVP, but it is not treated as a production-grade security boundary.
 - AWS DynamoDB or a local fallback stores an audit trail for review.
 
 ## 2. Goals and Non-Goals
@@ -19,14 +19,15 @@ The core value is not "AI magically knows what is bad." The core value is a laye
 ### 2.1 Goals
 
 - Build a working command-interception API for AI agents.
-- Train a PyTorch model that classifies `(context, command)` pairs by risk.
+- Train a PyTorch model that classifies `(context, recent_actions, command, environment)` inputs by risk.
 - Serve the trained model through ONNX Runtime for fast, lightweight inference.
-- Combine model score, rules, and environment policy instead of relying on a single threshold.
+- Short-circuit deterministic rules and environment policy before invoking model inference.
+- Combine model score, rules, recent action history, and environment policy instead of relying on a single threshold.
 - Explicitly distinguish malicious behavior from authorized destructive behavior.
 - Run allowed commands inside a restricted Docker sandbox, not directly on the host.
 - Log all decisions to DynamoDB when AWS credentials are available, with a local fallback for development.
 - Produce measurable results: recall, false positive rate, latency, and sandbox behavior.
-- Provide a realistic demo using `curl`, a local Python agent simulator, and ideally OpenClaw.
+- Provide a developer-facing CLI for local evaluation, policy testing, sandboxed execution, and audit-log review.
 
 ### 2.2 Non-Goals for v1
 
@@ -35,6 +36,7 @@ The core value is not "AI magically knows what is bad." The core value is a laye
 - Supporting every agent framework on day one.
 - Building a full web dashboard.
 - Running expensive always-on AWS infrastructure.
+- Treating local Docker as sufficient isolation for enterprise multi-tenant execution.
 - Replacing human approval for high-impact actions.
 - Building a general antivirus or endpoint detection product.
 
@@ -78,7 +80,7 @@ The central design rule:
 ## 4. High-Level Architecture
 
 ```text
-Agent or test client
+Developer CLI or agent client
         |
         | POST /execute
         v
@@ -88,8 +90,9 @@ Sentinel FastAPI service
         v
 Decision engine
         |
-        |-- rules baseline
-        |-- ONNX model risk score
+        |-- deterministic policy prefilter
+        |-- recent action history
+        |-- ONNX model risk score for gray-area requests
         |-- environment policy
         |-- confirmation state
         v
@@ -97,7 +100,7 @@ Verdict: allow / warn / confirm_required / block
         |
         | if allow
         v
-Docker executor sandbox
+Local Docker executor sandbox
         |
         | stdout, stderr, exit code, timeout
         v
@@ -117,11 +120,14 @@ Responsibilities:
 
 - Ingest public benchmark traces where possible, such as CUAHarm and OS-Harm.
 - Add hand-written and synthetic examples for context-dependent command risk.
+- Represent recent agent behavior through a rolling action window, such as the last 3-5 commands, file reads, tool calls, network targets, and sensitive resources accessed.
 - Normalize each example into a common JSONL schema.
 - Split examples into train, validation, and test sets.
 - Track source and category for later error analysis.
 
-Important: Labels must reflect whether the command is appropriate for the context, not whether the command looks scary in isolation.
+Important: Labels must reflect whether the command is appropriate for the context and recent session history, not whether the command looks scary in isolation.
+
+Examples without available history should be normalized to `recent_actions: []`. The normalized schema should support sequence-aware examples without invalidating the original curated seed set.
 
 ### 5.2 PyTorch Training Pipeline
 
@@ -133,7 +139,7 @@ Responsibilities:
 - Fine-tune a small text classifier such as DistilBERT.
 - Train on combined text such as:
   - user objective
-  - agent context
+  - recent action history
   - command
   - environment
 - Optimize primarily for high recall on truly dangerous behavior while tracking false positives.
@@ -144,7 +150,7 @@ PyTorch is used for training. The API server should prefer ONNX Runtime for prod
 
 ### 5.3 Rules Baseline
 
-Purpose: Provide a deterministic safety floor.
+Purpose: Provide a deterministic safety floor and avoid unnecessary model inference for obvious cases.
 
 Rules should catch obvious high-risk patterns even if the model is uncertain:
 
@@ -159,20 +165,29 @@ Rules should catch obvious high-risk patterns even if the model is uncertain:
 
 Rules must be scoped. For example, `rm -rf ./build` is different from `rm -rf /`.
 
+Rules also own short-circuit routing:
+
+- Critical block rules return immediately without ONNX inference.
+- Explicit low-risk allow rules may skip ONNX inference in trusted sandbox contexts.
+- Ambiguous gray-area requests continue to the model.
+- Every decision records its routing path: `rules`, `policy`, `model`, or `combined`.
+
 ### 5.4 Decision Engine
 
-Purpose: Combine model score, rules, environment, and confirmation state into a final verdict.
+Purpose: Combine deterministic rules, recent action history, model score, environment, and confirmation state into a final verdict.
 
 Inputs:
 
 - `context`
+- `recent_actions`
 - `command`
 - `environment`
 - `user_id` or session ID if available
 - `agent_id` if available
 - `user_confirmed`
-- model risk score
 - triggered rules
+- model risk score when inference is needed
+- routing path
 
 Outputs:
 
@@ -270,7 +285,9 @@ For OpenClaw or other agent frameworks, the adapter may need to translate Sentin
 
 Purpose: Run approved commands in an isolated environment.
 
-Sentinel should not run approved commands directly on the host. Instead, the API service should launch a separate Docker executor container with strict limits.
+Sentinel should not run approved commands directly on the host. For the Summer MVP, the API service should launch a separate Docker executor container with strict limits.
+
+Docker is not a true security boundary. It is acceptable for local proof-of-concept execution and developer policy testing, but enterprise workloads should eventually move to managed, stronger isolation such as ECS/Fargate task-per-execution, EKS/Kubernetes Jobs with strict pod security and network policy, or Firecracker-style microVMs.
 
 Recommended restrictions:
 
@@ -302,15 +319,17 @@ Fallback target: local JSONL log file for development without AWS credentials.
 
 Every request should be logged, including blocked and malformed requests when possible.
 
-### 5.9 Agent Integration
+### 5.9 Developer CLI
 
-Purpose: Prove Sentinel can sit between an agent and command execution.
+Purpose: Provide the primary Summer MVP interface for DevOps and security engineers.
 
-Primary stretch target: OpenClaw, if it exposes a command/tool execution hook.
+Responsibilities:
 
-Fallback target: local agent simulator that sends proposed commands to Sentinel and follows allow/block/confirm responses.
-
-The fallback is acceptable for the portfolio because it proves the architecture without depending on OpenClaw internals.
+- Evaluate commands locally against rules, policy, recent action history, and model routing.
+- Run approved commands through the local Docker executor.
+- Validate and explain policy files.
+- Inspect DynamoDB or local audit logs.
+- Expose human-readable output and machine-readable `--json` output for CI workflows.
 
 ## 6. Technology Stack
 
@@ -327,17 +346,28 @@ The fallback is acceptable for the portfolio because it proves the architecture 
 
 ## 7. API Design
 
-### 7.1 `POST /execute`
+### 7.1 `POST /evaluate` and `POST /execute`
 
-Purpose: Evaluate and possibly execute a command.
+Purpose:
+
+- `POST /evaluate`: evaluate a command and return a verdict without execution.
+- `POST /execute`: evaluate first, then execute only if the verdict is `allow`.
 
 Request:
 
 ```json
 {
   "context": "Clean build artifacts for this repository.",
+  "recent_actions": [
+    {
+      "type": "command",
+      "summary": "Listed project files with ls -la",
+      "sensitive_resources": []
+    }
+  ],
   "command": "rm -rf ./dist ./build",
   "environment": "sandbox",
+  "session_id": "session-uuid",
   "user_id": "local-user",
   "agent_id": "openclaw-dev",
   "user_confirmed": false,
@@ -354,6 +384,7 @@ Response when allowed:
   "risk_score": 0.18,
   "risk_tier": "low",
   "reasons": ["model:low-risk", "environment:sandbox"],
+  "routing_path": "model",
   "execution": {
     "stdout": "output...",
     "stderr": "",
@@ -373,6 +404,7 @@ Response when blocked:
   "risk_score": 0.96,
   "risk_tier": "critical",
   "reasons": ["rule:destructive-root-delete", "policy:block-critical"],
+  "routing_path": "rules",
   "agent_message": "This command attempts broad destructive deletion and was blocked. Do not retry this command. Ask the user for a safer scoped cleanup target.",
   "suggested_safe_actions": ["List candidate cleanup directories first.", "Delete only a scoped sandbox path after confirmation."],
   "execution": null
@@ -389,6 +421,7 @@ Response when confirmation is required:
   "risk_tier": "high",
   "confirmation_id": "uuid",
   "reasons": ["model:high-risk", "policy:destructive-command-requires-confirmation"],
+  "routing_path": "combined",
   "agent_message": "This command may be legitimate, but it is high risk. Ask the user to approve this exact command before retrying with a confirmation token.",
   "suggested_safe_actions": ["Explain why the command is necessary.", "Offer a lower-risk alternative if one exists."],
   "execution": null
@@ -442,19 +475,26 @@ Response:
 {
   "id": "example-001",
   "context": "Clean build artifacts for this repository.",
+  "recent_actions": [
+    {
+      "type": "command",
+      "summary": "Ran tests and produced build artifacts.",
+      "sensitive_resources": []
+    }
+  ],
   "command": "rm -rf ./dist ./build",
   "environment": "sandbox",
   "label": 0,
   "risk_category": "authorized_destructive",
   "source": "synthetic",
-  "notes": "Destructive but scoped to build folders and aligned with context."
+  "notes": "Destructive but scoped to build folders and aligned with context and recent actions."
 }
 ```
 
 Labels:
 
-- `0`: allowed or low-risk for the given context.
-- `1`: malicious, unauthorized, or unsafe for the given context.
+- `0`: allowed or low-risk for the given context and recent action history.
+- `1`: malicious, unauthorized, or unsafe for the given context and recent action history.
 
 Recommended categories:
 
@@ -479,12 +519,15 @@ Recommended categories:
   "timestamp": 1760000000,
   "user_id": "local-user",
   "agent_id": "openclaw-dev",
+  "session_id": "session-uuid",
   "environment": "sandbox",
+  "recent_action_summary": "Listed files, ran tests, then requested build cleanup.",
   "context_summary": "Clean build artifacts...",
   "command": "rm -rf ./dist ./build",
   "risk_score": 0.18,
   "risk_tier": "low",
   "verdict": "allow",
+  "routing_path": "model",
   "rules_triggered": [],
   "confirmation_id": null,
   "execution_exit_code": 0,
@@ -523,16 +566,21 @@ Confirmation overrides:
 | User intentionally wants to delete a scoped folder | Confirm or allow if scoped and in sandbox/dev |
 | Agent unexpectedly deletes files during unrelated task | Block or require confirmation |
 | Command looks safe but exfiltrates data through network | Block if rule/model catches; no network in sandbox by default |
+| Command looks safe by itself but follows sensitive file access | Use recent action history to raise risk, require confirmation, or block depending on the sequence |
+| Agent reads `.env` then runs `ls -la` | `ls -la` may remain safe, but the session should be marked sensitive for later actions such as network uploads |
+| Agent reads secrets then sends outbound network data | Block as sequence-based exfiltration even if the upload command is generic |
 | Command uses obfuscation or encoding | Model and rules should flag many cases; log misses for future data |
 | Model says safe but rule says critical | Critical rule wins |
 | Rule says suspicious but model says safe | Escalate to medium/high tier |
+| Critical rule matches before model inference | Short-circuit and block without calling ONNX |
+| Low-risk allow rule matches trusted sandbox command | Allow without model inference when policy permits, and log routing path |
 | Agent framework retries blocked commands blindly | Return structured `agent_message` and `suggested_safe_actions`; adapter may convert this into a tool-shaped refusal |
 | User asks why a command was blocked | Return reason codes and a human-readable explanation |
 | Command is high risk but likely intended | Return `confirm_required`, not fake success |
 | AWS logging fails | Return response if execution decision is complete, write local fallback log, expose warning |
 | Docker execution times out | Kill executor, return timeout, log event |
 | Executor image missing | Return service error, do not run on host |
-| OpenClaw integration unavailable | Use local agent simulator |
+| Agent-framework adapter unavailable | Use the Sentinel CLI and API directly; framework adapters are post-summer integrations |
 | User confirmation token reused for different command | Reject |
 | Environment missing from request | Default to strict mode or reject request |
 | Command tries to access Docker socket | Block by policy and do not mount socket |
@@ -545,7 +593,7 @@ Confirmation overrides:
 - Command text is untrusted.
 - User-provided context may be incomplete or misleading.
 - Model predictions are advisory, not absolute truth.
-- Docker sandbox reduces risk but is not treated as perfect isolation.
+- Local Docker sandbox reduces risk for the Summer MVP but is not treated as a production security boundary.
 - Audit logs should be append-only from the application's perspective.
 
 ### 11.2 Safety Rules
@@ -558,6 +606,8 @@ Confirmation overrides:
 - Use resource limits for every command.
 - Log blocked attempts.
 - Fail closed when the decision engine cannot decide safely.
+- Deterministic critical rules must run before model inference.
+- Store enough recent action history to detect suspicious sequences, but avoid storing unnecessary secrets or raw sensitive file contents.
 
 ## 12. AWS and Deployment Plan
 
@@ -583,6 +633,17 @@ If time and budget allow:
 
 The architecture should support cloud deployment, but the core project must work locally.
 
+### 12.3 Enterprise Execution Direction
+
+Post-summer enterprise execution should not rely on `docker run` on a shared host.
+
+Longer-term options:
+
+- ECS/Fargate task-per-execution for managed ephemeral containers.
+- EKS or Kubernetes Jobs with admission control, Pod Security Standards, namespace isolation, and network policies.
+- Firecracker-style microVM isolation for stronger tenant boundaries.
+- Per-tenant egress controls, encrypted ephemeral workspaces, and centralized executor fleet monitoring.
+
 ## 13. Repository Structure
 
 Planned structure:
@@ -590,7 +651,7 @@ Planned structure:
 ```text
 sentinel/
   README.md
-  Draft Plan.md
+  Final Plan.md
   Weekly Structure.md
   data/
     raw/
@@ -605,6 +666,7 @@ sentinel/
         engine.py
         rules.py
         policy.py
+        routing.py
       model/
         inference.py
       execution/
@@ -613,6 +675,10 @@ sentinel/
         audit.py
         dynamodb_logger.py
         local_logger.py
+      session/
+        history.py
+      cli/
+        main.py
       config.py
   scripts/
     data_pipeline.py
@@ -635,17 +701,16 @@ sentinel/
 
 1. Threat model and starter dataset.
 2. Data pipeline and train/eval split.
-3. Rules baseline and baseline metrics.
-4. First PyTorch classifier.
+3. Rules baseline, deterministic short-circuit routing, and baseline metrics.
+4. First PyTorch classifier using recent action history.
 5. ONNX export and inference wrapper.
 6. FastAPI `POST /execute` endpoint.
-7. Decision engine with risk tiers.
+7. Decision engine with risk tiers, policy files, and model-only-for-gray-area routing.
 8. Dockerized Sentinel service.
-9. Docker executor for approved commands.
+9. Local Docker executor for approved commands with documented security limitations.
 10. DynamoDB audit logging and local fallback.
-11. Deployment notes or optional EC2/Fargate demo.
-12. OpenClaw attempt or local agent simulator.
-13. Final evaluation, README, demo video, and resume bullet.
+11. Developer CLI for evaluation, policy testing, and execution.
+12. CLI audit-log workflows and Summer MVP release candidate.
 
 ## 15. Evaluation Plan
 
@@ -656,10 +721,12 @@ sentinel/
 - Precision on dangerous predictions.
 - Confusion matrix by risk category.
 - Performance against rules-only baseline.
+- Performance on sequence-dependent examples.
 
 ### 15.2 System Metrics
 
 - p50/p99 model inference latency.
+- Percentage of requests short-circuited before model inference.
 - p50/p99 full API latency.
 - Docker sandbox execution overhead.
 - Timeout handling correctness.
@@ -681,51 +748,68 @@ sentinel/
 - Executor tests for timeout, no-network behavior, and blocked host access.
 - Integration tests for request -> decision -> execution -> audit log.
 - Golden examples for context-dependent commands.
+- Golden examples for sequence-dependent commands.
 
-## 17. OpenClaw Integration Plan
+## 17. Developer CLI Plan
 
-OpenClaw integration is a stretch goal.
+The Summer MVP should prioritize a developer-facing CLI over agent-framework adapters.
 
-Research questions:
+Required CLI workflows:
 
-- Does OpenClaw expose a hook before command/tool execution?
-- Can the executor be replaced with an HTTP call to Sentinel?
-- Can Sentinel return output in the format OpenClaw expects?
+- `sentinel eval --context "..." --command "..."` for local command evaluation.
+- `sentinel eval --history history.json --context "..." --command "..."` for sequence-aware evaluation.
+- `sentinel run --context "..." --command "..."` for evaluate-then-execute sandboxed runs.
+- `sentinel policy validate sentinel.policy.yaml` for local policy validation.
+- `sentinel policy explain --command "..."` for explaining deterministic routing and model usage.
+- `sentinel logs list --blocked`, `sentinel logs show <request_id>`, and `sentinel logs tail` for audit review.
+- `--json` output for CI and automation.
 
-If yes:
+The CLI should expose whether a request was decided by rules, policy, model, or combined routing so DevOps users can understand latency and enforcement behavior.
 
-- Add an adapter that forwards proposed commands to `POST /execute`.
-- Run benign and malicious tasks through OpenClaw.
-- Use DynamoDB logs as proof of interception.
+### 17.1 Real-Agent Testing Position
 
-If no:
+Real-agent testing should remain part of the product validation path, but it should not displace the Summer MVP's CLI and engine work.
 
-- Build a local agent simulator.
-- The simulator receives a task, proposes commands, sends them to Sentinel, and obeys allow/block/confirm responses.
-- This remains a valid end-to-end demonstration.
+Summer target:
 
-## 18. Future Startup-Oriented Roadmap
+- Define the adapter contract a real agent must satisfy:
+  - send `context`, `recent_actions`, `command`, `environment`, `session_id`, and agent identity,
+  - interpret `allow`, `warn`, `confirm_required`, and `block`,
+  - preserve Sentinel's `agent_message`, `suggested_safe_actions`, and reason codes,
+  - update recent-action history after each tool call.
+- If OpenClaw exposes a clean command/tool interception hook, run a non-blocking smoke test against Sentinel.
 
-Potential features if Sentinel grows beyond a summer project:
+Post-summer target:
 
-- Web dashboard for audit logs, command timelines, and blocked actions.
-- Human approval queue with Slack, email, or GitHub integration.
-- Organization-level policies and team roles.
-- Agent identity and per-agent permissions.
-- Integrations for MCP, LangChain, OpenClaw, AutoGen, Cursor tools, and CI agents.
+- Build a first-class OpenClaw adapter or plugin.
+- Add a real-agent validation harness that replays representative tasks through Sentinel.
+- Expand from OpenClaw to MCP, LangChain, AutoGen, Cursor tools, and CI agents.
+
+## 18. Post-Summer Enterprise Roadmap
+
+Potential features if Sentinel grows beyond the local-first Summer MVP:
+
+- Enterprise web dashboard for audit logs, command timelines, model-score distributions, and blocked actions.
+- Human-in-the-loop approval queues for exact high-risk actions.
+- API key management, scoped service tokens, organizations, roles, and workspace-level policy.
+- Policy templates for sandbox, dev, staging, production, cloud accounts, and external communication workflows.
+- SIEM and observability integrations: Datadog, Splunk, CloudWatch, OpenTelemetry, and webhooks.
+- Managed execution infrastructure:
+  - ECS/Fargate task-per-execution,
+  - EKS/Kubernetes Jobs with Pod Security Standards, admission control, namespace isolation, and network policies,
+  - Firecracker-style microVM isolation for stronger tenant boundaries.
+- Per-tenant egress controls, encrypted ephemeral workspaces, cluster quotas, and executor fleet monitoring.
+- Real-agent validation harness and integrations for OpenClaw, MCP, LangChain, AutoGen, Cursor tools, and CI agents.
 - Signed user intent so authorized destructive work can be distinguished from agent drift.
-- Policy templates for dev, staging, production, and cloud accounts.
-- SIEM integrations: CloudWatch, Datadog, Splunk, OpenTelemetry.
-- Continuous learning from reviewed audit logs.
-- Multi-tenant hosted version with private model deployment.
-- Enterprise deployment option for air-gapped or on-prem environments.
+- Continuous learning from reviewed audit logs, with shadow-mode evaluation before enforcing new model versions.
+- Multi-tenant hosted version with private model deployment and air-gapped enterprise deployment options.
 
 ## 19. Final Positioning
 
 Sentinel should be presented as:
 
-> A Dockerized FastAPI security proxy for AI agents that combines a PyTorch-trained command-risk model, deterministic policy rules, confirmation workflows, sandboxed execution, and AWS audit logging to reduce the risk of unsafe autonomous command execution.
+> A local-first enterprise guardrail engine for AI-agent actions that combines deterministic short-circuit policy rules, sequence-aware PyTorch/ONNX risk scoring, confirmation workflows, local Docker proof-of-concept execution, a developer CLI, and AWS audit logging.
 
 The honest claim:
 
-> Sentinel does not guarantee perfect safety. It provides measurable, layered risk reduction for agent command execution, with special attention to separating malicious behavior from authorized destructive work.
+> Sentinel does not guarantee perfect safety. It provides measurable, layered risk reduction for agent command execution, with special attention to recent action history, deterministic policy enforcement, and the distinction between malicious behavior and authorized destructive work.

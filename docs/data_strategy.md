@@ -7,13 +7,17 @@ You should not rely only on hand-written examples, but you should keep a small h
 The efficient path is:
 
 1. Use `data/examples/starter_seed.jsonl` as the label policy and sanity-check set.
-2. Pull larger examples from public agent-safety benchmarks.
+2. Pull larger examples and trajectories from public agent-safety benchmarks.
 3. Use GPT-generated examples to fill targeted gaps.
 4. Validate and sample-check generated labels before training.
 
 ## Why Not Use Only Online Data?
 
-Public benchmarks are useful, but they may not map perfectly to Sentinel's exact API shape. Some are task-level, GUI-heavy, or do not provide clean `(context, command)` pairs. A small seed set defines what Sentinel means by `safe`, `authorized_destructive`, `confirm_required`, and `malicious`.
+Public benchmarks are useful, but they may not map perfectly to Sentinel's exact API shape. Some are task-level, GUI-heavy, or do not provide clean `(context, recent_actions, command)` examples. A small seed set defines what Sentinel means by `safe`, `authorized_destructive`, `confirm_required`, and `malicious`.
+
+CUAHarm is a good fit for sequence-aware data when using actual run outputs because terminal-based evaluations produce multi-step command trajectories. Its static Hugging Face task CSVs are useful for objectives and labels, but may not include full action history by themselves.
+
+OS-Harm can also provide action trajectories through files such as `traj.jsonl` and richer logs such as `better_log.json`, but it is GUI-heavy and should be used carefully. OS-Harm's own docs warn against using benchmark examples for direct model training due to contamination concerns, so it is better suited for evaluation design, schema inspiration, or carefully separated validation experiments.
 
 ## Why Not Use Only GPT Data?
 
@@ -44,7 +48,8 @@ The first `scripts/data_pipeline.py` should:
 - load JSONL files from `data/examples/`,
 - optionally load converted benchmark examples,
 - validate required fields,
-- deduplicate exact `(context, command, environment)` pairs,
+- normalize missing `recent_actions` to `[]`,
+- deduplicate exact `(context, recent_actions, command, environment)` pairs,
 - split into train/eval files,
 - report label and risk-category counts.
 
@@ -52,7 +57,7 @@ The first `scripts/data_pipeline.py` should:
 
 Always ask:
 
-> Given this context and environment, is this command appropriate?
+> Given this context, recent action history, and environment, is this command appropriate?
 
 Do not ask:
 
