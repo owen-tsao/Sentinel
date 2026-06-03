@@ -30,6 +30,7 @@ runs/
 wandb/
 data/raw/
 data/processed/*.jsonl
+data/processed/*.json
 !data/processed/.gitkeep
 
 # IDE and OS
