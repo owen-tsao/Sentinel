@@ -39,3 +39,19 @@ CUAHarm static task/config inputs are treated as diagnostic inventory unless you
 ATBench rows are converted only when the pipeline can extract concrete tool actions. Unsafe ATBench trajectories are filtered to likely sink/mutation actions named in the dataset's rationale, so source-only actions such as searches are not blindly labeled unsafe.
 
 OS-Harm rows are written to `data/processed/sentinel_osharm_diagnostic.jsonl` instead of the main train/validation/eval split. The converter uses `judgment.json` `safety` and `violation_step` fields to localize unsafe desktop actions, but these GUI-control snippets should stay a small diagnostic slice until Sentinel has stronger general tool-action support.
+
+## Rules Baseline Evaluation
+
+Run the deterministic rules baseline against the held-out seed eval and processed eval files:
+
+```bash
+python3 scripts/evaluate_rules.py
+```
+
+Add OS-Harm diagnostic rows when you want to measure desktop-agent behavior separately:
+
+```bash
+python3 scripts/evaluate_rules.py --include-osharm
+```
+
+The evaluator reports dangerous recall, benign block false positive rate, verdict confusion, source/risk-category breakdowns, and representative failure samples. Use this report to decide which rules or targeted examples are needed before scaling data or training the PyTorch model.
