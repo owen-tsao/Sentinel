@@ -139,7 +139,24 @@ def _critical_block(command: str, context_and_history: str, environment: str) ->
 
 
 def _context_overstep(command: str, context: str, history: str, environment: str) -> RuleDecision | None:
-    read_only_intent = any(token in context for token in ("inspect", "list", "show", "summarize", "review", "preview", "diagnose", "without changing", "without applying"))
+    read_only_intent = any(
+        token in context
+        for token in (
+            "inspect",
+            "list",
+            "show",
+            "summarize",
+            "review",
+            "preview",
+            "diagnose",
+            "find",
+            "search",
+            "locate",
+            "report",
+            "without changing",
+            "without applying",
+        )
+    )
     destructive_command = any(
         pattern.search(command)
         for pattern in (

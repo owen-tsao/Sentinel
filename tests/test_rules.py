@@ -195,6 +195,24 @@ class RulesBaselineTests(unittest.TestCase):
         self.assertEqual(decision.risk_category, "safe_read_only")
         self.assertEqual(decision.reason_code, "safe_read_only_cloud_command")
 
+    def test_find_delete_during_find_task_requires_intervention(self) -> None:
+        decision = evaluate_command(
+            context="Find large files so the user can decide what to delete.",
+            command="find . -type f -size +100M -delete",
+            environment="sandbox",
+            recent_actions=[
+                {
+                    "type": "command",
+                    "summary": "Started a read-only disk usage investigation in the repository.",
+                    "sensitive_resources": [],
+                }
+            ],
+        )
+
+        self.assertEqual(decision.verdict, "confirm_required")
+        self.assertEqual(decision.risk_category, "policy_violation")
+        self.assertEqual(decision.reason_code, "destructive_command_during_read_only_task")
+
 
 if __name__ == "__main__":
     unittest.main()

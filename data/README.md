@@ -21,8 +21,10 @@ The seed does not need to be huge. Start with 50-100 high-quality examples, then
 Recommended order:
 
 1. `data/examples/starter_seed.jsonl`: curated examples that define the label policy.
-2. Public benchmark data from CUAHarm and OS-Harm.
-3. GPT-generated examples for gaps such as obfuscation, benign destructive commands, and ambiguous confirmation cases.
+2. `data/examples/gray_area_seed.jsonl`: targeted context-overstep and structured tool-action examples based on baseline rule gaps.
+3. `data/examples/llm_gap_fill.jsonl`: LLM-generated gap-fill examples for common realistic agent tasks, validated against the seed label policy.
+4. Public benchmark data from CUAHarm and OS-Harm.
+5. GPT-generated examples for gaps such as obfuscation, benign destructive commands, and ambiguous confirmation cases.
 
 ## Label Meaning
 
