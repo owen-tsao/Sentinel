@@ -1,0 +1,317 @@
+#!/usr/bin/env python3
+"""Fine-tune a lightweight text classifier for Sentinel command risk.
+
+The model target is binary risk probability from `label`, not the final
+allow/warn/confirm/block product verdict. Policy verdicts remain in the rules
+and decision layers.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import random
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+DEFAULT_MODEL = "distilbert-base-uncased"
+DEFAULT_TRAIN_PATH = Path("data/processed/sentinel_train.jsonl")
+DEFAULT_VALIDATION_PATH = Path("data/processed/sentinel_validation.jsonl")
+DEFAULT_EVAL_PATH = Path("data/processed/sentinel_eval.jsonl")
+
+
+@dataclass(frozen=True)
+class TrainingExample:
+    id: str
+    text: str
+    label: int
+    source: str
+    risk_category: str
+
+
+def load_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_no, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{path}:{line_no}: invalid JSONL: {exc}") from exc
+            if not isinstance(row, dict):
+                raise ValueError(f"{path}:{line_no}: expected JSON object")
+            rows.append(row)
+    return rows
+
+
+def format_recent_actions(recent_actions: Any) -> str:
+    if not isinstance(recent_actions, list) or not recent_actions:
+        return "None"
+
+    formatted: list[str] = []
+    for index, action in enumerate(recent_actions[-5:], start=1):
+        if not isinstance(action, dict):
+            formatted.append(f"{index}. {str(action)[:240]}")
+            continue
+        summary = str(action.get("summary", "")).strip() or "No summary"
+        action_type = str(action.get("type", "unknown")).strip() or "unknown"
+        resources = action.get("sensitive_resources", [])
+        resources_text = ", ".join(str(resource) for resource in resources) if isinstance(resources, list) and resources else "none"
+        formatted.append(f"{index}. type={action_type}; summary={summary}; sensitive_resources={resources_text}")
+    return "\n".join(formatted)
+
+
+def row_to_text(row: dict[str, Any]) -> str:
+    """Format one Sentinel row as the text DistilBERT will classify."""
+
+    return "\n".join(
+        [
+            f"Context: {str(row.get('context', '')).strip()}",
+            f"Recent actions:\n{format_recent_actions(row.get('recent_actions'))}",
+            f"Environment: {str(row.get('environment', 'sandbox')).strip()}",
+            f"Command: {str(row.get('command', '')).strip()}",
+        ]
+    )
+
+
+def rows_to_examples(rows: list[dict[str, Any]], limit: int | None = None) -> list[TrainingExample]:
+    examples: list[TrainingExample] = []
+    selected_rows = rows[:limit] if limit is not None else rows
+    for index, row in enumerate(selected_rows, start=1):
+        if row.get("label") not in (0, 1):
+            raise ValueError(f"{row.get('id', index)}: label must be 0 or 1")
+        examples.append(
+            TrainingExample(
+                id=str(row.get("id", f"row-{index}")),
+                text=row_to_text(row),
+                label=int(row["label"]),
+                source=str(row.get("source", "unknown")),
+                risk_category=str(row.get("risk_category", "unknown")),
+            )
+        )
+    return examples
+
+
+def compute_binary_metrics(labels: list[int], probabilities: list[float], threshold: float = 0.5) -> dict[str, Any]:
+    if len(labels) != len(probabilities):
+        raise ValueError("labels and probabilities must have the same length")
+    if not labels:
+        return {
+            "total": 0,
+            "threshold": threshold,
+            "accuracy": None,
+            "precision": None,
+            "dangerous_recall": None,
+            "false_positive_rate": None,
+            "confusion": {"tp": 0, "fp": 0, "tn": 0, "fn": 0},
+        }
+
+    predictions = [1 if probability >= threshold else 0 for probability in probabilities]
+    tp = sum(1 for label, prediction in zip(labels, predictions) if label == 1 and prediction == 1)
+    fp = sum(1 for label, prediction in zip(labels, predictions) if label == 0 and prediction == 1)
+    tn = sum(1 for label, prediction in zip(labels, predictions) if label == 0 and prediction == 0)
+    fn = sum(1 for label, prediction in zip(labels, predictions) if label == 1 and prediction == 0)
+
+    return {
+        "total": len(labels),
+        "threshold": threshold,
+        "accuracy": _safe_ratio(tp + tn, len(labels)),
+        "precision": _safe_ratio(tp, tp + fp),
+        "dangerous_recall": _safe_ratio(tp, tp + fn),
+        "false_positive_rate": _safe_ratio(fp, fp + tn),
+        "confusion": {"tp": tp, "fp": fp, "tn": tn, "fn": fn},
+    }
+
+
+def train(args: argparse.Namespace) -> dict[str, Any]:
+    torch, transformers = _load_training_dependencies()
+    set_seed(args.seed, torch=torch)
+
+    tokenizer = transformers.AutoTokenizer.from_pretrained(args.model_name)
+    model = transformers.AutoModelForSequenceClassification.from_pretrained(args.model_name, num_labels=2)
+    device = _select_device(args.device, torch)
+    model.to(device)
+
+    train_examples = rows_to_examples(load_jsonl(args.train_path), limit=args.smoke_limit)
+    validation_examples = rows_to_examples(load_jsonl(args.validation_path), limit=args.smoke_limit)
+    eval_examples = rows_to_examples(load_jsonl(args.eval_path), limit=args.smoke_limit)
+
+    train_dataset = _build_dataset(train_examples, tokenizer, args.max_length, torch)
+    validation_dataset = _build_dataset(validation_examples, tokenizer, args.max_length, torch)
+    eval_dataset = _build_dataset(eval_examples, tokenizer, args.max_length, torch)
+
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+
+    history: list[dict[str, Any]] = []
+    best_validation_recall = -1.0
+    best_state: dict[str, Any] | None = None
+
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        total_loss = 0.0
+        for batch in train_loader:
+            optimizer.zero_grad()
+            batch = {key: value.to(device) for key, value in batch.items()}
+            outputs = model(**batch)
+            loss = outputs.loss
+            loss.backward()
+            optimizer.step()
+            total_loss += float(loss.detach().cpu())
+
+        validation_metrics = evaluate_model(model, validation_dataset, args.batch_size, args.threshold, device, torch)
+        epoch_report = {
+            "epoch": epoch,
+            "train_loss": total_loss / max(1, len(train_loader)),
+            "validation": validation_metrics,
+        }
+        history.append(epoch_report)
+        print(json.dumps(epoch_report, indent=2, sort_keys=True))
+
+        validation_recall = validation_metrics["dangerous_recall"]
+        if validation_recall is not None and validation_recall > best_validation_recall:
+            best_validation_recall = validation_recall
+            best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    final_report = {
+        "model_name": args.model_name,
+        "device": str(device),
+        "train_rows": len(train_examples),
+        "validation_rows": len(validation_examples),
+        "eval_rows": len(eval_examples),
+        "epochs": args.epochs,
+        "history": history,
+        "eval": evaluate_model(model, eval_dataset, args.batch_size, args.threshold, device, torch),
+    }
+
+    if args.output_dir:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        model.save_pretrained(args.output_dir)
+        tokenizer.save_pretrained(args.output_dir)
+        (args.output_dir / "training_report.json").write_text(json.dumps(final_report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    return final_report
+
+
+def evaluate_model(model: Any, dataset: Any, batch_size: int, threshold: float, device: Any, torch: Any) -> dict[str, Any]:
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size)
+    labels: list[int] = []
+    probabilities: list[float] = []
+
+    model.eval()
+    with torch.no_grad():
+        for batch in loader:
+            batch = {key: value.to(device) for key, value in batch.items()}
+            batch_labels = batch.pop("labels")
+            outputs = model(**batch)
+            probs = torch.softmax(outputs.logits, dim=-1)[:, 1]
+            labels.extend(int(value) for value in batch_labels.detach().cpu().tolist())
+            probabilities.extend(float(value) for value in probs.detach().cpu().tolist())
+
+    return compute_binary_metrics(labels, probabilities, threshold=threshold)
+
+
+def set_seed(seed: int, torch: Any | None = None) -> None:
+    random.seed(seed)
+    if torch is not None:
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--train-path", type=Path, default=DEFAULT_TRAIN_PATH)
+    parser.add_argument("--validation-path", type=Path, default=DEFAULT_VALIDATION_PATH)
+    parser.add_argument("--eval-path", type=Path, default=DEFAULT_EVAL_PATH)
+    parser.add_argument("--model-name", default=DEFAULT_MODEL)
+    parser.add_argument("--output-dir", type=Path, default=Path("models/sentinel-distilbert"))
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--learning-rate", type=float, default=2e-5)
+    parser.add_argument("--max-length", type=int, default=384)
+    parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
+    parser.add_argument("--smoke-limit", type=int, default=None, help="Limit rows per split for quick Mac/CPU smoke runs.")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        report = train(args)
+    except ImportError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
+
+
+def _build_dataset(examples: list[TrainingExample], tokenizer: Any, max_length: int, torch: Any) -> Any:
+    encodings = tokenizer(
+        [example.text for example in examples],
+        truncation=True,
+        padding=True,
+        max_length=max_length,
+        return_tensors="pt",
+    )
+    labels = torch.tensor([example.label for example in examples], dtype=torch.long)
+
+    class EncodedDataset(torch.utils.data.Dataset):  # type: ignore[name-defined]
+        def __len__(self) -> int:
+            return len(labels)
+
+        def __getitem__(self, index: int) -> dict[str, Any]:
+            item = {key: value[index] for key, value in encodings.items()}
+            item["labels"] = labels[index]
+            return item
+
+    return EncodedDataset()
+
+
+def _load_training_dependencies() -> tuple[Any, Any]:
+    try:
+        import torch
+        import transformers
+    except ImportError as exc:
+        raise ImportError(
+            "Training requires PyTorch and Transformers. Install them in your training environment, "
+            "for example: python3 -m pip install torch transformers"
+        ) from exc
+    return torch, transformers
+
+
+def _select_device(requested: str, torch: Any) -> Any:
+    if requested == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA requested but torch.cuda.is_available() is false")
+        return torch.device("cuda")
+    if requested == "mps":
+        if not getattr(torch.backends, "mps", None) or not torch.backends.mps.is_available():
+            raise RuntimeError("MPS requested but torch.backends.mps.is_available() is false")
+        return torch.device("mps")
+    if requested == "cpu":
+        return torch.device("cpu")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def _safe_ratio(numerator: int, denominator: int) -> float | None:
+    if denominator == 0:
+        return None
+    return numerator / denominator
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -55,3 +55,27 @@ python3 scripts/evaluate_rules.py --include-osharm
 ```
 
 The evaluator reports dangerous recall, benign block false positive rate, verdict confusion, source/risk-category breakdowns, and representative failure samples. Use this report to decide which rules or targeted examples are needed before scaling data or training the PyTorch model.
+
+## Guardrail Model Training
+
+`train_guardrail.py` fine-tunes a pretrained DistilBERT-style text classifier on Sentinel's binary `label` field. It does not train a serious neural architecture from scratch, and it does not try to predict `expected_verdict`; verdicts remain part of the policy/rules layer.
+
+Install training dependencies in the environment where you plan to train:
+
+```bash
+python3 -m pip install torch transformers
+```
+
+Use the Mac for a tiny smoke run that checks data loading, tokenization, and metrics:
+
+```bash
+python3 scripts/train_guardrail.py --device cpu --smoke-limit 16 --epochs 1 --output-dir models/smoke-distilbert
+```
+
+Use the 3070 PC for the real fine-tuning run:
+
+```bash
+python3 scripts/train_guardrail.py --device cuda --epochs 3 --batch-size 8 --output-dir models/sentinel-distilbert
+```
+
+The script reports accuracy, precision, dangerous recall, false positive rate, and a binary confusion matrix. Treat the model's positive-class probability as a risk score that will later be combined with deterministic rules and policy.
