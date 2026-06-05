@@ -184,6 +184,80 @@ class TrainGuardrailTests(unittest.TestCase):
         self.assertIn("by_risk_category", metrics)
         self.assertEqual(metrics["by_risk_category"]["credential_exfiltration"]["dangerous_recall"], 1.0)
 
+    def test_select_checkpoint_candidate_uses_bounded_fpr_objective(self) -> None:
+        validation_metrics = {
+            "threshold": 0.5,
+            "accuracy": 0.7,
+            "precision": 0.7,
+            "dangerous_recall": 0.72,
+            "false_positive_rate": 0.08,
+            "confusion": {"tp": 8, "fp": 2, "tn": 23, "fn": 3},
+            "threshold_sweep": [
+                {
+                    "threshold": 0.2,
+                    "accuracy": 0.78,
+                    "precision": 0.58,
+                    "dangerous_recall": 1.0,
+                    "false_positive_rate": 0.32,
+                    "confusion": {"tp": 11, "fp": 8, "tn": 17, "fn": 0},
+                },
+                {
+                    "threshold": 0.4,
+                    "accuracy": 0.84,
+                    "precision": 0.66,
+                    "dangerous_recall": 0.91,
+                    "false_positive_rate": 0.2,
+                    "confusion": {"tp": 10, "fp": 5, "tn": 20, "fn": 1},
+                },
+            ],
+        }
+
+        candidate = train_guardrail.select_checkpoint_candidate(
+            validation_metrics,
+            epoch=2,
+            objective="bounded_fpr",
+            min_recall=0.9,
+            max_fpr=0.3,
+        )
+
+        self.assertEqual(candidate["epoch"], 2)
+        self.assertEqual(candidate["threshold"], 0.4)
+        self.assertTrue(candidate["constraints_met"])
+        self.assertEqual(candidate["dangerous_recall"], 0.91)
+        self.assertEqual(candidate["false_positive_rate"], 0.2)
+
+    def test_select_checkpoint_candidate_can_use_recall_objective(self) -> None:
+        validation_metrics = {
+            "threshold": 0.5,
+            "accuracy": 0.7,
+            "precision": 0.7,
+            "dangerous_recall": 0.72,
+            "false_positive_rate": 0.08,
+            "confusion": {"tp": 8, "fp": 2, "tn": 23, "fn": 3},
+            "threshold_sweep": [
+                {
+                    "threshold": 0.2,
+                    "accuracy": 0.78,
+                    "precision": 0.58,
+                    "dangerous_recall": 1.0,
+                    "false_positive_rate": 0.45,
+                    "confusion": {"tp": 11, "fp": 10, "tn": 15, "fn": 0},
+                }
+            ],
+        }
+
+        candidate = train_guardrail.select_checkpoint_candidate(
+            validation_metrics,
+            epoch=1,
+            objective="dangerous_recall",
+            min_recall=0.9,
+            max_fpr=0.3,
+        )
+
+        self.assertEqual(candidate["threshold"], 0.2)
+        self.assertEqual(candidate["dangerous_recall"], 1.0)
+        self.assertFalse(candidate["constraints_met"])
+
     def test_parse_thresholds_validates_bounds(self) -> None:
         self.assertEqual(train_guardrail.parse_thresholds("0.2, 0.5,0.8"), [0.2, 0.5, 0.8])
 

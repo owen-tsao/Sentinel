@@ -66,16 +66,24 @@ Install training dependencies in the environment where you plan to train:
 python3 -m pip install torch transformers
 ```
 
-Use the Mac for a tiny smoke run that checks data loading, tokenization, and metrics:
+Use the Mac for a tiny CPU smoke run that checks data loading, tokenization, and metrics:
 
 ```bash
 python3 scripts/train_guardrail.py --device cpu --smoke-limit 16 --epochs 1 --output-dir models/smoke-distilbert
 ```
 
-Use the 3070 PC for the real fine-tuning run:
+Use Mac MPS for the current local fine-tuning loop:
 
 ```bash
-python3 scripts/train_guardrail.py --device cuda --epochs 3 --batch-size 8 --output-dir models/sentinel-distilbert
+python3 scripts/train_guardrail.py --device mps --epochs 5 --batch-size 8 --output-dir models/sentinel-distilbert-mps
+```
+
+Keep the 3070/CUDA machine as an optional final quality lane, not a blocker for Week 5 serving work. Use it when larger datasets, repeated hyperparameter sweeps, longer training comparisons, or final model-candidate selection would benefit from faster GPU throughput:
+
+```bash
+python3 scripts/train_guardrail.py --device cuda --epochs 5 --batch-size 8 --output-dir models/sentinel-distilbert-cuda
 ```
 
 The script reports accuracy, precision, dangerous recall, false positive rate, and a binary confusion matrix. Treat the model's positive-class probability as a risk score that will later be combined with deterministic rules and policy.
+
+Before treating a CUDA run as the ONNX candidate, compare its `training_report.json` against the Mac baseline with the threshold calibration and latency tools. Faster training alone is not enough; the selected checkpoint still needs better dangerous recall, acceptable false positive rate, and serving latency.

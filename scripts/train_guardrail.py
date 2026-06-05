@@ -23,6 +23,10 @@ DEFAULT_VALIDATION_PATH = Path("data/processed/sentinel_validation.jsonl")
 DEFAULT_EVAL_PATH = Path("data/processed/sentinel_eval.jsonl")
 DEFAULT_THRESHOLDS = (0.2, 0.3, 0.4, 0.5, 0.6, 0.7)
 DEFAULT_TEXT_PREVIEW_CHARS = 280
+DEFAULT_CHECKPOINT_OBJECTIVE = "bounded_fpr"
+DEFAULT_CHECKPOINT_MIN_RECALL = 0.9
+DEFAULT_CHECKPOINT_MAX_FPR = 0.3
+CHECKPOINT_OBJECTIVES = ("bounded_fpr", "dangerous_recall")
 
 
 @dataclass(frozen=True)
@@ -190,6 +194,63 @@ def compute_group_metric_breakdowns(
     }
 
 
+def select_checkpoint_candidate(
+    validation_metrics: dict[str, Any],
+    epoch: int,
+    objective: str,
+    min_recall: float,
+    max_fpr: float,
+) -> dict[str, Any]:
+    if objective not in CHECKPOINT_OBJECTIVES:
+        raise ValueError(f"unsupported checkpoint objective: {objective}")
+
+    candidates = [validation_metrics, *validation_metrics.get("threshold_sweep", [])]
+    scored_candidates = [
+        build_checkpoint_candidate(metrics, epoch, objective, min_recall, max_fpr)
+        for metrics in candidates
+    ]
+    return max(scored_candidates, key=_checkpoint_sort_key)
+
+
+def build_checkpoint_candidate(
+    metrics: dict[str, Any],
+    epoch: int,
+    objective: str,
+    min_recall: float,
+    max_fpr: float,
+) -> dict[str, Any]:
+    recall = _metric_value(metrics.get("dangerous_recall"))
+    fpr = _metric_value(metrics.get("false_positive_rate"))
+    accuracy = _metric_value(metrics.get("accuracy"))
+    precision = metrics.get("precision")
+    constraints_met = recall >= min_recall and fpr <= max_fpr
+    if objective == "dangerous_recall":
+        score = recall
+    else:
+        score = (
+            (1.0 if constraints_met else 0.0)
+            + recall
+            - (2.0 * max(0.0, min_recall - recall))
+            - (2.0 * max(0.0, fpr - max_fpr))
+            - (0.05 * fpr)
+        )
+
+    return {
+        "epoch": epoch,
+        "objective": objective,
+        "score": score,
+        "constraints_met": constraints_met,
+        "min_recall": min_recall,
+        "max_fpr": max_fpr,
+        "threshold": metrics.get("threshold"),
+        "accuracy": metrics.get("accuracy"),
+        "precision": precision,
+        "dangerous_recall": metrics.get("dangerous_recall"),
+        "false_positive_rate": metrics.get("false_positive_rate"),
+        "confusion": metrics.get("confusion"),
+    }
+
+
 def build_prediction_records(
     examples: list[TrainingExample],
     probabilities: list[float],
@@ -264,7 +325,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
 
     history: list[dict[str, Any]] = []
-    best_validation_recall = -1.0
+    best_checkpoint: dict[str, Any] | None = None
     best_state: dict[str, Any] | None = None
 
     for epoch in range(1, args.epochs + 1):
@@ -289,17 +350,24 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             device,
             torch,
         )
+        checkpoint_candidate = select_checkpoint_candidate(
+            validation_metrics,
+            epoch,
+            args.checkpoint_objective,
+            args.checkpoint_min_recall,
+            args.checkpoint_max_fpr,
+        )
         epoch_report = {
             "epoch": epoch,
             "train_loss": total_loss / max(1, len(train_loader)),
             "validation": validation_metrics,
+            "checkpoint_candidate": checkpoint_candidate,
         }
         history.append(epoch_report)
         print(json.dumps(epoch_report, indent=2, sort_keys=True))
 
-        validation_recall = validation_metrics["dangerous_recall"]
-        if validation_recall is not None and validation_recall > best_validation_recall:
-            best_validation_recall = validation_recall
+        if best_checkpoint is None or _checkpoint_sort_key(checkpoint_candidate) > _checkpoint_sort_key(best_checkpoint):
+            best_checkpoint = checkpoint_candidate
             best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
 
     if best_state is not None:
@@ -324,6 +392,12 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "validation_rows": len(validation_examples),
         "eval_rows": len(eval_examples),
         "epochs": args.epochs,
+        "checkpoint_selection": {
+            "objective": args.checkpoint_objective,
+            "min_recall": args.checkpoint_min_recall,
+            "max_fpr": args.checkpoint_max_fpr,
+            "selected": best_checkpoint,
+        },
         "history": history,
         "eval": eval_metrics,
     }
@@ -414,6 +488,24 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional JSONL path for per-example eval predictions. Defaults to OUTPUT_DIR/eval_predictions.jsonl.",
     )
+    parser.add_argument(
+        "--checkpoint-objective",
+        choices=CHECKPOINT_OBJECTIVES,
+        default=DEFAULT_CHECKPOINT_OBJECTIVE,
+        help="Validation objective for choosing which epoch checkpoint to save.",
+    )
+    parser.add_argument(
+        "--checkpoint-min-recall",
+        type=float,
+        default=DEFAULT_CHECKPOINT_MIN_RECALL,
+        help="Target dangerous recall for bounded-FPR checkpoint selection.",
+    )
+    parser.add_argument(
+        "--checkpoint-max-fpr",
+        type=float,
+        default=DEFAULT_CHECKPOINT_MAX_FPR,
+        help="Target false positive rate ceiling for bounded-FPR checkpoint selection.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
     parser.add_argument("--smoke-limit", type=int, default=None, help="Limit rows per split for quick Mac/CPU smoke runs.")
@@ -487,6 +579,21 @@ def _safe_ratio(numerator: int, denominator: int) -> float | None:
     if denominator == 0:
         return None
     return numerator / denominator
+
+
+def _metric_value(value: Any) -> float:
+    if value is None:
+        return 0.0
+    return float(value)
+
+
+def _checkpoint_sort_key(candidate: dict[str, Any]) -> tuple[float, float, float, float]:
+    return (
+        float(candidate["score"]),
+        _metric_value(candidate.get("dangerous_recall")),
+        -_metric_value(candidate.get("false_positive_rate")),
+        _metric_value(candidate.get("accuracy")),
+    )
 
 
 def _error_type(label: int, prediction: int) -> str:
