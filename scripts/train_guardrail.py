@@ -21,6 +21,8 @@ DEFAULT_MODEL = "distilbert-base-uncased"
 DEFAULT_TRAIN_PATH = Path("data/processed/sentinel_train.jsonl")
 DEFAULT_VALIDATION_PATH = Path("data/processed/sentinel_validation.jsonl")
 DEFAULT_EVAL_PATH = Path("data/processed/sentinel_eval.jsonl")
+DEFAULT_THRESHOLDS = (0.2, 0.3, 0.4, 0.5, 0.6, 0.7)
+DEFAULT_TEXT_PREVIEW_CHARS = 280
 
 
 @dataclass(frozen=True)
@@ -127,6 +129,120 @@ def compute_binary_metrics(labels: list[int], probabilities: list[float], thresh
     }
 
 
+def compute_threshold_sweep(labels: list[int], probabilities: list[float], thresholds: list[float]) -> list[dict[str, Any]]:
+    return [compute_binary_metrics(labels, probabilities, threshold=threshold) for threshold in thresholds]
+
+
+def compute_evaluation_metrics(
+    labels: list[int],
+    probabilities: list[float],
+    threshold: float,
+    thresholds: list[float],
+    examples: list[TrainingExample] | None = None,
+) -> dict[str, Any]:
+    metrics = compute_binary_metrics(labels, probabilities, threshold=threshold)
+    metrics["threshold_sweep"] = compute_threshold_sweep(labels, probabilities, thresholds)
+    if examples is not None:
+        metrics["by_source"] = compute_group_metric_breakdowns(examples, probabilities, "source", threshold, thresholds)
+        metrics["by_risk_category"] = compute_group_metric_breakdowns(
+            examples,
+            probabilities,
+            "risk_category",
+            threshold,
+            thresholds,
+        )
+    return metrics
+
+
+def compute_group_metric_breakdowns(
+    examples: list[TrainingExample],
+    probabilities: list[float],
+    group_field: str,
+    threshold: float,
+    thresholds: list[float],
+) -> dict[str, dict[str, Any]]:
+    if len(examples) != len(probabilities):
+        raise ValueError("examples and probabilities must have the same length")
+    if group_field not in {"source", "risk_category"}:
+        raise ValueError(f"unsupported breakdown field: {group_field}")
+
+    grouped_labels: dict[str, list[int]] = {}
+    grouped_probabilities: dict[str, list[float]] = {}
+    for example, probability in zip(examples, probabilities):
+        group_name = getattr(example, group_field).strip() or "unknown"
+        grouped_labels.setdefault(group_name, []).append(example.label)
+        grouped_probabilities.setdefault(group_name, []).append(probability)
+
+    return {
+        group_name: {
+            **compute_binary_metrics(
+                grouped_labels[group_name],
+                grouped_probabilities[group_name],
+                threshold=threshold,
+            ),
+            "threshold_sweep": compute_threshold_sweep(
+                grouped_labels[group_name],
+                grouped_probabilities[group_name],
+                thresholds,
+            ),
+        }
+        for group_name in sorted(grouped_labels)
+    }
+
+
+def build_prediction_records(
+    examples: list[TrainingExample],
+    probabilities: list[float],
+    threshold: float,
+    preview_chars: int = DEFAULT_TEXT_PREVIEW_CHARS,
+) -> list[dict[str, Any]]:
+    if len(examples) != len(probabilities):
+        raise ValueError("examples and probabilities must have the same length")
+
+    records: list[dict[str, Any]] = []
+    for example, probability in zip(examples, probabilities):
+        prediction = 1 if probability >= threshold else 0
+        records.append(
+            {
+                "id": example.id,
+                "label": example.label,
+                "prediction": prediction,
+                "probability": probability,
+                "threshold": threshold,
+                "error_type": _error_type(example.label, prediction),
+                "source": example.source,
+                "risk_category": example.risk_category,
+                "text_preview": " ".join(example.text.split())[:preview_chars],
+            }
+        )
+    return records
+
+
+def write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def parse_thresholds(value: str) -> list[float]:
+    thresholds: list[float] = []
+    for raw_part in value.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        try:
+            threshold = float(part)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"invalid threshold {part!r}") from exc
+        if threshold < 0.0 or threshold > 1.0:
+            raise argparse.ArgumentTypeError(f"threshold must be between 0 and 1: {threshold}")
+        thresholds.append(threshold)
+    if not thresholds:
+        raise argparse.ArgumentTypeError("at least one threshold is required")
+    return thresholds
+
+
 def train(args: argparse.Namespace) -> dict[str, Any]:
     torch, transformers = _load_training_dependencies()
     set_seed(args.seed, torch=torch)
@@ -163,7 +279,16 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             optimizer.step()
             total_loss += float(loss.detach().cpu())
 
-        validation_metrics = evaluate_model(model, validation_dataset, args.batch_size, args.threshold, device, torch)
+        validation_metrics = evaluate_model(
+            model,
+            validation_dataset,
+            validation_examples,
+            args.batch_size,
+            args.threshold,
+            args.thresholds,
+            device,
+            torch,
+        )
         epoch_report = {
             "epoch": epoch,
             "train_loss": total_loss / max(1, len(train_loader)),
@@ -180,6 +305,18 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     if best_state is not None:
         model.load_state_dict(best_state)
 
+    eval_labels, eval_probabilities = collect_model_outputs(model, eval_dataset, args.batch_size, device, torch)
+    eval_metrics = compute_evaluation_metrics(
+        eval_labels,
+        eval_probabilities,
+        args.threshold,
+        args.thresholds,
+        examples=eval_examples,
+    )
+    prediction_output_path = args.eval_predictions_path
+    if prediction_output_path is None and args.output_dir:
+        prediction_output_path = args.output_dir / "eval_predictions.jsonl"
+
     final_report = {
         "model_name": args.model_name,
         "device": str(device),
@@ -188,8 +325,15 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "eval_rows": len(eval_examples),
         "epochs": args.epochs,
         "history": history,
-        "eval": evaluate_model(model, eval_dataset, args.batch_size, args.threshold, device, torch),
+        "eval": eval_metrics,
     }
+
+    if prediction_output_path:
+        write_jsonl(
+            prediction_output_path,
+            build_prediction_records(eval_examples, eval_probabilities, args.threshold),
+        )
+        final_report["eval_predictions_path"] = str(prediction_output_path)
 
     if args.output_dir:
         args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -200,7 +344,27 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     return final_report
 
 
-def evaluate_model(model: Any, dataset: Any, batch_size: int, threshold: float, device: Any, torch: Any) -> dict[str, Any]:
+def evaluate_model(
+    model: Any,
+    dataset: Any,
+    examples: list[TrainingExample],
+    batch_size: int,
+    threshold: float,
+    thresholds: list[float],
+    device: Any,
+    torch: Any,
+) -> dict[str, Any]:
+    labels, probabilities = collect_model_outputs(model, dataset, batch_size, device, torch)
+    return compute_evaluation_metrics(labels, probabilities, threshold, thresholds, examples=examples)
+
+
+def collect_model_outputs(
+    model: Any,
+    dataset: Any,
+    batch_size: int,
+    device: Any,
+    torch: Any,
+) -> tuple[list[int], list[float]]:
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size)
     labels: list[int] = []
     probabilities: list[float] = []
@@ -215,7 +379,7 @@ def evaluate_model(model: Any, dataset: Any, batch_size: int, threshold: float, 
             labels.extend(int(value) for value in batch_labels.detach().cpu().tolist())
             probabilities.extend(float(value) for value in probs.detach().cpu().tolist())
 
-    return compute_binary_metrics(labels, probabilities, threshold=threshold)
+    return labels, probabilities
 
 
 def set_seed(seed: int, torch: Any | None = None) -> None:
@@ -238,6 +402,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=2e-5)
     parser.add_argument("--max-length", type=int, default=384)
     parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--thresholds",
+        type=parse_thresholds,
+        default=list(DEFAULT_THRESHOLDS),
+        help="Comma-separated thresholds to report for calibration, for example: 0.2,0.3,0.4,0.5,0.6,0.7.",
+    )
+    parser.add_argument(
+        "--eval-predictions-path",
+        type=Path,
+        default=None,
+        help="Optional JSONL path for per-example eval predictions. Defaults to OUTPUT_DIR/eval_predictions.jsonl.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
     parser.add_argument("--smoke-limit", type=int, default=None, help="Limit rows per split for quick Mac/CPU smoke runs.")
@@ -311,6 +487,16 @@ def _safe_ratio(numerator: int, denominator: int) -> float | None:
     if denominator == 0:
         return None
     return numerator / denominator
+
+
+def _error_type(label: int, prediction: int) -> str:
+    if label == 1 and prediction == 0:
+        return "false_negative"
+    if label == 0 and prediction == 1:
+        return "false_positive"
+    if label == 1 and prediction == 1:
+        return "true_positive"
+    return "true_negative"
 
 
 if __name__ == "__main__":
