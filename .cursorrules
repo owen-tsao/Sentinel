@@ -7,6 +7,7 @@
 
 ## Working Style
 - When generating complex code, explain the underlying logic in chat so the user can learn and catch mistakes.
+- Briefly explain each meaningful decision or task performed in plain language, but keep explanations concise and skip obvious noise to minimize token/API usage.
 - Do not create extra docs for every question. Answer conceptual questions in chat unless the user asks for persistent project artifacts or the decision affects long-term project direction.
 - When the user mentions a new idea, first review whether it should be accepted, rejected, or deferred before modifying project files.
 - Prefer small, understandable implementations over clever abstractions.

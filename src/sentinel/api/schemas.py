@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 Environment = Literal["sandbox", "dev", "staging", "production"]
 Verdict = Literal["allow", "warn", "confirm_required", "block"]
 RiskTier = Literal["low", "medium", "high", "critical"]
-RoutingPath = Literal["rules", "model", "combined"]
+RoutingPath = Literal["rules", "policy", "model", "combined", "confirmation"]
 ShellType = Literal[
     "bash",
     "zsh",
@@ -83,6 +83,19 @@ class EvaluateResponse(BaseModel):
         default=None,
         description="Always null for Week 6 because /evaluate never executes commands.",
     )
+
+
+class ConfirmRequest(BaseModel):
+    """Request body for POST /confirm."""
+
+    confirmation_id: str = Field(..., min_length=1, description="Pending confirmation identifier from /evaluate.")
+
+
+class ConfirmResponse(BaseModel):
+    """Response body for POST /confirm."""
+
+    confirmation_id: str = Field(..., min_length=1)
+    confirmation_token: str = Field(..., min_length=1)
 
 
 class HealthResponse(BaseModel):

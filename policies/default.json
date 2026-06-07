@@ -1,0 +1,35 @@
+{
+  "name": "default-local",
+  "version": 1,
+  "default_environment": "sandbox",
+  "environments": {
+    "sandbox": {
+      "minimum_model_tier_for_confirmation": "confirm_required",
+      "warn_requires_confirmation": false,
+      "production_change_requires_confirmation": false,
+      "unmatched_requires_confirmation": false,
+      "allow_confirmation_for_verdicts": ["confirm_required"]
+    },
+    "dev": {
+      "minimum_model_tier_for_confirmation": "confirm_required",
+      "warn_requires_confirmation": false,
+      "production_change_requires_confirmation": false,
+      "unmatched_requires_confirmation": false,
+      "allow_confirmation_for_verdicts": ["confirm_required"]
+    },
+    "staging": {
+      "minimum_model_tier_for_confirmation": "warn",
+      "warn_requires_confirmation": true,
+      "production_change_requires_confirmation": false,
+      "unmatched_requires_confirmation": true,
+      "allow_confirmation_for_verdicts": ["confirm_required"]
+    },
+    "production": {
+      "minimum_model_tier_for_confirmation": "warn",
+      "warn_requires_confirmation": true,
+      "production_change_requires_confirmation": true,
+      "unmatched_requires_confirmation": true,
+      "allow_confirmation_for_verdicts": ["confirm_required"]
+    }
+  }
+}

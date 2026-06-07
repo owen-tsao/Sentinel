@@ -6,11 +6,12 @@ from dataclasses import dataclass
 from typing import Any, Callable, Literal
 from uuid import uuid4
 
+from sentinel.decision.policy import EnvironmentPolicy, PolicyProfile
 from sentinel.decision.rules import RuleDecision, Verdict, evaluate_command
 from sentinel.ml.inference import RiskPrediction
 
 RiskTier = Literal["low", "medium", "high", "critical"]
-RoutingPath = Literal["rules", "model", "combined"]
+RoutingPath = Literal["rules", "policy", "model", "combined", "confirmation"]
 
 VERDICT_RISK_SCORES: dict[Verdict, float] = {
     "allow": 0.05,
@@ -23,6 +24,12 @@ MODEL_TIER_TO_RISK_TIER: dict[str, RiskTier] = {
     "allow": "low",
     "warn": "medium",
     "confirm_required": "high",
+}
+
+MODEL_TIER_ORDER = {
+    "allow": 0,
+    "warn": 1,
+    "confirm_required": 2,
 }
 
 VERDICT_TO_RISK_TIER: dict[Verdict, RiskTier] = {
@@ -65,12 +72,14 @@ def evaluate_request(
     shell_type: str = "unknown",
     recent_actions: list[dict[str, Any]] | None = None,
     model: RiskModelProtocol | None = None,
+    policy_profile: PolicyProfile | None = None,
     request_id_factory: RequestIdFactory | None = None,
 ) -> DecisionResult:
     """Evaluate a command using deterministic rules before optional model scoring."""
 
     request_id = (request_id_factory or _new_request_id)()
     actions = recent_actions or []
+    environment_policy = policy_profile.policy_for(environment) if policy_profile else None
     rule_decision = evaluate_command(
         context=context,
         command=command,
@@ -79,10 +88,13 @@ def evaluate_request(
     )
 
     if rule_decision.skip_model:
-        return _result_from_rule(request_id, rule_decision, environment, shell_type)
+        return _apply_policy_to_rule_result(
+            _result_from_rule(request_id, rule_decision, environment, shell_type),
+            environment_policy,
+        )
 
     if model is None:
-        return _result_without_model(request_id, rule_decision, environment, shell_type)
+        return _result_without_model(request_id, rule_decision, environment, shell_type, environment_policy)
 
     try:
         # Keep shell_type out of model input until the dataset/training format is intentionally updated.
@@ -95,8 +107,12 @@ def evaluate_request(
             }
         )
     except Exception as exc:
-        return _result_without_model(request_id, rule_decision, environment, shell_type, str(exc))
-    return _result_from_model(request_id, rule_decision, prediction, environment, shell_type)
+        return _result_without_model(request_id, rule_decision, environment, shell_type, environment_policy, str(exc))
+    return _apply_policy_to_model_result(
+        _result_from_model(request_id, rule_decision, prediction, environment, shell_type),
+        environment_policy,
+        prediction,
+    )
 
 
 def _result_from_rule(request_id: str, rule_decision: RuleDecision, environment: str, shell_type: str) -> DecisionResult:
@@ -119,6 +135,7 @@ def _result_without_model(
     rule_decision: RuleDecision,
     environment: str,
     shell_type: str,
+    environment_policy: EnvironmentPolicy | None,
     error_detail: str | None = None,
 ) -> DecisionResult:
     verdict: Verdict = "confirm_required"
@@ -129,7 +146,7 @@ def _result_without_model(
     ]
     if error_detail:
         reasons.append("model:error")
-    return DecisionResult(
+    decision = DecisionResult(
         request_id=request_id,
         verdict=verdict,
         risk_score=VERDICT_RISK_SCORES[verdict],
@@ -143,6 +160,7 @@ def _result_without_model(
         suggested_safe_actions=suggested_safe_actions_for_verdict(verdict),
         rule_decision=rule_decision,
     )
+    return _apply_policy_to_model_unavailable_result(decision, environment_policy)
 
 
 def _result_from_model(
@@ -164,6 +182,91 @@ def _result_from_model(
         suggested_safe_actions=suggested_safe_actions_for_verdict(verdict),
         rule_decision=rule_decision,
         model_prediction=prediction,
+    )
+
+
+def _apply_policy_to_rule_result(
+    decision: DecisionResult,
+    environment_policy: EnvironmentPolicy | None,
+) -> DecisionResult:
+    if environment_policy is None or decision.verdict == "block":
+        return decision
+
+    if decision.verdict == "warn" and environment_policy.warn_requires_confirmation:
+        return _escalate_to_confirmation(decision, f"policy:{environment_policy.name}_warn_requires_confirmation")
+
+    return decision
+
+
+def _apply_policy_to_model_unavailable_result(
+    decision: DecisionResult,
+    environment_policy: EnvironmentPolicy | None,
+) -> DecisionResult:
+    if environment_policy is None:
+        return decision
+
+    reasons = [*decision.reasons, f"policy:{environment_policy.name}_model_unavailable_confirmation"]
+    return DecisionResult(
+        request_id=decision.request_id,
+        verdict=decision.verdict,
+        risk_score=decision.risk_score,
+        risk_tier=decision.risk_tier,
+        reasons=reasons,
+        routing_path="policy",
+        agent_message=decision.agent_message,
+        suggested_safe_actions=decision.suggested_safe_actions,
+        rule_decision=decision.rule_decision,
+        model_prediction=decision.model_prediction,
+        confirmation_id=decision.confirmation_id,
+        execution=decision.execution,
+    )
+
+
+def _apply_policy_to_model_result(
+    decision: DecisionResult,
+    environment_policy: EnvironmentPolicy | None,
+    prediction: RiskPrediction,
+) -> DecisionResult:
+    if environment_policy is None or decision.verdict == "block":
+        return decision
+
+    reasons: list[str] = []
+    if _model_tier_requires_confirmation(prediction.model_tier, environment_policy.minimum_model_tier_for_confirmation):
+        reasons.append(f"policy:{environment_policy.name}_minimum_model_tier_for_confirmation")
+    if decision.verdict == "warn" and environment_policy.warn_requires_confirmation:
+        reasons.append(f"policy:{environment_policy.name}_warn_requires_confirmation")
+    if decision.rule_decision.reason_code == "unmatched_ambiguous_command" and environment_policy.unmatched_requires_confirmation:
+        reasons.append(f"policy:{environment_policy.name}_unmatched_requires_confirmation")
+
+    if not reasons:
+        return decision
+
+    return _escalate_to_confirmation(decision, *reasons)
+
+
+def _model_tier_requires_confirmation(model_tier: str, minimum_model_tier: str) -> bool:
+    return MODEL_TIER_ORDER[model_tier] >= MODEL_TIER_ORDER[minimum_model_tier]
+
+
+def _escalate_to_confirmation(decision: DecisionResult, *policy_reasons: str) -> DecisionResult:
+    verdict: Verdict = "confirm_required"
+    risk_score = max(decision.risk_score, VERDICT_RISK_SCORES[verdict])
+    return DecisionResult(
+        request_id=decision.request_id,
+        verdict=verdict,
+        risk_score=risk_score,
+        risk_tier=VERDICT_TO_RISK_TIER[verdict],
+        reasons=[*decision.reasons, *policy_reasons],
+        routing_path="policy",
+        agent_message=agent_message_for_verdict(
+            verdict,
+            "The active policy profile requires confirmation for this environment before the command can proceed.",
+        ),
+        suggested_safe_actions=suggested_safe_actions_for_verdict(verdict),
+        rule_decision=decision.rule_decision,
+        model_prediction=decision.model_prediction,
+        confirmation_id=decision.confirmation_id,
+        execution=decision.execution,
     )
 
 
