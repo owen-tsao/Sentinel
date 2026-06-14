@@ -1,0 +1,38 @@
+name: sentinel
+
+services:
+  api:
+    image: sentinel-api:local
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    ports:
+      - "${SENTINEL_API_PORT:-8000}:8000"
+    volumes:
+      - ./policies:/app/policies:ro
+      - ./models:/app/models:ro
+    environment:
+      PYTHONUNBUFFERED: "1"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  executor:
+    image: sentinel-executor:local
+    build:
+      context: .
+      dockerfile: docker/executor.Dockerfile
+    profiles:
+      - executor
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp/sentinel
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

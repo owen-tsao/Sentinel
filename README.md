@@ -11,7 +11,7 @@ Enterprise guardrail engine for AI-agent actions: evaluate commands with determi
 
 ## Status
 
-Week 7 policy and confirmation flow. Sentinel can now evaluate proposed commands through a local API using deterministic rules first, local environment policy profiles, ONNX model scoring for gray-area requests when a local model artifact is available, and exact-request confirmation tokens for high-risk but potentially legitimate actions.
+Week 8 Docker foundation. Sentinel can evaluate proposed commands through a local API using deterministic rules first, local environment policy profiles, ONNX model scoring when a local model artifact is available, and exact-request confirmation tokens for high-risk but potentially legitimate actions. The API and future executor boundary now have separate local Docker images.
 
 ## Stack
 
@@ -59,7 +59,44 @@ curl -X POST http://127.0.0.1:8000/evaluate \
   }'
 ```
 
-`POST /evaluate` never executes commands in Week 7. It returns a structured verdict with a request ID, risk score, risk tier, reason codes, routing path, agent-facing message, suggested safer actions, and an optional `confirmation_id`.
+`POST /evaluate` never executes commands in Week 8. It returns a structured verdict with a request ID, risk score, risk tier, reason codes, routing path, agent-facing message, suggested safer actions, and an optional `confirmation_id`.
+
+## Docker Usage
+
+Build and run the local API container with Docker Compose:
+
+```bash
+docker compose up --build api
+```
+
+Then check the containerized service:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+The API container mounts `policies/` and `models/` read-only. If `models/sentinel-distilbert-onnx/model.onnx` is present, `/health` should report `status: "ok"` with `model_loaded: true`. If the ONNX artifact is absent, `/health` reports `status: "degraded"`; deterministic rules and policy still run, and gray-area requests require confirmation rather than being allowed by default.
+
+If port `8000` is busy, choose a different host port:
+
+```bash
+SENTINEL_API_PORT=8010 docker compose up --build api
+```
+
+The executor image is intentionally separate from the API image and is not started by default. Build or run its placeholder command explicitly:
+
+```bash
+docker compose --profile executor build executor
+docker compose --profile executor run --rm executor
+```
+
+For a full local container smoke check, run:
+
+```bash
+python3 scripts/docker_smoke_check.py
+```
+
+That script validates Compose config, builds both images, starts only the API service, checks `/health`, sends one safe `/evaluate` request, and tears the Compose project down.
 
 ## Policy Profiles
 
@@ -113,13 +150,15 @@ The token is checked against a SHA-256 fingerprint of the exact request fields: 
 
 ## Local-Only Limitations
 
-The Week 7 confirmation store is intentionally in-memory and process-local:
+The Week 8 local runtime is intentionally limited:
 
 - Pending confirmations and tokens disappear when the API process restarts.
 - Tokens are random local secrets, not signed JWTs.
 - There is no Slack, email, browser approval queue, or CLI approval workflow yet.
 - There is no `POST /execute` endpoint yet, so Sentinel still evaluates only and does not run commands.
 - There is no DynamoDB or JSONL audit persistence for confirmations yet.
+- Docker reduces local blast radius for development, but this is not a production sandbox yet.
+- The executor container does not mount the Docker socket, does not run privileged, has no network in Compose, and currently only prints a readiness message.
 
 Run the focused API and decision checks:
 

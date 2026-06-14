@@ -87,3 +87,13 @@ python3 scripts/train_guardrail.py --device cuda --epochs 5 --batch-size 8 --out
 The script reports accuracy, precision, dangerous recall, false positive rate, and a binary confusion matrix. Treat the model's positive-class probability as a risk score that will later be combined with deterministic rules and policy.
 
 Before treating a CUDA run as the ONNX candidate, compare its `training_report.json` against the Mac baseline with the threshold calibration and latency tools. Faster training alone is not enough; the selected checkpoint still needs better dangerous recall, acceptable false positive rate, and serving latency.
+
+## Docker Smoke Check
+
+Run the optional local Docker smoke check after Docker Desktop is running:
+
+```bash
+python3 scripts/docker_smoke_check.py
+```
+
+The script validates `docker-compose.yml`, builds the API and executor images, starts only the API service, checks `/health`, sends one `/evaluate` request, and then tears the Compose project down. It accepts `--port` if local port `8000` is already in use.

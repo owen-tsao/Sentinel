@@ -1,0 +1,48 @@
+# Version control and local editor state
+.git
+.cursor
+.idea
+.vscode
+.DS_Store
+
+# Python caches and build outputs
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Large ML/data artifacts should be mounted or exported intentionally.
+models/
+checkpoints/
+runs/
+wandb/
+data/raw/
+data/processed/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+
+# Logs and infrastructure state
+*.log
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# Local handoff/session notes
+cursor_handover.md
