@@ -21,6 +21,11 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  # Sandbox image used by DockerExecutor via ephemeral `docker run --rm`.
+  # This service definition exists only so `docker compose build executor`
+  # produces the image; real executions never use a long-running container.
+  # The API container intentionally has no Docker socket, so POST /execute
+  # fails closed inside compose; run the API on the host for local execution.
   executor:
     image: sentinel-executor:local
     build:

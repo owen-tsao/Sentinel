@@ -12,7 +12,7 @@ The core value is not "AI magically knows what is bad." The core value is a laye
 - A trained model estimates whether gray-area commands are risky relative to the stated context and recent action history.
 - Risk tiers separate safe actions, suspicious actions, and actions that need human confirmation.
 - Docker limits the blast radius of commands that are allowed to run in the Summer MVP, but it is not treated as a production-grade security boundary.
-- AWS DynamoDB or a local fallback stores an audit trail for review.
+- SQLite stores a local, queryable audit trail for review, with a JSONL export for debugging.
 
 ## 2. Goals and Non-Goals
 
@@ -25,7 +25,7 @@ The core value is not "AI magically knows what is bad." The core value is a laye
 - Combine model score, rules, recent action history, and environment policy instead of relying on a single threshold.
 - Explicitly distinguish malicious behavior from authorized destructive behavior.
 - Run allowed commands inside a restricted Docker sandbox, not directly on the host.
-- Log all decisions to DynamoDB when AWS credentials are available, with a local fallback for development.
+- Log all decisions to a local SQLite audit store behind a swappable `AuditStore` interface, with a JSONL export for debugging.
 - Produce measurable results: recall, false positive rate, latency, and sandbox behavior.
 - Provide a developer-facing CLI for local evaluation, policy testing, sandboxed execution, and audit-log review.
 
@@ -107,7 +107,7 @@ Local Docker executor sandbox
 Response to agent
         |
         v
-Audit log to DynamoDB or local fallback
+Audit log to local SQLite store
 ```
 
 ## 5. Main Components
@@ -171,6 +171,8 @@ Rules also own short-circuit routing:
 - Explicit low-risk allow rules may skip ONNX inference in trusted sandbox contexts.
 - Ambiguous gray-area requests continue to the model.
 - Every decision records its routing path: `rules`, `policy`, `model`, or `combined`.
+
+In addition to built-in rules, users should be able to define custom deny/confirm rules as a second security layer on top of their agent's own rules and skills. Example: a team testing an agentic browser against Slack writes a custom rule blocking access to external or important channels. User rules use a simple declarative format (pattern, scope, verdict, reason), run in the deterministic layer before model inference, and may only escalate — they can never downgrade a built-in block. Command/path/domain matching ships first; action-level integrations (like Slack channel awareness) require agent adapters and are post-summer scope.
 
 ### 5.4 Decision Engine
 
@@ -313,9 +315,11 @@ The executor returns:
 
 Purpose: Preserve a trace of every decision.
 
-Primary target: AWS DynamoDB.
+Primary target: local SQLite database using Python's built-in `sqlite3` module, behind an `AuditStore` interface with `write()` and `query()` methods.
 
-Fallback target: local JSONL log file for development without AWS credentials.
+Export format: JSONL for easy inspection, debugging, and portability.
+
+The `AuditStore` interface keeps the storage backend swappable: a hosted deployment can later use DynamoDB or Postgres without changing decision or API code. An optional DynamoDB-backed store is a stretch task, not a core dependency.
 
 Every request should be logged, including blocked and malformed requests when possible.
 
@@ -328,7 +332,7 @@ Responsibilities:
 - Evaluate commands locally against rules, policy, recent action history, and model routing.
 - Run approved commands through the local Docker executor.
 - Validate and explain policy files.
-- Inspect DynamoDB or local audit logs.
+- Inspect the local SQLite audit logs.
 - Expose human-readable output and machine-readable `--json` output for CI workflows.
 
 ## 6. Technology Stack
@@ -340,7 +344,7 @@ Responsibilities:
 | Inference | ONNX Runtime | Lighter production serving than full PyTorch |
 | API | FastAPI, Uvicorn | Common Python API stack, auto docs, typed request models |
 | Sandbox | Docker | Standard packaging and command isolation tool |
-| Logging | DynamoDB with local JSONL fallback | Real AWS experience without expensive hosting |
+| Logging | SQLite with JSONL export | Local-first, zero setup, real SQL querying; swappable to a managed DB for hosted deployments |
 | Deployment | Local Docker first; optional EC2; stretch ECS/Fargate + API Gateway | Avoids needing AWS credits for the core project |
 | Testing | pytest | Standard Python testing |
 
@@ -463,7 +467,7 @@ Response:
 {
   "status": "ok",
   "model_loaded": true,
-  "logger": "dynamodb"
+  "logger": "sqlite"
 }
 ```
 
@@ -618,10 +622,10 @@ The project should not depend on AWS credits.
 Minimum AWS usage:
 
 - Run Sentinel locally in Docker.
-- Write audit logs to DynamoDB.
-- Use local JSONL fallback when AWS credentials are not configured.
+- Keep audit logs in the local SQLite store; AWS is not required for the Summer MVP.
+- Optional stretch: implement a DynamoDB-backed `AuditStore` behind the existing interface for hands-on AWS experience.
 
-This still provides real AWS experience and keeps costs low.
+This keeps costs at zero while preserving a clean migration path to AWS for a hosted deployment.
 
 ### 12.2 Optional Cloud Deployment
 
@@ -673,8 +677,8 @@ sentinel/
         docker_executor.py
       logging/
         audit.py
-        dynamodb_logger.py
-        local_logger.py
+        sqlite_store.py
+        jsonl_export.py
       session/
         history.py
       cli/
@@ -708,7 +712,7 @@ sentinel/
 7. Decision engine with risk tiers, policy files, and model-only-for-gray-area routing.
 8. Dockerized Sentinel service.
 9. Local Docker executor for approved commands with documented security limitations.
-10. DynamoDB audit logging and local fallback.
+10. SQLite audit logging with JSONL export.
 11. Developer CLI for evaluation, policy testing, and execution.
 12. CLI audit-log workflows and Summer MVP release candidate.
 

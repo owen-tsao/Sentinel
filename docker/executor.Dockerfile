@@ -1,9 +1,12 @@
-# Sentinel local executor boundary.
-# Week 8 only defines the image; Week 9 will add controlled command execution.
+# Sentinel local executor sandbox image.
+# The DockerExecutor overrides CMD with `sh -lc <command>`, so this image only
+# provides a minimal non-root shell environment. Network, capabilities, and
+# filesystem restrictions are enforced at `docker run` time by the executor.
 FROM python:3.11-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    HOME=/tmp
 
 RUN groupadd --system sentinel \
     && useradd --system --gid sentinel --home-dir /workspace --shell /usr/sbin/nologin sentinel \
@@ -14,4 +17,5 @@ WORKDIR /workspace
 
 USER sentinel
 
-CMD ["python", "-c", "print('Sentinel executor image ready; execution wiring is Week 9 scope.')"]
+# Fallback when run without an explicit command (e.g. compose smoke checks).
+CMD ["sh", "-lc", "echo 'Sentinel executor sandbox ready.'"]

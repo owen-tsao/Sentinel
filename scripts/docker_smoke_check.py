@@ -90,6 +90,78 @@ def check_evaluate(base_url: str) -> dict[str, Any]:
     return response
 
 
+def check_execute_gating(base_url: str) -> dict[str, Any]:
+    """A clearly dangerous command must be blocked and must never reach the sandbox."""
+    response = post_json(
+        f"{base_url}/execute",
+        {
+            "context": "Clean up the machine.",
+            "command": "rm -rf / --no-preserve-root",
+            "recent_actions": [],
+            "environment": "production",
+            "shell_type": "bash",
+            "session_id": "docker-smoke-session",
+            "agent_id": "docker-smoke-agent",
+            "user_id": "docker-smoke-user",
+        },
+        timeout=10,
+    )
+    if response.get("verdict") != "block":
+        raise ValueError(f"expected block verdict for destructive command, got {response.get('verdict')!r}")
+    if response.get("execution") is not None:
+        raise ValueError("blocked command must not include an execution result")
+    return response
+
+
+def check_execute_fail_closed(base_url: str) -> dict[str, Any]:
+    """Inside compose the API has no Docker socket, so allowed commands must fail closed, not run on the host."""
+    response = post_json(
+        f"{base_url}/execute",
+        {
+            "context": "Show git status for this repository.",
+            "command": "git status --short",
+            "recent_actions": [],
+            "environment": "sandbox",
+            "shell_type": "bash",
+            "session_id": "docker-smoke-session",
+            "agent_id": "docker-smoke-agent",
+            "user_id": "docker-smoke-user",
+        },
+        timeout=30,
+    )
+    verdict = response.get("verdict")
+    execution = response.get("execution")
+    if verdict == "allow":
+        if not isinstance(execution, dict):
+            raise ValueError("allowed /execute response must include an execution payload")
+        # Containerized API has no Docker access: a sandbox error is the only acceptable outcome.
+        if execution.get("error") is None and execution.get("exit_code") is None:
+            raise ValueError("expected a structured sandbox error or exit code from /execute")
+    elif execution is not None:
+        raise ValueError(f"non-allow verdict {verdict!r} must not include an execution result")
+    return response
+
+
+def check_direct_executor() -> dict[str, Any]:
+    """Verify the built sandbox image actually runs a command via DockerExecutor on the host."""
+    sys.path.insert(0, str(ROOT / "src"))
+    from sentinel.execution import DockerExecutor  # noqa: PLC0415
+
+    executor = DockerExecutor(workspace=ROOT, read_only_workspace=True, timeout_seconds=15)
+    result = executor.run(command="echo sentinel-sandbox-ok && whoami", shell_type="bash")
+    if result.error is not None:
+        raise ValueError(f"direct executor run failed: {result.error}")
+    if result.exit_code != 0 or "sentinel-sandbox-ok" not in result.stdout:
+        raise ValueError(f"unexpected executor output: exit={result.exit_code} stdout={result.stdout!r}")
+    if "root" in result.stdout.splitlines():
+        raise ValueError("sandbox command ran as root; executor image must stay non-root")
+    return {
+        "exit_code": result.exit_code,
+        "duration_ms": result.duration_ms,
+        "user": result.stdout.splitlines()[-1] if result.stdout else None,
+    }
+
+
 def compose_command(args: argparse.Namespace, *parts: str) -> list[str]:
     return [
         "docker",
@@ -113,17 +185,30 @@ def smoke_check(args: argparse.Namespace) -> dict[str, Any]:
     if not args.skip_build:
         run_command(compose_command(args, "build", "api", "executor"), env=env)
 
+    executor_report = check_direct_executor()
+
     try:
         run_command(compose_command(args, "up", "-d", "api"), env=env)
         base_url = f"http://127.0.0.1:{args.port}"
         health = wait_for_health(base_url, timeout_seconds=args.timeout, interval_seconds=args.interval)
         evaluation = check_evaluate(base_url)
+        execute_block = check_execute_gating(base_url)
+        execute_fail_closed = check_execute_fail_closed(base_url)
         return {
             "health": health,
+            "executor_direct": executor_report,
             "evaluate": {
                 "verdict": evaluation["verdict"],
                 "risk_tier": evaluation["risk_tier"],
                 "routing_path": evaluation["routing_path"],
+            },
+            "execute_blocked": {
+                "verdict": execute_block["verdict"],
+                "execution": execute_block["execution"],
+            },
+            "execute_fail_closed": {
+                "verdict": execute_fail_closed["verdict"],
+                "execution_error": (execute_fail_closed.get("execution") or {}).get("error"),
             },
         }
     finally:

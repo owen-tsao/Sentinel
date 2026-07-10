@@ -4,7 +4,7 @@ Project Sentinel is a B2B security control plane for AI-agent command execution.
 
 This roadmap separates the work into two phases:
 
-- **Part 1: Summer MVP (Weeks 1-12)** builds the core guardrail engine, local Docker execution, AWS DynamoDB audit logging, and a developer-facing CLI for DevOps/security teams.
+- **Part 1: Summer MVP (Weeks 1-12)** builds the core guardrail engine, local Docker execution, SQLite audit logging, and a developer-facing CLI for DevOps/security teams.
 - **Part 2: Post-Summer Expansion** turns the engine into an enterprise SaaS platform with dashboards, approvals, integrations, and managed execution infrastructure.
 
 ## Product Thesis
@@ -17,7 +17,7 @@ Sentinel's near-term wedge is not a full enterprise platform. The Summer MVP sho
 - apply deterministic policy rules and risk tiers,
 - require confirmation for high-risk but possibly legitimate actions,
 - run approved commands in a restricted Docker sandbox,
-- write audit logs to DynamoDB,
+- write audit logs to a local SQLite store,
 - expose the system through both FastAPI and a robust CLI.
 
 ## Core Product Principles
@@ -42,7 +42,7 @@ The Summer MVP is complete when Sentinel can:
 - Evaluate requests using deterministic rules plus an ONNX-served ML model.
 - Return structured verdicts: `allow`, `warn`, `confirm_required`, or `block`.
 - Run approved commands in a restricted local Docker executor.
-- Record audit events in DynamoDB with a local JSONL fallback.
+- Record audit events in a local SQLite store with a JSONL export/debug format.
 - Provide a CLI that lets teams evaluate commands, run sandboxed executions, manage local policy files, and inspect blocked-command logs.
 - Produce system metrics: dangerous-command recall, false positive rate, p50/p99 inference latency, sandbox execution latency, and audit logging success rate.
 
@@ -74,8 +74,8 @@ Local Docker executor
 Response + audit event
         |
         |-- terminal output
-        |-- DynamoDB audit log
-        |-- local JSONL fallback
+        |-- SQLite audit log
+        |-- JSONL export for debugging
 ```
 
 ## Phase 1: Product Foundations and Data Contract
@@ -283,15 +283,16 @@ Response + audit event
 
 ## Phase 5: Audit Logging and Developer CLI
 
-### Week 10: DynamoDB Audit Logging
+### Week 10: SQLite Audit Logging, Eval Set Expansion, and Custom Deny Rules
 
-**Goal:** Add durable audit logging without requiring full SaaS infrastructure.
+**Goal:** Add durable, queryable, local-first audit logging; harden the model evaluation set with realistic agent workloads; and let users define their own deny/confirm rules as a second security layer.
 
-**Tasks:**
+**Audit logging tasks:**
 
-- Create a DynamoDB audit log table design.
-- Implement audit logging through `boto3`.
-- Add local JSONL fallback when AWS credentials are not configured.
+- Design the SQLite audit log schema with indexes for verdict, environment, agent ID, and timestamp.
+- Implement an `AuditStore` interface with `write()` and `query()` so the storage backend can be swapped later (e.g. DynamoDB or Postgres for a hosted deployment) without touching the rest of the system.
+- Implement the SQLite-backed store using Python's built-in `sqlite3` module.
+- Add a JSONL export/debug format for easy inspection and portability.
 - Log every decision:
   - request ID,
   - timestamp,
@@ -305,9 +306,30 @@ Response + audit event
   - verdict,
   - confirmation state,
   - execution result.
-- Add tests for successful logging and fallback behavior.
+- Add tests for successful logging, query filters, and schema behavior.
+- Optional stretch: implement a DynamoDB-backed `AuditStore` behind the same interface for AWS experience, without making it a core dependency.
 
-**Deliverable:** Every allowed, blocked, warned, and confirmation-required request is queryable from DynamoDB or local logs.
+**Eval set expansion tasks (golden eval hardening):**
+
+- Grow the held-out golden eval set with cases drawn from real agent workloads rather than synthetic one-liners:
+  - coding agents (Cursor/Copilot-style): force pushes, dependency installs from untrusted URLs, `.env`/secret reads mid-task, CI config edits,
+  - agentic browsers / computer-use agents: downloads piped to shell, credential file access after visiting untrusted pages, installer execution,
+  - ops agents: cloud CLI mutations, database operations, and Kubernetes actions in the wrong environment.
+- Prioritize context-flip pairs (same command, different context/history changes the verdict) and sequence-dependent cases where `recent_actions` determines risk.
+- Mine realistic traces from published agent-safety benchmarks (OS-Harm execution traces, AgentHarm) after validating with a small pilot extraction that the traces contain usable command-level actions. Kill condition: if a benchmark lacks concrete commands, keep it diagnostic-only.
+- Add paraphrase variants of contexts to test that the model is not keying on exact wording.
+- Maintain a small "canary" suite of critical cases (root deletion, credential exfiltration, defense evasion) that must always pass before any model or rules change ships.
+
+**Custom deny rules tasks (user-defined policy layer):**
+
+- Let users author their own deny/confirm rules on top of Sentinel's built-in rules, as a deterministic second security layer (e.g. block access to production Slack channels while testing, block `curl` to non-allowlisted domains, block reads of `~/.ssh`).
+- Design a simple user rule format (JSON or YAML): pattern or matcher, scope (environment, agent, session), verdict (`block` or `confirm_required`), and a human-readable reason.
+- Evaluate user rules in the deterministic layer alongside built-in rules, before model inference. User rules may only escalate; they can never downgrade a built-in block.
+- Return the triggering user rule in the response reasons so agents and humans can see exactly why an action was denied.
+- Add tests: user rule matches, scope filtering, escalation-only enforcement, and malformed rule file rejection.
+- Note: command/path/domain matching ships first; action-level browser integrations (e.g. Slack channel awareness) are post-summer scope once real agent adapters exist.
+
+**Deliverable:** Every allowed, blocked, warned, and confirmation-required request is queryable from the local SQLite audit log; the golden eval set covers realistic coding-agent, browser-agent, and ops-agent scenarios with context-flip pairs; and users can define custom deny/confirm rules that Sentinel enforces deterministically.
 
 ### Week 11: Sentinel CLI - Evaluation, Policy, and Execution
 
@@ -356,7 +378,7 @@ Response + audit event
 - If OpenClaw or another real agent exposes an easy command/tool hook by this point, run a non-blocking smoke test through the API or CLI. This validates the integration path but is not required for the Summer MVP release candidate.
 - Freeze the Summer MVP scope and document installation, local usage, and operational limits.
 
-**Deliverable:** A local-first Sentinel release candidate: guardrail engine, Docker sandbox, DynamoDB audit logging, and CLI workflows for evaluation, execution, policy validation, and blocked-command review.
+**Deliverable:** A local-first Sentinel release candidate: guardrail engine, Docker sandbox, SQLite audit logging, and CLI workflows for evaluation, execution, policy validation, and blocked-command review.
 
 ## Summer MVP Non-Goals
 
@@ -383,7 +405,7 @@ The post-summer roadmap turns the local-first guardrail engine into an enterpris
 
 Planned capabilities:
 
-- Visualize DynamoDB audit logs by verdict, risk tier, environment, agent ID, and time range.
+- Visualize audit logs by verdict, risk tier, environment, agent ID, and time range (migrating the audit store from local SQLite to a managed database such as DynamoDB or Postgres).
 - Show blocked-command timelines and reason-code breakdowns.
 - Display model score distributions and policy-trigger trends.
 - Manage API keys for agents, CI systems, and team integrations.
@@ -470,7 +492,7 @@ Sentinel should evolve from a local guardrail engine into an enterprise security
 Local CLI and Docker executor
         |
         v
-Team API with DynamoDB audit logs
+Team API with managed audit log storage
         |
         v
 Enterprise dashboard and approval queues

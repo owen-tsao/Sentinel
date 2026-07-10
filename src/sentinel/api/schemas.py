@@ -67,6 +67,19 @@ class EvaluateRequest(BaseModel):
     )
 
 
+class ExecutionResult(BaseModel):
+    """Structured output from a sandboxed command execution."""
+
+    stdout: str = Field(default="", description="Captured standard output, capped by executor limits.")
+    stderr: str = Field(default="", description="Captured standard error, capped by executor limits.")
+    exit_code: Optional[int] = Field(default=None, description="Process exit code, or null if no process completed.")
+    timed_out: bool = Field(default=False, description="Whether Sentinel stopped the command after the timeout.")
+    duration_ms: int = Field(..., ge=0, description="Execution duration in milliseconds.")
+    error: Optional[str] = Field(default=None, description="Sandbox or executor error, if execution could not complete normally.")
+    stdout_truncated: bool = Field(default=False, description="Whether captured stdout was truncated.")
+    stderr_truncated: bool = Field(default=False, description="Whether captured stderr was truncated.")
+
+
 class EvaluateResponse(BaseModel):
     """Structured verdict returned by POST /evaluate."""
 
@@ -79,9 +92,9 @@ class EvaluateResponse(BaseModel):
     agent_message: str = Field(..., min_length=1)
     suggested_safe_actions: list[str] = Field(default_factory=list)
     confirmation_id: Optional[str] = None
-    execution: None = Field(
+    execution: Optional[ExecutionResult] = Field(
         default=None,
-        description="Always null for Week 6 because /evaluate never executes commands.",
+        description="Null for /evaluate; populated by /execute after an allowed sandbox run.",
     )
 
 

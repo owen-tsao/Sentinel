@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from sentinel.decision.policy import EnvironmentPolicy, PolicyProfile
 from sentinel.decision.rules import RuleDecision, Verdict, evaluate_command
+from sentinel.execution import ExecutionResult
 from sentinel.ml.inference import RiskPrediction
 
 RiskTier = Literal["low", "medium", "high", "critical"]
@@ -53,7 +54,7 @@ class DecisionResult:
     rule_decision: RuleDecision
     model_prediction: RiskPrediction | None = None
     confirmation_id: str | None = None
-    execution: None = None
+    execution: ExecutionResult | None = None
 
 
 class RiskModelProtocol:

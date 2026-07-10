@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from sentinel.api.main import create_app  # noqa: E402
 from sentinel.decision.confirmation import InMemoryConfirmationStore  # noqa: E402
+from sentinel.execution import ExecutionResult  # noqa: E402
 from sentinel.ml.inference import RiskPrediction  # noqa: E402
 
 
@@ -21,6 +22,22 @@ class FakeRiskModel:
     def predict_row(self, row: dict[str, object]) -> RiskPrediction:
         self.row = row
         return self.prediction
+
+
+class FakeExecutor:
+    def __init__(self, result: ExecutionResult | None = None) -> None:
+        self.result = result or ExecutionResult(
+            stdout="executor output\n",
+            stderr="",
+            exit_code=0,
+            timed_out=False,
+            duration_ms=12,
+        )
+        self.calls: list[dict[str, str]] = []
+
+    def run(self, *, command: str, shell_type: str) -> ExecutionResult:
+        self.calls.append({"command": command, "shell_type": shell_type})
+        return self.result
 
 
 class TokenFactory:
@@ -195,6 +212,208 @@ class ApiServiceTests(unittest.TestCase):
         self.assertIn("model:warn", body["reasons"])
         self.assertEqual(model.row["command"], "python scripts/custom_cleanup.py")
         self.assertNotIn("shell_type", model.row)
+
+    def test_execute_runs_rule_based_allow_in_executor(self) -> None:
+        executor = FakeExecutor()
+        client = TestClient(create_app(load_model=False, executor=executor))
+
+        response = client.post("/execute", json=evaluate_payload())
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["verdict"], "allow")
+        self.assertEqual(body["routing_path"], "rules")
+        self.assertEqual(body["execution"]["stdout"], "executor output\n")
+        self.assertEqual(body["execution"]["exit_code"], 0)
+        self.assertIn("execution:sandbox_attempted", body["reasons"])
+        self.assertEqual(executor.calls, [{"command": "git status --short", "shell_type": "bash"}])
+
+    def test_execute_does_not_run_blocked_command(self) -> None:
+        executor = FakeExecutor()
+        client = TestClient(create_app(load_model=False, executor=executor))
+
+        response = client.post(
+            "/execute",
+            json=evaluate_payload(
+                context="Clean the entire machine because disk space is low.",
+                command="rm -rf /",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["verdict"], "block")
+        self.assertIsNone(body["execution"])
+        self.assertEqual(executor.calls, [])
+
+    def test_execute_does_not_run_confirmation_required_command(self) -> None:
+        executor = FakeExecutor()
+        client = TestClient(
+            create_app(
+                load_model=False,
+                confirmation_store=deterministic_confirmation_store(),
+                executor=executor,
+            )
+        )
+
+        response = client.post(
+            "/execute",
+            json=evaluate_payload(
+                context="Run an unfamiliar project helper.",
+                command="python scripts/custom_cleanup.py",
+                environment="dev",
+                shell_type="python",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["verdict"], "confirm_required")
+        self.assertEqual(body["confirmation_id"], "confirmation-1")
+        self.assertIsNone(body["execution"])
+        self.assertEqual(executor.calls, [])
+
+    def test_execute_does_not_run_warn_verdict(self) -> None:
+        executor = FakeExecutor()
+        model = FakeRiskModel(prediction(0.31, "warn"))
+        client = TestClient(create_app(model=model, load_model=False, executor=executor))
+
+        response = client.post(
+            "/execute",
+            json=evaluate_payload(
+                context="Inspect the repository and make a small change if needed.",
+                command="python scripts/custom_cleanup.py",
+                environment="dev",
+                shell_type="python",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["verdict"], "warn")
+        self.assertIsNone(body["execution"])
+        self.assertEqual(executor.calls, [])
+
+    def test_execute_runs_after_valid_confirmation_token(self) -> None:
+        executor = FakeExecutor()
+        client = TestClient(
+            create_app(
+                load_model=False,
+                confirmation_store=deterministic_confirmation_store(),
+                executor=executor,
+            )
+        )
+        payload = evaluate_payload(
+            context="Run an unfamiliar project helper.",
+            command="python scripts/custom_cleanup.py",
+            environment="dev",
+            shell_type="python",
+        )
+        first_response = client.post("/execute", json=payload)
+        token_response = client.post("/confirm", json={"confirmation_id": first_response.json()["confirmation_id"]})
+        payload["confirmation_token"] = token_response.json()["confirmation_token"]
+
+        approved_response = client.post("/execute", json=payload)
+
+        self.assertEqual(approved_response.status_code, 200)
+        body = approved_response.json()
+        self.assertEqual(body["verdict"], "allow")
+        self.assertEqual(body["routing_path"], "confirmation")
+        self.assertEqual(body["execution"]["stdout"], "executor output\n")
+        self.assertEqual(executor.calls, [{"command": "python scripts/custom_cleanup.py", "shell_type": "python"}])
+
+    def test_execute_with_reused_confirmation_token_does_not_run(self) -> None:
+        executor = FakeExecutor()
+        client = TestClient(
+            create_app(
+                load_model=False,
+                confirmation_store=deterministic_confirmation_store(),
+                executor=executor,
+            )
+        )
+        payload = evaluate_payload(
+            context="Run an unfamiliar project helper.",
+            command="python scripts/custom_cleanup.py",
+            environment="dev",
+            shell_type="python",
+        )
+        first_response = client.post("/execute", json=payload)
+        token_response = client.post("/confirm", json={"confirmation_id": first_response.json()["confirmation_id"]})
+        payload["confirmation_token"] = token_response.json()["confirmation_token"]
+        client.post("/execute", json=payload)
+
+        reused_response = client.post("/execute", json=payload)
+
+        body = reused_response.json()
+        self.assertEqual(body["verdict"], "confirm_required")
+        self.assertIn("confirmation:token_invalid_or_mismatch", body["reasons"])
+        self.assertIsNone(body["execution"])
+        self.assertEqual(len(executor.calls), 1)
+
+    def test_execute_surfaces_sandbox_error_without_host_fallback(self) -> None:
+        failed = ExecutionResult(
+            stdout="",
+            stderr="",
+            exit_code=None,
+            timed_out=False,
+            duration_ms=3,
+            error="Docker executable not found: docker",
+        )
+        executor = FakeExecutor(result=failed)
+        client = TestClient(create_app(load_model=False, executor=executor))
+
+        response = client.post("/execute", json=evaluate_payload())
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["verdict"], "allow")
+        self.assertEqual(body["execution"]["error"], "Docker executable not found: docker")
+        self.assertIsNone(body["execution"]["exit_code"])
+        self.assertEqual(len(executor.calls), 1)
+
+    def test_execute_surfaces_timeout_result(self) -> None:
+        timed_out = ExecutionResult(
+            stdout="partial",
+            stderr="",
+            exit_code=None,
+            timed_out=True,
+            duration_ms=10_000,
+            error="Command timed out after 10 seconds.",
+        )
+        executor = FakeExecutor(result=timed_out)
+        client = TestClient(create_app(load_model=False, executor=executor))
+
+        response = client.post("/execute", json=evaluate_payload())
+
+        body = response.json()
+        self.assertTrue(body["execution"]["timed_out"])
+        self.assertEqual(body["execution"]["stdout"], "partial")
+        self.assertIn("timed out", body["execution"]["error"])
+
+    def test_default_executor_reads_environment_overrides(self) -> None:
+        import os
+
+        from sentinel.api.main import _default_executor
+
+        overrides = {
+            "SENTINEL_EXECUTOR_IMAGE": "sentinel-executor:test",
+            "SENTINEL_EXECUTOR_WORKSPACE": "/tmp",
+            "SENTINEL_EXECUTOR_TIMEOUT_SECONDS": "42",
+        }
+        saved = {key: os.environ.get(key) for key in overrides}
+        os.environ.update(overrides)
+        try:
+            executor = _default_executor()
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.assertEqual(executor.image, "sentinel-executor:test")
+        self.assertEqual(str(executor.workspace), "/tmp")
+        self.assertEqual(executor.timeout_seconds, 42)
 
     def test_evaluate_rejects_missing_required_command(self) -> None:
         client = TestClient(create_app(load_model=False))

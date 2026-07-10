@@ -7,11 +7,26 @@
 
 ## Working Style
 - When generating complex code, explain the underlying logic in chat so the user can learn and catch mistakes.
+- Always keep explanations simple: use plain language, avoid unnecessary jargon, and define technical terms briefly when they are unavoidable.
+- Start explanations with the high-level idea first: what is happening, why it matters, and what the user should do next. Use short examples or analogies when they make a concept easier to understand.
+- When giving instructions, include the reason behind each important step so the user learns the workflow over time instead of just copying commands.
 - Briefly explain each meaningful decision or task performed in plain language, but keep explanations concise and skip obvious noise to minimize token/API usage.
 - Do not create extra docs for every question. Answer conceptual questions in chat unless the user asks for persistent project artifacts or the decision affects long-term project direction.
 - When the user mentions a new idea, first review whether it should be accepted, rejected, or deferred before modifying project files.
 - Prefer small, understandable implementations over clever abstractions.
 - Keep changes aligned with the current week of the roadmap unless the user explicitly asks to jump ahead.
+
+## Research and De-Risking
+- Before building on a third-party API, dataset, or benchmark, identify the single riskiest assumption the work depends on and validate it first with a tiny end-to-end spike (e.g. a pilot extraction or one-off script).
+- A dataset or endpoint existing is not proof it works for our case. Verify it contains the actual content we need (real agent traces, correct fields, usable labels) before scaling ingestion or building around it.
+- In plans, mark key assumptions as verified or unverified. Do not start full implementation while a load-bearing assumption is unverified.
+- State the kill condition up front: if the critical check fails, drop or defer the approach instead of forcing weak data or workarounds into the project.
+
+## Git and Verification Etiquette
+- Do not commit, push, or create PRs unless the user explicitly asks.
+- Before finalizing work, run relevant focused tests and call out anything that was not tested.
+- For high-risk or broad changes (rules engine behavior, data pipeline logic, sandbox execution), do an extra correctness pass or independent review before calling the task complete; for small low-risk changes, focused local tests are enough.
+- If asked to create branches, use lowercase hyphen-separated names with purpose prefixes such as `feature/`, `bugfix/`, or `docs/`.
 
 ## Core Product Rules
 - Always distinguish malicious behavior from destructive but authorized behavior.
@@ -39,6 +54,6 @@
 ## Docker/AWS/Security Standards
 - Approved commands must run in a restricted Docker executor, not directly on the host.
 - Use non-root users, timeouts, resource limits, restricted mounts, and no network by default for execution.
-- Use DynamoDB for audit logging when configured, with a local JSONL fallback for development.
+- Use a local SQLite audit store behind a swappable AuditStore interface, with JSONL export for debugging. DynamoDB is an optional stretch, not a core dependency.
 - Avoid expensive always-on AWS infrastructure unless explicitly requested.
 - Never commit secrets, credentials, large raw datasets, model checkpoints, or generated model files.

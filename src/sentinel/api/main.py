@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -10,6 +12,7 @@ from sentinel.api.schemas import ConfirmRequest, ConfirmResponse, EvaluateReques
 from sentinel.decision.confirmation import ConfirmationRequest, InMemoryConfirmationStore
 from sentinel.decision.engine import DecisionResult, RiskModelProtocol, evaluate_request
 from sentinel.decision.policy import PolicyProfile, load_policy_profile
+from sentinel.execution import CommandExecutor, DockerExecutor, ExecutionResult
 from sentinel.ml.inference import DEFAULT_ONNX_PATH, OnnxRiskModel
 
 
@@ -20,6 +23,7 @@ def create_app(
     policy_profile: PolicyProfile | None = None,
     load_policy: bool = True,
     confirmation_store: InMemoryConfirmationStore | None = None,
+    executor: CommandExecutor | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="Sentinel Guardrail API",
@@ -31,6 +35,7 @@ def create_app(
     app.state.policy_profile = policy_profile
     app.state.policy_load_error = None
     app.state.confirmation_store = confirmation_store or InMemoryConfirmationStore()
+    app.state.executor = executor or _default_executor()
 
     if app.state.risk_model is None and load_model:
         try:
@@ -56,24 +61,20 @@ def create_app(
 
     @app.post("/evaluate", response_model=EvaluateResponse)
     def evaluate(payload: EvaluateRequest) -> EvaluateResponse:
-        recent_actions = [_model_to_dict(action) for action in payload.recent_actions]
-        confirmation_request = _confirmation_request_from_payload(payload, recent_actions)
-        decision = evaluate_request(
-            context=payload.context,
-            command=payload.command,
-            environment=payload.environment,
-            shell_type=payload.shell_type,
-            recent_actions=recent_actions,
-            model=app.state.risk_model,
-            policy_profile=app.state.policy_profile,
-        )
+        return response_from_decision(_evaluate_payload(payload, app))
+
+    @app.post("/execute", response_model=EvaluateResponse)
+    def execute(payload: EvaluateRequest) -> EvaluateResponse:
+        decision = _evaluate_payload(payload, app)
+        if decision.verdict != "allow":
+            return response_from_decision(decision)
+
+        execution = app.state.executor.run(command=payload.command, shell_type=payload.shell_type)
         return response_from_decision(
-            _apply_confirmation_flow(
+            _replace_decision(
                 decision,
-                confirmation_request,
-                confirmation_token=payload.confirmation_token,
-                user_confirmed=payload.user_confirmed,
-                confirmation_store=app.state.confirmation_store,
+                reasons=[*decision.reasons, "execution:sandbox_attempted"],
+                execution=execution,
             )
         )
 
@@ -89,6 +90,43 @@ def create_app(
         )
 
     return app
+
+
+def _default_executor() -> DockerExecutor:
+    """Build the executor from environment overrides so deployments can tune the sandbox without code changes."""
+
+    kwargs: dict[str, Any] = {}
+    image = os.environ.get("SENTINEL_EXECUTOR_IMAGE")
+    if image:
+        kwargs["image"] = image
+    workspace = os.environ.get("SENTINEL_EXECUTOR_WORKSPACE")
+    if workspace:
+        kwargs["workspace"] = Path(workspace)
+    timeout = os.environ.get("SENTINEL_EXECUTOR_TIMEOUT_SECONDS")
+    if timeout:
+        kwargs["timeout_seconds"] = int(timeout)
+    return DockerExecutor(**kwargs)
+
+
+def _evaluate_payload(payload: EvaluateRequest, app: FastAPI) -> DecisionResult:
+    recent_actions = [_model_to_dict(action) for action in payload.recent_actions]
+    confirmation_request = _confirmation_request_from_payload(payload, recent_actions)
+    decision = evaluate_request(
+        context=payload.context,
+        command=payload.command,
+        environment=payload.environment,
+        shell_type=payload.shell_type,
+        recent_actions=recent_actions,
+        model=app.state.risk_model,
+        policy_profile=app.state.policy_profile,
+    )
+    return _apply_confirmation_flow(
+        decision,
+        confirmation_request,
+        confirmation_token=payload.confirmation_token,
+        user_confirmed=payload.user_confirmed,
+        confirmation_store=app.state.confirmation_store,
+    )
 
 
 def _apply_confirmation_flow(
@@ -139,6 +177,7 @@ def _replace_decision(
     agent_message: str | None = None,
     suggested_safe_actions: list[str] | None = None,
     confirmation_id: str | None = None,
+    execution: ExecutionResult | None = None,
 ) -> DecisionResult:
     return DecisionResult(
         request_id=decision.request_id,
@@ -152,7 +191,7 @@ def _replace_decision(
         rule_decision=decision.rule_decision,
         model_prediction=decision.model_prediction,
         confirmation_id=confirmation_id,
-        execution=decision.execution,
+        execution=execution if execution is not None else decision.execution,
     )
 
 
@@ -167,7 +206,7 @@ def response_from_decision(decision: DecisionResult) -> EvaluateResponse:
         agent_message=decision.agent_message,
         suggested_safe_actions=decision.suggested_safe_actions,
         confirmation_id=decision.confirmation_id,
-        execution=decision.execution,
+        execution=decision.execution.to_response_payload() if decision.execution is not None else None,
     )
 
 
