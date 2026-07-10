@@ -26,6 +26,7 @@
 - Do not commit, push, or create PRs unless the user explicitly asks.
 - Before finalizing work, run relevant focused tests and call out anything that was not tested.
 - For high-risk or broad changes (rules engine behavior, data pipeline logic, sandbox execution), do an extra correctness pass or independent review before calling the task complete; for small low-risk changes, focused local tests are enough.
+- For big final reviews (end-of-week reviews or pre-commit reviews of large changes), launch independent review subagents (e.g. Bugbot and Security Review) instead of relying only on self-review, so the author's bias does not mask bugs, edge cases, or security gaps. Triage their findings honestly: fix real issues, and explain any findings that are intentionally accepted.
 - If asked to create branches, use lowercase hyphen-separated names with purpose prefixes such as `feature/`, `bugfix/`, or `docs/`.
 
 ## Core Product Rules

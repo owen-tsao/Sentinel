@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import secrets
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -65,6 +66,9 @@ class InMemoryConfirmationStore:
         self._token_factory = token_factory or _new_token
         self._pending_by_id: dict[str, PendingConfirmation] = {}
         self._tokens_by_value: dict[str, ConfirmationToken] = {}
+        # Endpoints run on a thread pool, so token consumption must be atomic to
+        # prevent a one-use token from being spent twice by concurrent requests.
+        self._lock = threading.Lock()
 
     def create_pending(self, request: ConfirmationRequest, verdict: Verdict) -> PendingConfirmation:
         if verdict not in CONFIRMABLE_VERDICTS:
@@ -98,16 +102,17 @@ class InMemoryConfirmationStore:
         return token
 
     def consume_token(self, token_value: str, request: ConfirmationRequest) -> bool:
-        token = self._tokens_by_value.get(token_value)
-        if token is None:
-            return False
-
         request_fingerprint = fingerprint_confirmation_request(request)
-        if not hmac.compare_digest(token.fingerprint, request_fingerprint):
-            return False
-
-        del self._tokens_by_value[token_value]
-        return True
+        with self._lock:
+            token = self._tokens_by_value.get(token_value)
+            if token is None:
+                return False
+            if not hmac.compare_digest(token.fingerprint, request_fingerprint):
+                # Mismatched fingerprint does not burn the token: the approved
+                # exact request should still be executable after a bad attempt.
+                return False
+            del self._tokens_by_value[token_value]
+            return True
 
 
 def fingerprint_confirmation_request(request: ConfirmationRequest) -> str:

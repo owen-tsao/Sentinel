@@ -43,8 +43,13 @@ class RecentAction(BaseModel):
 class EvaluateRequest(BaseModel):
     """Request body for POST /evaluate."""
 
-    context: str = Field(..., min_length=1, description="User objective or task context for the proposed command.")
-    command: str = Field(..., min_length=1, description="Proposed shell command or tool action to evaluate.")
+    context: str = Field(..., min_length=1, max_length=10_000, description="User objective or task context for the proposed command.")
+    command: str = Field(
+        ...,
+        min_length=1,
+        max_length=32_000,
+        description="Proposed shell command or tool action to evaluate. Capped well below OS argv limits so sandbox execution cannot fail with E2BIG.",
+    )
     recent_actions: list[RecentAction] = Field(
         default_factory=list,
         description="Recent agent actions used for sequence-aware risk evaluation.",

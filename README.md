@@ -95,7 +95,9 @@ Executor settings can be tuned with environment variables before starting the AP
 
 - `SENTINEL_EXECUTOR_IMAGE` — sandbox image (default `sentinel-executor:local`)
 - `SENTINEL_EXECUTOR_WORKSPACE` — host directory mounted at `/workspace` (default: API process working directory)
-- `SENTINEL_EXECUTOR_TIMEOUT_SECONDS` — per-command timeout (default 10)
+- `SENTINEL_EXECUTOR_TIMEOUT_SECONDS` — per-command timeout (default 10; malformed or non-positive values fall back to the default)
+- `SENTINEL_EXECUTOR_READONLY_WORKSPACE` — set to `true` to make the workspace mount read-only
+- `SENTINEL_MAX_CONCURRENT_EXECUTIONS` — cap on simultaneous sandbox runs (default 8; excess requests get HTTP 429)
 
 If Docker is unavailable, the image is missing, or the sandbox cannot start, Sentinel fails closed: the response reports a structured `execution.error` and the command is never run on the host.
 
@@ -196,7 +198,9 @@ The Week 9 local runtime is intentionally limited:
 - There is no Slack, email, browser approval queue, or CLI approval workflow yet.
 - There is no audit persistence for confirmations or executions yet (SQLite audit logging is Week 10 scope).
 - Docker reduces local blast radius for development, but it shares the host kernel and is not a production-grade sandbox. A hostile workload could attempt kernel-level escapes that VMs would contain.
-- The sandbox workspace mount is read-write by default, so approved commands can modify files inside that directory (and nothing outside it).
+- The sandbox workspace mount is read-write by default, so approved commands can modify files inside that directory (and nothing outside it). Set `SENTINEL_EXECUTOR_READONLY_WORKSPACE=true` when write access is not needed.
+- Command output is fully buffered in API memory before the 64KB cap is applied, so a command that floods stdout within the timeout can spike API memory. Concurrency is capped, and incremental capped streaming is a planned hardening step.
+- The execution timeout covers the whole `docker run` lifetime, including container startup. Commands finishing right at the deadline may be reported as timed out even though their side effects completed.
 - `warn` verdicts do not execute. This is a deliberate fail-safe default that may become configurable later.
 
 ### Isolation migration path (post-summer)

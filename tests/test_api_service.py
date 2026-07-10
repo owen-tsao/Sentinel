@@ -399,6 +399,7 @@ class ApiServiceTests(unittest.TestCase):
             "SENTINEL_EXECUTOR_IMAGE": "sentinel-executor:test",
             "SENTINEL_EXECUTOR_WORKSPACE": "/tmp",
             "SENTINEL_EXECUTOR_TIMEOUT_SECONDS": "42",
+            "SENTINEL_EXECUTOR_READONLY_WORKSPACE": "true",
         }
         saved = {key: os.environ.get(key) for key in overrides}
         os.environ.update(overrides)
@@ -414,6 +415,56 @@ class ApiServiceTests(unittest.TestCase):
         self.assertEqual(executor.image, "sentinel-executor:test")
         self.assertEqual(str(executor.workspace), "/tmp")
         self.assertEqual(executor.timeout_seconds, 42)
+        self.assertTrue(executor.read_only_workspace)
+
+    def test_default_executor_ignores_malformed_timeout_env(self) -> None:
+        import os
+
+        from sentinel.api.main import _default_executor
+
+        cases = ["abc", "10.5", "-5", "0", ""]
+        saved = os.environ.get("SENTINEL_EXECUTOR_TIMEOUT_SECONDS")
+        try:
+            for raw in cases:
+                os.environ["SENTINEL_EXECUTOR_TIMEOUT_SECONDS"] = raw
+                executor = _default_executor()
+                self.assertEqual(executor.timeout_seconds, 10, f"default expected for {raw!r}")
+        finally:
+            if saved is None:
+                os.environ.pop("SENTINEL_EXECUTOR_TIMEOUT_SECONDS", None)
+            else:
+                os.environ["SENTINEL_EXECUTOR_TIMEOUT_SECONDS"] = saved
+
+    def test_execute_returns_429_when_concurrency_limit_reached(self) -> None:
+        executor = FakeExecutor()
+        app = create_app(load_model=False, executor=executor)
+        # Exhaust the limiter to simulate max concurrent sandbox executions.
+        while app.state.execution_limiter.acquire(blocking=False):
+            pass
+        client = TestClient(app)
+
+        response = client.post("/execute", json=evaluate_payload())
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(executor.calls, [])
+
+    def test_execute_releases_concurrency_slot_after_run(self) -> None:
+        executor = FakeExecutor()
+        client = TestClient(create_app(load_model=False, executor=executor))
+
+        first = client.post("/execute", json=evaluate_payload())
+        second = client.post("/execute", json=evaluate_payload())
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(len(executor.calls), 2)
+
+    def test_evaluate_rejects_oversized_command(self) -> None:
+        client = TestClient(create_app(load_model=False))
+
+        response = client.post("/evaluate", json=evaluate_payload(command="x" * 40_000))
+
+        self.assertEqual(response.status_code, 422)
 
     def test_evaluate_rejects_missing_required_command(self) -> None:
         client = TestClient(create_app(load_model=False))

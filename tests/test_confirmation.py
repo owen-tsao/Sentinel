@@ -132,6 +132,34 @@ class ConfirmationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not confirmable"):
             store.create_pending(confirmation_request(), "block")
 
+    def test_concurrent_consume_spends_token_exactly_once(self) -> None:
+        """A one-use token must never be double-spent by racing threads."""
+        import threading
+
+        store = InMemoryConfirmationStore(
+            confirmation_id_factory=lambda: "confirmation-1",
+            token_factory=lambda: "token-1",
+        )
+        request = confirmation_request()
+        pending = store.create_pending(request, "confirm_required")
+        store.approve(pending.confirmation_id)
+
+        results: list[bool] = []
+        barrier = threading.Barrier(8)
+
+        def consume() -> None:
+            barrier.wait()
+            results.append(store.consume_token("token-1", request))
+
+        threads = [threading.Thread(target=consume) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(results.count(True), 1)
+        self.assertEqual(results.count(False), 7)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -129,6 +129,73 @@ class DockerExecutorTests(unittest.TestCase):
         self.assertIn("Docker executable not found", result.error or "")
         self.assertEqual(len(runner.calls), 1)
 
+    def test_permission_error_returns_structured_error_not_crash(self) -> None:
+        runner = RecordingRunner(error=PermissionError(13, "Permission denied"))
+        with tempfile.TemporaryDirectory() as workspace:
+            executor = DockerExecutor(workspace=Path(workspace), runner=runner)
+
+            result = executor.run(command="echo hello", shell_type="bash")
+
+        self.assertIsNone(result.exit_code)
+        self.assertIn("Sandbox could not start", result.error or "")
+
+    def test_os_error_returns_structured_error_not_crash(self) -> None:
+        runner = RecordingRunner(error=OSError(7, "Argument list too long"))
+        with tempfile.TemporaryDirectory() as workspace:
+            executor = DockerExecutor(workspace=Path(workspace), runner=runner)
+
+            result = executor.run(command="echo hello", shell_type="bash")
+
+        self.assertIsNone(result.exit_code)
+        self.assertIn("Sandbox could not start", result.error or "")
+
+    def test_timeout_reports_failed_container_cleanup(self) -> None:
+        class FailingCleanupRunner(RecordingRunner):
+            def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                self.calls.append(args)
+                if args[1] == "run":
+                    raise subprocess.TimeoutExpired(cmd=args, timeout=1)
+                return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="daemon busy")
+
+        runner = FailingCleanupRunner()
+        with tempfile.TemporaryDirectory() as workspace:
+            executor = DockerExecutor(
+                workspace=Path(workspace),
+                runner=runner,
+                timeout_seconds=1,
+                container_name_factory=lambda: "sentinel-stuck",
+            )
+
+            result = executor.run(command="sleep 60", shell_type="bash")
+
+        self.assertTrue(result.timed_out)
+        self.assertIn("cleanup may have failed", result.error or "")
+        self.assertIn("sentinel-stuck", result.error or "")
+
+    def test_timeout_cleanup_treats_already_removed_container_as_success(self) -> None:
+        class GoneContainerRunner(RecordingRunner):
+            def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                self.calls.append(args)
+                if args[1] == "run":
+                    raise subprocess.TimeoutExpired(cmd=args, timeout=1)
+                return subprocess.CompletedProcess(
+                    args=args, returncode=1, stdout="", stderr="Error: No such container: sentinel-gone"
+                )
+
+        runner = GoneContainerRunner()
+        with tempfile.TemporaryDirectory() as workspace:
+            executor = DockerExecutor(
+                workspace=Path(workspace),
+                runner=runner,
+                timeout_seconds=1,
+                container_name_factory=lambda: "sentinel-gone",
+            )
+
+            result = executor.run(command="sleep 60", shell_type="bash")
+
+        self.assertTrue(result.timed_out)
+        self.assertNotIn("cleanup may have failed", result.error or "")
+
     def test_invalid_workspace_returns_error_without_running_docker(self) -> None:
         runner = RecordingRunner()
         with tempfile.TemporaryDirectory() as workspace:

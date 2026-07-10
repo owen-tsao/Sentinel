@@ -134,9 +134,14 @@ def check_execute_fail_closed(base_url: str) -> dict[str, Any]:
     if verdict == "allow":
         if not isinstance(execution, dict):
             raise ValueError("allowed /execute response must include an execution payload")
-        # Containerized API has no Docker access: a sandbox error is the only acceptable outcome.
-        if execution.get("error") is None and execution.get("exit_code") is None:
-            raise ValueError("expected a structured sandbox error or exit code from /execute")
+        # The containerized API has no Docker socket, so the ONLY acceptable
+        # outcome is a structured sandbox error with no completed process.
+        # A real exit code would mean the command executed somewhere (host
+        # fallback or an accidentally mounted Docker socket) - a regression.
+        if execution.get("error") is None:
+            raise ValueError("expected a structured sandbox error from /execute inside compose; command may have executed")
+        if execution.get("exit_code") is not None:
+            raise ValueError("compose API returned an exit code; command must not execute without Docker access")
     elif execution is not None:
         raise ValueError(f"non-allow verdict {verdict!r} must not include an execution result")
     return response

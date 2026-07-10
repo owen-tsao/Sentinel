@@ -51,19 +51,26 @@ class DockerExecutor:
         except FileNotFoundError:
             return self._error_result(f"Docker executable not found: {self.docker_binary}", start)
         except subprocess.TimeoutExpired as exc:
-            self._remove_container(container_name)
+            cleanup_ok = self._remove_container(container_name)
             stdout, stdout_truncated = _cap_output(exc.stdout, self.output_limit_bytes)
             stderr, stderr_truncated = _cap_output(exc.stderr, self.output_limit_bytes)
+            error = f"Command timed out after {self.timeout_seconds} seconds."
+            if not cleanup_ok:
+                error = f"{error} Container cleanup may have failed; check for orphaned container {container_name}."
             return ExecutionResult(
                 stdout=stdout,
                 stderr=stderr,
                 exit_code=None,
                 timed_out=True,
                 duration_ms=_elapsed_ms(start),
-                error=f"Command timed out after {self.timeout_seconds} seconds.",
+                error=error,
                 stdout_truncated=stdout_truncated,
                 stderr_truncated=stderr_truncated,
             )
+        except OSError as exc:
+            # Fail closed on any other OS-level launch failure (permissions, argv
+            # limits, resource exhaustion) instead of leaking a raw 500 to callers.
+            return self._error_result(f"Sandbox could not start: {exc}", start)
 
         stdout, stdout_truncated = _cap_output(completed.stdout, self.output_limit_bytes)
         stderr, stderr_truncated = _cap_output(completed.stderr, self.output_limit_bytes)
@@ -135,16 +142,21 @@ class DockerExecutor:
             return factory()
         return f"sentinel-exec-{uuid4().hex}"
 
-    def _remove_container(self, container_name: str) -> None:
+    def _remove_container(self, container_name: str) -> bool:
+        """Force-remove a timed-out container. Returns False if removal may have failed."""
         try:
-            self.runner(
+            completed = self.runner(
                 [self.docker_binary, "rm", "-f", container_name],
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
         except Exception:
-            return
+            return False
+        if completed.returncode == 0:
+            return True
+        # "No such container" means it already exited and --rm reaped it: cleanup done.
+        return "no such container" in (completed.stderr or "").lower()
 
     def _error_result(self, error: str, start: float) -> ExecutionResult:
         return ExecutionResult(

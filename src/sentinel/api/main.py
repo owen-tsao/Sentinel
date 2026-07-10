@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,9 @@ def create_app(
     app.state.policy_load_error = None
     app.state.confirmation_store = confirmation_store or InMemoryConfirmationStore()
     app.state.executor = executor or _default_executor()
+    # Cap concurrent sandbox executions so slow containers cannot exhaust the
+    # shared request thread pool and starve /evaluate and /health.
+    app.state.execution_limiter = threading.BoundedSemaphore(_max_concurrent_executions())
 
     if app.state.risk_model is None and load_model:
         try:
@@ -69,7 +73,17 @@ def create_app(
         if decision.verdict != "allow":
             return response_from_decision(decision)
 
-        execution = app.state.executor.run(command=payload.command, shell_type=payload.shell_type)
+        # Non-blocking acquire: fail fast with 429 instead of queueing threads,
+        # so a burst of slow executions cannot freeze the whole API.
+        if not app.state.execution_limiter.acquire(blocking=False):
+            raise HTTPException(
+                status_code=429,
+                detail="Too many concurrent sandbox executions; retry shortly.",
+            )
+        try:
+            execution = app.state.executor.run(command=payload.command, shell_type=payload.shell_type)
+        finally:
+            app.state.execution_limiter.release()
         return response_from_decision(
             _replace_decision(
                 decision,
@@ -102,10 +116,33 @@ def _default_executor() -> DockerExecutor:
     workspace = os.environ.get("SENTINEL_EXECUTOR_WORKSPACE")
     if workspace:
         kwargs["workspace"] = Path(workspace)
-    timeout = os.environ.get("SENTINEL_EXECUTOR_TIMEOUT_SECONDS")
-    if timeout:
-        kwargs["timeout_seconds"] = int(timeout)
+    timeout = _positive_int_env("SENTINEL_EXECUTOR_TIMEOUT_SECONDS")
+    if timeout is not None:
+        kwargs["timeout_seconds"] = timeout
+    readonly = os.environ.get("SENTINEL_EXECUTOR_READONLY_WORKSPACE")
+    if readonly is not None:
+        kwargs["read_only_workspace"] = readonly.strip().lower() in {"1", "true", "yes", "on"}
     return DockerExecutor(**kwargs)
+
+
+def _max_concurrent_executions() -> int:
+    return _positive_int_env("SENTINEL_MAX_CONCURRENT_EXECUTIONS") or 8
+
+
+def _positive_int_env(name: str) -> int | None:
+    """Parse a positive integer env var, ignoring malformed or non-positive values.
+
+    Misconfiguration must not crash app creation (create_app runs at import),
+    so bad values fall back to defaults instead of raising.
+    """
+    raw = os.environ.get(name)
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
 
 
 def _evaluate_payload(payload: EvaluateRequest, app: FastAPI) -> DecisionResult:
