@@ -4,7 +4,7 @@ Project Sentinel is a B2B security control plane for AI-agent command execution.
 
 This roadmap separates the work into two phases:
 
-- **Part 1: Summer MVP (Weeks 1-12)** builds the core guardrail engine, local Docker execution, SQLite audit logging, and a developer-facing CLI for DevOps/security teams.
+- **Part 1: Summer MVP (Weeks 1-12)** builds the core guardrail engine, local Docker execution, SQLite audit logging, a local web dashboard for blockers/settings/reports, and a minimal scriptable CLI.
 - **Part 2: Post-Summer Expansion** turns the engine into an enterprise SaaS platform with dashboards, approvals, integrations, and managed execution infrastructure.
 
 ## Product Thesis
@@ -18,7 +18,7 @@ Sentinel's near-term wedge is not a full enterprise platform. The Summer MVP sho
 - require confirmation for high-risk but possibly legitimate actions,
 - run approved commands in a restricted Docker sandbox,
 - write audit logs to a local SQLite store,
-- expose the system through both FastAPI and a robust CLI.
+- expose the system through FastAPI, a local web dashboard, and a minimal scriptable CLI.
 
 ## Core Product Principles
 
@@ -43,7 +43,7 @@ The Summer MVP is complete when Sentinel can:
 - Return structured verdicts: `allow`, `warn`, `confirm_required`, or `block`.
 - Run approved commands in a restricted local Docker executor.
 - Record audit events in a local SQLite store with a JSONL export/debug format.
-- Provide a CLI that lets teams evaluate commands, run sandboxed executions, manage local policy files, and inspect blocked-command logs.
+- Provide a local web dashboard for managing custom blockers, settings, confirmation approvals, and audit reports, plus a minimal CLI for evaluating commands, running sandboxed executions, and inspecting logs from scripts and CI.
 - Produce system metrics: dangerous-command recall, false positive rate, p50/p99 inference latency, sandbox execution latency, and audit logging success rate.
 
 ### Summer Architecture
@@ -331,60 +331,56 @@ Response + audit event
 
 **Deliverable:** Every allowed, blocked, warned, and confirmation-required request is queryable from the local SQLite audit log; the golden eval set covers realistic coding-agent, browser-agent, and ops-agent scenarios with context-flip pairs; and users can define custom deny/confirm rules that Sentinel enforces deterministically.
 
-### Week 11: Sentinel CLI - Evaluation, Policy, and Execution
+### Week 11: Local Web Dashboard - Blockers, Settings, and Reports
 
-**Goal:** Build the primary developer-facing interface for the Summer MVP.
-
-**Tasks:**
-
-- Implement a `sentinel` CLI using a Python CLI framework such as Typer or Click.
-- Add local command evaluation:
-  - `sentinel eval --context "..." --command "..."`
-  - `sentinel eval --context "..." --history history.json --command "..."`
-- Add sandboxed execution:
-  - `sentinel run --context "..." --command "..."`
-- Add policy support:
-  - `sentinel policy validate sentinel.policy.yaml`
-  - `sentinel policy explain --command "..."`
-- Add local service management helpers:
-  - `sentinel server start`
-  - `sentinel health`
-- Make CLI output readable for humans and scriptable for CI through `--json`.
-
-**Deliverable:** DevOps teams can test agent commands and policies locally from the terminal.
-
-### Week 12: Sentinel CLI - Audit Log Workflows and Release Candidate
-
-**Goal:** Make the CLI useful for security review and operational debugging.
+**Goal:** Build the primary user-facing interface for the Summer MVP: a simple local web dashboard served by the existing FastAPI app, so users can manage Sentinel visually without touching config files.
 
 **Tasks:**
 
-- Add log inspection commands:
-  - `sentinel logs list --blocked`
-  - `sentinel logs show <request_id>`
-  - `sentinel logs tail`
-- Add filters for:
-  - verdict,
-  - environment,
-  - risk category,
-  - agent ID,
-  - time range.
-- Add CLI flows for confirmation-required actions:
-  - show why confirmation is needed,
-  - approve or deny a local confirmation request,
-  - retry with a confirmation token.
-- Run end-to-end tests covering API, CLI, Docker executor, and audit logging.
+- Serve a small single-page dashboard from the FastAPI app at the root path (no separate hosting, auth, or build infrastructure; plain static assets or a lightweight framework kept simple).
+- Custom blocker management:
+  - list, create, edit, enable/disable, and delete user-defined deny/confirm rules,
+  - validate rules on save and show which built-in protections they layer on top of,
+  - test a rule against a sample command before enabling it.
+- Settings:
+  - executor options (workspace, read-only mount, timeout, concurrency cap),
+  - policy profile selection per environment,
+  - clear indication of model status (loaded vs degraded).
+- Reports (backed by the Week 10 SQLite audit store):
+  - decision timeline with verdict/environment/agent filters,
+  - blocked-command list with reasons and drill-down to full request detail,
+  - simple charts: verdicts over time, top triggered rules, risk tier breakdown.
+- Confirmation queue:
+  - show pending confirm_required requests with reasons,
+  - approve or deny from the browser (wraps the existing POST /confirm flow).
+- Add API endpoints the dashboard needs (rules CRUD, audit queries, settings read/update) with tests.
+
+**Deliverable:** Users can open a local browser page to customize blockers, adjust settings, approve confirmations, and review reports without editing files by hand.
+
+### Week 12: Minimal CLI, End-to-End Hardening, and Release Candidate
+
+**Goal:** Add a small scriptable CLI for developer/CI workflows, harden the full pipeline, and freeze the Summer MVP.
+
+**Tasks:**
+
+- Implement a minimal `sentinel` CLI (Typer or Click) that wraps the existing API/decision logic — scriptability only, no interactive workflows:
+  - `sentinel eval --context "..." --command "..."` (with optional `--history history.json`),
+  - `sentinel run --context "..." --command "..."`,
+  - `sentinel logs list --blocked` with basic verdict/environment/time filters,
+  - `sentinel health`,
+  - `--json` output on every command for CI pipelines.
+- Run end-to-end tests covering API, dashboard endpoints, CLI, Docker executor, and audit logging.
 - Define the adapter contract a real agent would need to call Sentinel, including request shape, response handling, and recent-action history format.
 - If OpenClaw or another real agent exposes an easy command/tool hook by this point, run a non-blocking smoke test through the API or CLI. This validates the integration path but is not required for the Summer MVP release candidate.
 - Freeze the Summer MVP scope and document installation, local usage, and operational limits.
 
-**Deliverable:** A local-first Sentinel release candidate: guardrail engine, Docker sandbox, SQLite audit logging, and CLI workflows for evaluation, execution, policy validation, and blocked-command review.
+**Deliverable:** A local-first Sentinel release candidate: guardrail engine, Docker sandbox, SQLite audit logging, a local web dashboard for blockers/settings/reports/approvals, and a minimal CLI for scripting and CI.
 
 ## Summer MVP Non-Goals
 
 These are intentionally excluded from the first 12 weeks:
 
-- Enterprise web dashboard.
+- Enterprise web dashboard (multi-tenant, hosted; the local single-user dashboard in Week 11 is in scope).
 - Multi-tenant user management.
 - Hosted SaaS billing.
 - Organization-wide RBAC.

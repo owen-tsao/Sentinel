@@ -1,6 +1,6 @@
 # Project Sentinel
 
-Enterprise guardrail engine for AI-agent actions: evaluate commands with deterministic policy and sequence-aware ML, run approved actions in a local Docker executor, expose developer workflows through a CLI, and audit decisions to a local SQLite store.
+Enterprise guardrail engine for AI-agent actions: evaluate commands with deterministic policy and sequence-aware ML, run approved actions in a local Docker executor, manage blockers and reports through a local web dashboard (with a minimal CLI for scripting), and audit decisions to a local SQLite store.
 
 ## Docs
 

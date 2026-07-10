@@ -323,16 +323,22 @@ The `AuditStore` interface keeps the storage backend swappable: a hosted deploym
 
 Every request should be logged, including blocked and malformed requests when possible.
 
-### 5.9 Developer CLI
+### 5.9 Local Web Dashboard and Minimal CLI
 
-Purpose: Provide the primary Summer MVP interface for DevOps and security engineers.
+Purpose: Provide the primary Summer MVP interfaces. The local web dashboard is the main user-facing surface; a minimal CLI covers scripting and CI.
 
-Responsibilities:
+Dashboard responsibilities (served by the FastAPI app at localhost, single-user, no hosted infrastructure):
+
+- Manage custom deny/confirm blocker rules: list, create, edit, enable/disable, validate, and test against sample commands.
+- Adjust settings: executor options, policy profile per environment, and model status visibility.
+- Review reports from the SQLite audit store: decision timelines, blocked-command drill-downs, and simple charts.
+- Approve or deny pending confirmation requests from the browser.
+
+Minimal CLI responsibilities:
 
 - Evaluate commands locally against rules, policy, recent action history, and model routing.
 - Run approved commands through the local Docker executor.
-- Validate and explain policy files.
-- Inspect the local SQLite audit logs.
+- Inspect the local SQLite audit logs with basic filters.
 - Expose human-readable output and machine-readable `--json` output for CI workflows.
 
 ## 6. Technology Stack
@@ -713,8 +719,8 @@ sentinel/
 8. Dockerized Sentinel service.
 9. Local Docker executor for approved commands with documented security limitations.
 10. SQLite audit logging with JSONL export.
-11. Developer CLI for evaluation, policy testing, and execution.
-12. CLI audit-log workflows and Summer MVP release candidate.
+11. Local web dashboard for blocker management, settings, confirmation approvals, and audit reports.
+12. Minimal scriptable CLI, end-to-end hardening, and Summer MVP release candidate.
 
 ## 15. Evaluation Plan
 
@@ -754,21 +760,27 @@ sentinel/
 - Golden examples for context-dependent commands.
 - Golden examples for sequence-dependent commands.
 
-## 17. Developer CLI Plan
+## 17. Interface Plan: Local Dashboard and Minimal CLI
 
-The Summer MVP should prioritize a developer-facing CLI over agent-framework adapters.
+The Summer MVP should prioritize the local web dashboard as the primary user interface, with a minimal CLI for scripting and CI rather than a full interactive terminal workflow.
 
-Required CLI workflows:
+Dashboard workflows (Week 11):
+
+- Create, edit, test, and toggle custom blocker rules with validation feedback.
+- Adjust executor and policy settings without editing files.
+- Approve or deny pending confirmation requests.
+- Review audit reports: verdict timelines, blocked commands with reasons, top triggered rules, and risk tier breakdowns.
+
+Minimal CLI workflows (Week 12):
 
 - `sentinel eval --context "..." --command "..."` for local command evaluation.
 - `sentinel eval --history history.json --context "..." --command "..."` for sequence-aware evaluation.
 - `sentinel run --context "..." --command "..."` for evaluate-then-execute sandboxed runs.
-- `sentinel policy validate sentinel.policy.yaml` for local policy validation.
-- `sentinel policy explain --command "..."` for explaining deterministic routing and model usage.
-- `sentinel logs list --blocked`, `sentinel logs show <request_id>`, and `sentinel logs tail` for audit review.
+- `sentinel logs list --blocked` with basic verdict/environment/time filters for audit review.
+- `sentinel health` for service checks.
 - `--json` output for CI and automation.
 
-The CLI should expose whether a request was decided by rules, policy, model, or combined routing so DevOps users can understand latency and enforcement behavior.
+Both interfaces should expose whether a request was decided by rules, policy, model, or combined routing so users can understand latency and enforcement behavior.
 
 ### 17.1 Real-Agent Testing Position
 
