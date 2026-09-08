@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from sentinel.contracts import ActionOperation
+
 
 @dataclass(frozen=True)
 class ExecutionResult:
@@ -34,6 +36,15 @@ class ExecutionResult:
 
 class CommandExecutor(Protocol):
     """Executor boundary used by the API without depending on Docker details."""
+
+    def validate_configuration(self) -> None:
+        raise NotImplementedError
+
+    def validate_operation(self, operation: ActionOperation) -> None:
+        raise NotImplementedError
+
+    def validate_targets(self, targets: list[str]) -> None:
+        raise NotImplementedError
 
     def run(self, *, command: str, shell_type: str) -> ExecutionResult:
         raise NotImplementedError

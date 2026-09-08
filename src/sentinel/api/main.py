@@ -1,208 +1,1394 @@
-"""FastAPI application for Sentinel command evaluation."""
+"""FastAPI application for contract-aware shell authorization and execution."""
 
 from __future__ import annotations
 
 import os
+import posixpath
+import hashlib
 import threading
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator, Iterator
+from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 
-from sentinel.api.schemas import ConfirmRequest, ConfirmResponse, EvaluateRequest, EvaluateResponse, HealthResponse
-from sentinel.decision.confirmation import ConfirmationRequest, InMemoryConfirmationStore
-from sentinel.decision.engine import DecisionResult, RiskModelProtocol, evaluate_request
+from sentinel import __version__
+from sentinel.actions import (
+    CanonicalAction,
+    ShellCanonicalizationError,
+    canonicalize_shell_action,
+    fingerprint_action,
+)
+from sentinel.api.schemas import (
+    ApiRequest,
+    ContractEvaluateRequest,
+    EvaluateRequest,
+    EvaluateResponse,
+    HealthResponse,
+)
+from sentinel.approval import ApprovalBinding, InMemoryApprovalService
+from sentinel.authority import ContractAuthorityService
+from sentinel.audit import (
+    AuditEvent,
+    AuditFallbackFullError,
+    AuditHealth,
+    AuditQuery,
+    AuditStore,
+    AuditStoreError,
+    SQLiteAuditStore,
+)
+from sentinel.audit.redaction import redact
+from sentinel.contracts import (
+    ContractEnvironment,
+    ContractRecord,
+    ContractStoreError,
+    InMemoryContractStore,
+    SQLiteContractStore,
+)
+from sentinel.decision.contract_policy import (
+    ContractMatchResult,
+    match_action_to_contract,
+)
+from sentinel.decision.engine import (
+    DecisionResult,
+    RiskModelProtocol,
+    VERDICT_RISK_SCORES,
+    VERDICT_TO_RISK_TIER,
+    evaluate_contract_request,
+    evaluate_request,
+)
 from sentinel.decision.policy import PolicyProfile, load_policy_profile
 from sentinel.execution import CommandExecutor, DockerExecutor, ExecutionResult
 from sentinel.ml.inference import DEFAULT_ONNX_PATH, OnnxRiskModel
+from sentinel.session import (
+    ExecutionAttempt,
+    ExecutionAttemptBinding,
+    ExecutionAttemptConflictError,
+    InMemorySessionStore,
+    SessionAction,
+    SessionStore,
+    SQLiteSessionStore,
+)
+
+MAX_REQUEST_BODY_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class _ResolvedContractRequest:
+    record: ContractRecord | None
+    action: CanonicalAction | None
+    match: ContractMatchResult | None
+    environment: str
+    context: str
+    recent_actions: list[dict[str, Any]]
+    canonicalization_error: str | None
+    task_id: str | None
+
+    @property
+    def approval_binding(self) -> ApprovalBinding | None:
+        if self.record is None or self.match is None or not self.match.matches:
+            return None
+        return ApprovalBinding(
+            contract_id=self.record.contract_id,
+            contract_version=self.record.version,
+            authority_epoch=self.record.authority_epoch,
+            action_fingerprint=self.match.action_fingerprint,
+            environment=self.environment,
+            session_id=self.record.session_id,
+        )
+
+
+class _InMemoryAuditStore:
+    """Bounded default evidence store; full capacity fails closed."""
+
+    def __init__(self, capacity: int = 10_000) -> None:
+        self._capacity = capacity
+        self._events: list[AuditEvent] = []
+        self._lock = threading.Lock()
+
+    @property
+    def health(self) -> AuditHealth:
+        with self._lock:
+            full = len(self._events) >= self._capacity
+            return AuditHealth(
+                status="degraded" if full else "ok",
+                detail="Default audit evidence capacity is full." if full else None,
+                fallback_event_count=len(self._events),
+                fallback_capacity=self._capacity,
+            )
+
+    def write(self, event: AuditEvent) -> None:
+        with self._lock:
+            if len(self._events) >= self._capacity:
+                raise AuditFallbackFullError("default audit evidence capacity is full")
+            self._events.append(AuditEvent(**redact(_model_to_dict(event))))
+
+    def write_required(self, event: AuditEvent) -> None:
+        del event
+        raise AuditStoreError(
+            "durable audit storage is required for real execution admission"
+        )
+
+    def query(
+        self,
+        filters: AuditQuery | None = None,
+        **filter_values: object,
+    ) -> list[AuditEvent]:
+        selected = filters or AuditQuery(**filter_values)
+        with self._lock:
+            events = list(self._events)
+        for field in ("event_type", "verdict", "environment", "agent_id", "contract_id"):
+            value = getattr(selected, field)
+            if value is not None:
+                events = [event for event in events if getattr(event, field) == value]
+        if selected.start_time is not None:
+            events = [
+                event for event in events
+                if event.timestamp >= selected.start_time
+            ]
+        if selected.end_time is not None:
+            events = [
+                event for event in events
+                if event.timestamp <= selected.end_time
+            ]
+        return events[: selected.limit] if selected.limit is not None else events
+
+    def export_jsonl(self, destination: object, filters: AuditQuery | None = None, **filter_values: object) -> int:
+        raise NotImplementedError("use SQLiteAuditStore for JSONL export")
+
+
+class _ExecutorCapabilityError(ValueError):
+    """The canonical operation exceeds the injected executor's capabilities."""
+
+
+class _SessionLockPool:
+    """Bounded-lifetime per-session locks without an ever-growing key map."""
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._entries: dict[str, tuple[threading.RLock, int]] = {}
+
+    @contextmanager
+    def hold(self, session_id: str) -> Iterator[None]:
+        with self._guard:
+            lock, references = self._entries.get(
+                session_id,
+                (threading.RLock(), 0),
+            )
+            self._entries[session_id] = (lock, references + 1)
+        lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
+            with self._guard:
+                current_lock, current_references = self._entries[session_id]
+                if current_references == 1:
+                    del self._entries[session_id]
+                else:
+                    self._entries[session_id] = (
+                        current_lock,
+                        current_references - 1,
+                    )
 
 
 def create_app(
     *,
     model: RiskModelProtocol | None = None,
-    load_model: bool = True,
+    load_model: bool = False,
     policy_profile: PolicyProfile | None = None,
     load_policy: bool = True,
-    confirmation_store: InMemoryConfirmationStore | None = None,
+    contract_store: InMemoryContractStore | SQLiteContractStore | None = None,
+    session_store: SessionStore | None = None,
+    approval_service: InMemoryApprovalService | None = None,
+    audit_store: AuditStore | None = None,
     executor: CommandExecutor | None = None,
+    execution_environment: ContractEnvironment = "sandbox",
+    execution_environment_context: dict[str, str] | None = None,
+    execution_cwd: str | None = None,
+    confirmation_store: object | None = None,
 ) -> FastAPI:
+    """Build an app with injectable stores and fail-closed empty defaults."""
+
+    del confirmation_store  # Legacy injection is accepted but cannot authorize.
+    owned_stores: list[object] = []
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            for store in reversed(owned_stores):
+                close = getattr(store, "close", None)
+                if callable(close):
+                    close()
+
     app = FastAPI(
         title="Sentinel Guardrail API",
-        version="0.1.0",
-        description="Local evaluation API for AI-agent command execution guardrails.",
+        version=__version__,
+        description="Local contract-aware enforcement API for AI-agent shell actions.",
+        lifespan=lifespan,
     )
     app.state.risk_model = model
-    app.state.model_load_error = None
+    app.state.model_load_error = (
+        None
+        if model is not None or load_model
+        else "Model loading is disabled."
+    )
     app.state.policy_profile = policy_profile
     app.state.policy_load_error = None
-    app.state.confirmation_store = confirmation_store or InMemoryConfirmationStore()
+    state_database = os.environ.get("SENTINEL_STATE_DB")
+    app.state.contract_store = contract_store
+    if app.state.contract_store is None:
+        app.state.contract_store = (
+            SQLiteContractStore(state_database)
+            if state_database
+            else InMemoryContractStore()
+        )
+        owned_stores.append(app.state.contract_store)
+    app.state.session_store = session_store
+    if app.state.session_store is None:
+        app.state.session_store = (
+            SQLiteSessionStore(state_database)
+            if state_database
+            else InMemorySessionStore()
+        )
+        owned_stores.append(app.state.session_store)
+    app.state.approval_service = approval_service or InMemoryApprovalService()
+    app.state.audit_store = audit_store
+    if app.state.audit_store is None:
+        app.state.audit_store = (
+            SQLiteAuditStore(state_database)
+            if state_database
+            else _InMemoryAuditStore()
+        )
+        owned_stores.append(app.state.audit_store)
+    app.state.authority_service = ContractAuthorityService(
+        app.state.contract_store,
+        app.state.audit_store,
+    )
+    app.state.approval_service.set_issue_observer(
+        lambda token: _write_approval_issue_audit(app, token)
+    )
     app.state.executor = executor or _default_executor()
-    # Cap concurrent sandbox executions so slow containers cannot exhaust the
-    # shared request thread pool and starve /evaluate and /health.
-    app.state.execution_limiter = threading.BoundedSemaphore(_max_concurrent_executions())
+    executor_cwd = getattr(app.state.executor, "container_workspace", None)
+    configured_cwd = (
+        execution_cwd
+        if execution_cwd is not None
+        else executor_cwd if executor_cwd is not None else "/workspace"
+    )
+    if not isinstance(configured_cwd, str) or not configured_cwd.startswith("/"):
+        raise ValueError("execution_cwd must be an absolute container path")
+    normalized_cwd = posixpath.normpath(configured_cwd)
+    if execution_cwd is not None and executor_cwd is not None:
+        if not isinstance(executor_cwd, str) or not executor_cwd.startswith("/"):
+            raise ValueError(
+                "executor container_workspace must be an absolute container path"
+            )
+        if normalized_cwd != posixpath.normpath(executor_cwd):
+            raise ValueError(
+                "execution_cwd must match the executor container_workspace"
+            )
+    if execution_environment not in {"sandbox", "dev", "staging", "production"}:
+        raise ValueError("execution_environment is unsupported")
+    app.state.execution_cwd = normalized_cwd
+    app.state.execution_environment = execution_environment
+    app.state.execution_environment_context = dict(
+        execution_environment_context or {}
+    )
+    app.state.execution_limiter = threading.BoundedSemaphore(
+        _max_concurrent_executions()
+    )
+    app.state.session_locks = _SessionLockPool()
 
     if app.state.risk_model is None and load_model:
         try:
             app.state.risk_model = OnnxRiskModel()
         except Exception as exc:
             app.state.model_load_error = str(exc)
-
     if app.state.policy_profile is None and load_policy:
         try:
             app.state.policy_profile = load_policy_profile()
         except Exception as exc:
             app.state.policy_load_error = str(exc)
 
+    @app.middleware("http")
+    async def reject_oversized_bodies(request: Request, call_next: Any) -> Any:
+        raw_length = request.headers.get("content-length")
+        if raw_length:
+            try:
+                if int(raw_length) > MAX_REQUEST_BODY_BYTES:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"detail": "Request body exceeds 65536 bytes."},
+                    )
+            except ValueError:
+                return JSONResponse(
+                    status_code=400,
+                    content={"detail": "Invalid Content-Length header."},
+                )
+        original_receive = request._receive
+        received = 0
+        too_large = False
+
+        async def limited_receive() -> dict[str, Any]:
+            nonlocal received, too_large
+            message = await original_receive()
+            if message.get("type") == "http.request":
+                received += len(message.get("body", b""))
+                if received > MAX_REQUEST_BODY_BYTES:
+                    too_large = True
+                    return {
+                        "type": "http.request",
+                        "body": b"",
+                        "more_body": False,
+                    }
+            return message
+
+        request._receive = limited_receive
+        response = await call_next(request)
+        if too_large:
+            return JSONResponse(
+                status_code=413,
+                content={"detail": "Request body exceeds 65536 bytes."},
+            )
+        return response
+
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
         model_loaded = app.state.risk_model is not None
+        policy_loaded = app.state.policy_profile is not None
+        audit_health = _audit_health(app.state.audit_store)
+        details = [
+            detail
+            for detail in (
+                None if model_loaded else app.state.model_load_error or "Model is not loaded.",
+                None if policy_loaded else app.state.policy_load_error or "Policy is not loaded.",
+                audit_health.detail if audit_health.status == "degraded" else None,
+            )
+            if detail
+        ]
+        healthy = model_loaded and policy_loaded and audit_health.status == "ok"
         return HealthResponse(
-            status="ok" if model_loaded else "degraded",
+            status="ok" if healthy else "degraded",
             model_loaded=model_loaded,
+            policy_loaded=policy_loaded,
+            audit_status=audit_health.status,
             model_path=str(DEFAULT_ONNX_PATH),
-            detail=None if model_loaded else app.state.model_load_error or "Model is not loaded; gray-area requests require confirmation.",
+            model_detail=None if model_loaded else app.state.model_load_error or "Model is not loaded.",
+            policy_detail=None if policy_loaded else app.state.policy_load_error or "Policy is not loaded.",
+            audit_detail=audit_health.detail,
+            detail="; ".join(details) if details else None,
         )
 
     @app.post("/evaluate", response_model=EvaluateResponse)
-    def evaluate(payload: EvaluateRequest) -> EvaluateResponse:
-        return response_from_decision(_evaluate_payload(payload, app))
+    def evaluate(payload: ApiRequest) -> EvaluateResponse:
+        if isinstance(payload, ContractEvaluateRequest):
+            return _handle_contract(payload, app, execute=False)
+        return _handle_legacy(payload, app, execute=False)
 
     @app.post("/execute", response_model=EvaluateResponse)
-    def execute(payload: EvaluateRequest) -> EvaluateResponse:
-        decision = _evaluate_payload(payload, app)
-        if decision.verdict != "allow":
-            return response_from_decision(decision)
+    def execute(payload: ApiRequest) -> EvaluateResponse:
+        if isinstance(payload, ContractEvaluateRequest):
+            return _handle_contract(payload, app, execute=True)
+        return _handle_legacy(payload, app, execute=True)
 
-        # Non-blocking acquire: fail fast with 429 instead of queueing threads,
-        # so a burst of slow executions cannot freeze the whole API.
+    return app
+
+
+def _handle_contract(
+    payload: ContractEvaluateRequest,
+    app: FastAPI,
+    *,
+    execute: bool,
+) -> EvaluateResponse:
+    if execute:
+        if payload.attempt_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="attempt_id is required for contract-aware execution.",
+            )
+        return _handle_contract_execution(payload, app)
+
+    request_id = str(uuid4())
+    resolved = _resolve_contract_request(payload, app)
+    _write_pre_decision_audit(
+        app,
+        payload,
+        request_id,
+        resolved,
+        execute_requested=False,
+    )
+    decision = evaluate_contract_request(
+        context=resolved.context,
+        command=payload.action.raw_command,
+        environment=resolved.environment,
+        recent_actions=resolved.recent_actions,
+        contract_match=resolved.match,
+        action_operation=resolved.action.operation if resolved.action is not None else None,
+        canonicalization_error=resolved.canonicalization_error,
+        model=app.state.risk_model,
+        policy_profile=app.state.policy_profile,
+        policy_available=app.state.policy_profile is not None,
+        request_id_factory=lambda: request_id,
+    )
+
+    binding = resolved.approval_binding
+    approval_candidate = False
+    if decision.verdict == "confirm_required" and binding is not None:
+        if not approval_candidate:
+            pending = _request_approval(app, binding)
+            decision = _replace_decision(
+                decision,
+                reasons=[*decision.reasons, "approval:pending"],
+                approval_id=pending.approval_id,
+            )
+
+    _write_decision_audit(
+        app,
+        payload,
+        decision,
+        resolved,
+        execute_requested=False,
+    )
+    return response_from_decision(decision)
+
+
+def _handle_contract_execution(
+    payload: ContractEvaluateRequest,
+    app: FastAPI,
+) -> EvaluateResponse:
+    assert payload.attempt_id is not None
+    with app.state.session_locks.hold(payload.session_id):
+        request_id = str(uuid4())
+        resolved = _resolve_contract_request(payload, app)
+        existing = _existing_attempt_for_payload(payload, resolved, app)
+        if existing is not None:
+            return _response_for_existing_attempt(existing)
+        _write_optional_execution_telemetry(
+            _write_pre_decision_audit,
+            app,
+            payload,
+            request_id,
+            resolved,
+            execute_requested=True,
+        )
+        decision = evaluate_contract_request(
+            context=resolved.context,
+            command=payload.action.raw_command,
+            environment=resolved.environment,
+            recent_actions=resolved.recent_actions,
+            contract_match=resolved.match,
+            action_operation=(
+                resolved.action.operation if resolved.action is not None else None
+            ),
+            canonicalization_error=resolved.canonicalization_error,
+            model=app.state.risk_model,
+            policy_profile=app.state.policy_profile,
+            policy_available=app.state.policy_profile is not None,
+            request_id_factory=lambda: request_id,
+        )
+        binding = resolved.approval_binding
+        approval_candidate = (
+            decision.verdict == "confirm_required"
+            and binding is not None
+            and payload.approval_token is not None
+        )
+        if decision.verdict == "confirm_required" and binding is not None:
+            if not approval_candidate:
+                pending = _request_approval(app, binding)
+                decision = _replace_decision(
+                    decision,
+                    reasons=[*decision.reasons, "approval:pending"],
+                    approval_id=pending.approval_id,
+                )
+        _write_optional_execution_telemetry(
+            _write_decision_audit,
+            app,
+            payload,
+            decision,
+            resolved,
+            execute_requested=True,
+        )
+        if decision.verdict != "allow" and not approval_candidate:
+            return response_from_decision(decision)
+        if (
+            binding is None
+            or resolved.record is None
+            or resolved.action is None
+            or resolved.task_id is None
+        ):
+            return response_from_decision(
+                _execution_admission_block(
+                    app,
+                    payload,
+                    resolved,
+                    request_id,
+                    "contract:execution_recheck_failed",
+                )
+            )
+
+        attempt_binding = ExecutionAttemptBinding(
+            attempt_id=payload.attempt_id,
+            session_id=payload.session_id,
+            task_id=resolved.task_id,
+            contract_id=resolved.record.contract_id,
+            contract_version=resolved.record.version,
+            authority_epoch=resolved.record.authority_epoch,
+            action_fingerprint=binding.action_fingerprint,
+            environment=resolved.environment,
+        )
+        try:
+            _validate_execution_action(app, resolved.action)
+        except _ExecutorCapabilityError:
+            return response_from_decision(
+                _execution_admission_block(
+                    app,
+                    payload,
+                    resolved,
+                    request_id,
+                    "execution:unsupported_executor_capability",
+                )
+            )
+        except ValueError:
+            return response_from_decision(
+                _execution_admission_block(
+                    app,
+                    payload,
+                    resolved,
+                    request_id,
+                    "execution:unsafe_workspace_target",
+                )
+            )
         if not app.state.execution_limiter.acquire(blocking=False):
             raise HTTPException(
                 status_code=429,
                 detail="Too many concurrent sandbox executions; retry shortly.",
             )
         try:
-            execution = app.state.executor.run(command=payload.command, shell_type=payload.shell_type)
+            return _admit_run_and_persist(
+                app,
+                payload,
+                decision,
+                resolved,
+                attempt_binding=attempt_binding,
+                approval_candidate=approval_candidate,
+            )
         finally:
             app.state.execution_limiter.release()
+
+
+def _admit_run_and_persist(
+    app: FastAPI,
+    payload: ContractEvaluateRequest,
+    decision: DecisionResult,
+    resolved: _ResolvedContractRequest,
+    *,
+    attempt_binding: ExecutionAttemptBinding,
+    approval_candidate: bool,
+) -> EvaluateResponse:
+    record = resolved.record
+    action = resolved.action
+    assert record is not None
+    assert action is not None
+    try:
+        with app.state.contract_store.execution_guard(
+            record.contract_id,
+            expected_version=record.version,
+            expected_authority_epoch=record.authority_epoch,
+            session_id=payload.session_id,
+        ):
+            try:
+                if approval_candidate:
+                    assert payload.approval_token is not None
+                    approved = _approved_decision(decision)
+                    binding = resolved.approval_binding
+                    assert binding is not None
+                    consumed = app.state.approval_service.consume(
+                        payload.approval_token,
+                        binding,
+                        consume_observer=lambda token: _reserve_and_record_admission(
+                            app,
+                            payload,
+                            approved,
+                            resolved,
+                            attempt_binding,
+                            approval_id=token.approval_id,
+                        ),
+                    )
+                    if not consumed:
+                        rejected = _replace_decision(
+                            decision,
+                            reasons=[
+                                *decision.reasons,
+                                "approval:token_invalid_or_mismatch",
+                            ],
+                        )
+                        pending = _request_approval(app, binding)
+                        rejected = _replace_decision(
+                            rejected,
+                            reasons=[*rejected.reasons, "approval:pending"],
+                            approval_id=pending.approval_id,
+                        )
+                        _write_optional_execution_telemetry(
+                            _write_decision_audit,
+                            app,
+                            payload,
+                            rejected,
+                            resolved,
+                            execute_requested=True,
+                        )
+                        return response_from_decision(rejected)
+                    decision = approved
+                else:
+                    _reserve_and_record_admission(
+                        app,
+                        payload,
+                        decision,
+                        resolved,
+                        attempt_binding,
+                    )
+            except ExecutionAttemptConflictError as exc:
+                existing = app.state.session_store.get_attempt(
+                    attempt_binding.attempt_id
+                )
+                if existing is not None and existing.binding == attempt_binding:
+                    return _response_for_existing_attempt(existing)
+                raise _attempt_binding_conflict() from exc
+
+        # Admission is already durable and at-most-once before the executor
+        # starts. Authority changes after this point do not cancel this attempt.
+        execution = _run_executor(
+            app,
+            command=action.canonical_command or payload.action.raw_command,
+            shell_type="unknown",
+            slot_acquired=True,
+        )
+        completed = _replace_decision(
+            decision,
+            reasons=[*decision.reasons, "execution:sandbox_attempted"],
+            execution=execution,
+        )
+        response = response_from_decision(completed)
+        response_payload = _model_to_json_dict(response)
+        terminal_state = "failed" if execution.error is not None else "completed"
+        try:
+            app.state.session_store.transition_attempt(
+                attempt_binding.attempt_id,
+                expected_state="running",
+                new_state=terminal_state,
+                response_payload=response_payload,
+            )
+        except Exception as exc:
+            _mark_attempt_unknown(app, attempt_binding.attempt_id)
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "The executor returned, but its response could not be "
+                    "persisted. The attempt will not run again; manual "
+                    "inspection is required."
+                ),
+            ) from exc
+    except ContractStoreError:
+        stale = _resolve_contract_request(payload, app)
         return response_from_decision(
-            _replace_decision(
-                decision,
-                reasons=[*decision.reasons, "execution:sandbox_attempted"],
-                execution=execution,
+            _execution_admission_block(
+                app,
+                payload,
+                stale,
+                decision.request_id,
+                "contract:execution_admission_stale",
             )
         )
-
-    @app.post("/confirm", response_model=ConfirmResponse)
-    def confirm(payload: ConfirmRequest) -> ConfirmResponse:
-        token = app.state.confirmation_store.approve(payload.confirmation_id)
-        if token is None:
-            raise HTTPException(status_code=404, detail="Unknown confirmation_id")
-
-        return ConfirmResponse(
-            confirmation_id=token.confirmation_id,
-            confirmation_token=token.token,
-        )
-
-    return app
-
-
-def _default_executor() -> DockerExecutor:
-    """Build the executor from environment overrides so deployments can tune the sandbox without code changes."""
-
-    kwargs: dict[str, Any] = {}
-    image = os.environ.get("SENTINEL_EXECUTOR_IMAGE")
-    if image:
-        kwargs["image"] = image
-    workspace = os.environ.get("SENTINEL_EXECUTOR_WORKSPACE")
-    if workspace:
-        kwargs["workspace"] = Path(workspace)
-    timeout = _positive_int_env("SENTINEL_EXECUTOR_TIMEOUT_SECONDS")
-    if timeout is not None:
-        kwargs["timeout_seconds"] = timeout
-    readonly = os.environ.get("SENTINEL_EXECUTOR_READONLY_WORKSPACE")
-    if readonly is not None:
-        kwargs["read_only_workspace"] = readonly.strip().lower() in {"1", "true", "yes", "on"}
-    return DockerExecutor(**kwargs)
-
-
-def _max_concurrent_executions() -> int:
-    return _positive_int_env("SENTINEL_MAX_CONCURRENT_EXECUTIONS") or 8
-
-
-def _positive_int_env(name: str) -> int | None:
-    """Parse a positive integer env var, ignoring malformed or non-positive values.
-
-    Misconfiguration must not crash app creation (create_app runs at import),
-    so bad values fall back to defaults instead of raising.
-    """
-    raw = os.environ.get(name)
-    if not raw:
-        return None
     try:
-        value = int(raw)
-    except ValueError:
+        _write_post_execution_audit(app, payload, completed, resolved)
+    except HTTPException:
+        pass
+    return response
+
+
+def _reserve_and_record_admission(
+    app: FastAPI,
+    payload: ContractEvaluateRequest,
+    decision: DecisionResult,
+    resolved: _ResolvedContractRequest,
+    binding: ExecutionAttemptBinding,
+    *,
+    approval_id: str | None = None,
+) -> None:
+    attempt = app.state.session_store.reserve_attempt(binding)
+    if attempt.state != "reserved":
+        raise ExecutionAttemptConflictError("attempt:state_conflict")
+    try:
+        app.state.session_store.transition_attempt(
+            binding.attempt_id,
+            expected_state="reserved",
+            new_state="running",
+        )
+        _write_execution_admitted_audit(
+            app,
+            payload,
+            decision,
+            resolved,
+            approval_id=approval_id,
+        )
+        _append_admitted_session_action(app, payload, resolved)
+    except Exception:
+        _mark_attempt_unknown(app, binding.attempt_id)
+        raise
+
+
+def _mark_attempt_unknown(app: FastAPI, attempt_id: str) -> None:
+    attempt = app.state.session_store.get_attempt(attempt_id)
+    if attempt is None or attempt.state not in {"reserved", "running"}:
+        return
+    try:
+        app.state.session_store.transition_attempt(
+            attempt_id,
+            expected_state=attempt.state,
+            new_state="unknown",
+        )
+    except Exception:
+        pass
+
+
+def _response_for_existing_attempt(attempt: ExecutionAttempt) -> EvaluateResponse:
+    if attempt.state in {"completed", "failed"}:
+        assert attempt.response_payload is not None
+        return EvaluateResponse(**attempt.response_payload)
+    state_detail = {
+        "reserved": "is reserved and may already be admitted",
+        "running": "is already running",
+        "unknown": "has an unknown outcome and requires manual inspection",
+    }[attempt.state]
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"This attempt {state_detail}. Sentinel will not retry it "
+            "automatically."
+        ),
+    )
+
+
+def _existing_attempt_for_payload(
+    payload: ContractEvaluateRequest,
+    resolved: _ResolvedContractRequest,
+    app: FastAPI,
+) -> ExecutionAttempt | None:
+    assert payload.attempt_id is not None
+    attempt = app.state.session_store.get_attempt(payload.attempt_id)
+    if attempt is None:
         return None
-    return value if value > 0 else None
+    binding = attempt.binding
+    same_caller_binding = (
+        binding.session_id == payload.session_id
+        and binding.contract_id == payload.contract_id
+        and binding.contract_version == payload.version
+        and binding.environment == resolved.environment
+        and resolved.action is not None
+        and binding.action_fingerprint == fingerprint_action(resolved.action)
+    )
+    if not same_caller_binding:
+        raise _attempt_binding_conflict()
+    return attempt
 
 
-def _evaluate_payload(payload: EvaluateRequest, app: FastAPI) -> DecisionResult:
-    recent_actions = [_model_to_dict(action) for action in payload.recent_actions]
-    confirmation_request = _confirmation_request_from_payload(payload, recent_actions)
+def _attempt_binding_conflict() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail=(
+            "attempt_id was already used with a different execution binding; "
+            "the executor was not invoked."
+        ),
+    )
+
+
+def _execution_admission_block(
+    app: FastAPI,
+    payload: ContractEvaluateRequest,
+    resolved: _ResolvedContractRequest,
+    request_id: str,
+    reason_code: str,
+) -> DecisionResult:
+    blocked = evaluate_contract_request(
+        context=resolved.context,
+        command=payload.action.raw_command,
+        environment=resolved.environment,
+        recent_actions=resolved.recent_actions,
+        contract_match=resolved.match,
+        action_operation=(
+            resolved.action.operation if resolved.action is not None else None
+        ),
+        canonicalization_error=reason_code,
+        model=app.state.risk_model,
+        policy_profile=app.state.policy_profile,
+        policy_available=app.state.policy_profile is not None,
+        request_id_factory=lambda: request_id,
+    )
+    _write_decision_audit(
+        app,
+        payload,
+        blocked,
+        resolved,
+        execute_requested=True,
+    )
+    return blocked
+
+
+def _handle_legacy(
+    payload: EvaluateRequest,
+    app: FastAPI,
+    *,
+    execute: bool,
+) -> EvaluateResponse:
+    request_id = str(uuid4())
+    _write_legacy_pre_audit(app, payload, request_id)
     decision = evaluate_request(
         context=payload.context,
         command=payload.command,
         environment=payload.environment,
         shell_type=payload.shell_type,
-        recent_actions=recent_actions,
+        recent_actions=[_model_to_dict(action) for action in payload.recent_actions],
         model=app.state.risk_model,
         policy_profile=app.state.policy_profile,
+        request_id_factory=lambda: request_id,
     )
-    return _apply_confirmation_flow(
+    decision = _restrict_legacy_decision(decision)
+    _write_legacy_decision_audit(app, payload, decision, execute_requested=execute)
+    if not execute or decision.verdict != "allow":
+        return response_from_decision(decision)
+    execution = _run_executor(
+        app,
+        command=payload.command,
+        shell_type=payload.shell_type,
+    )
+    completed = _replace_decision(
         decision,
-        confirmation_request,
-        confirmation_token=payload.confirmation_token,
-        user_confirmed=payload.user_confirmed,
-        confirmation_store=app.state.confirmation_store,
+        reasons=[*decision.reasons, "execution:sandbox_attempted"],
+        execution=execution,
+    )
+    _write_legacy_post_audit(app, payload, completed)
+    return response_from_decision(completed)
+
+
+def _resolve_contract_request(
+    payload: ContractEvaluateRequest,
+    app: FastAPI,
+) -> _ResolvedContractRequest:
+    record = app.state.contract_store.get_active(payload.session_id)
+    environment = app.state.execution_environment
+    context = record.contract.objective if record else "No active contract."
+    recent = [
+        _session_action_to_history(action)
+        for action in app.state.session_store.get_recent_actions(payload.session_id)
+    ]
+    action: CanonicalAction | None = None
+    canonicalization_error: str | None = None
+    requested_cwd = posixpath.normpath(payload.action.cwd)
+    if requested_cwd != app.state.execution_cwd:
+        canonicalization_error = "action:untrusted_working_directory"
+    else:
+        try:
+            action = canonicalize_shell_action(
+                payload.action.raw_command,
+                environment=environment,
+                cwd=app.state.execution_cwd,
+                environment_context=app.state.execution_environment_context,
+            )
+        except ShellCanonicalizationError as exc:
+            canonicalization_error = exc.reason_code
+
+    match: ContractMatchResult | None = None
+    if record is not None and action is not None:
+        match = match_action_to_contract(
+            record,
+            action,
+            expected_contract_id=payload.contract_id,
+            expected_version=payload.version,
+            session_id=payload.session_id,
+            active_task_id=record.task_id,
+        )
+    return _ResolvedContractRequest(
+        record=record,
+        action=action,
+        match=match,
+        environment=environment,
+        context=context,
+        recent_actions=recent,
+        canonicalization_error=canonicalization_error,
+        task_id=record.task_id if record else None,
     )
 
 
-def _apply_confirmation_flow(
-    decision: DecisionResult,
-    confirmation_request: ConfirmationRequest,
-    *,
-    confirmation_token: str | None,
-    user_confirmed: bool,
-    confirmation_store: InMemoryConfirmationStore,
-) -> DecisionResult:
-    if decision.verdict != "confirm_required":
+def _restrict_legacy_decision(decision: DecisionResult) -> DecisionResult:
+    if decision.verdict == "block":
         return decision
-
-    reasons = list(decision.reasons)
-    if confirmation_token:
-        if confirmation_store.consume_token(confirmation_token, confirmation_request):
-            return _confirmed_decision(decision)
-        reasons.append("confirmation:token_invalid_or_mismatch")
-    elif user_confirmed:
-        reasons.append("confirmation:user_confirmed_untrusted_without_token")
-
-    pending = confirmation_store.create_pending(confirmation_request, decision.verdict)
     return _replace_decision(
         decision,
-        reasons=[*reasons, "confirmation:pending"],
-        confirmation_id=pending.confirmation_id,
+        verdict="confirm_required",
+        reasons=[*decision.reasons, "legacy:non_authorizing_request"],
+        routing_path="policy",
+        agent_message=(
+            "Legacy requests cannot carry approval authority. Use an active "
+            "contract request for this action."
+        ),
+        execution=None,
     )
 
 
-def _confirmed_decision(decision: DecisionResult) -> DecisionResult:
+def _approved_decision(decision: DecisionResult) -> DecisionResult:
     return _replace_decision(
         decision,
         verdict="allow",
-        reasons=[*decision.reasons, "confirmation:token_valid"],
-        routing_path="confirmation",
-        agent_message="Sentinel allows this command because a human approved this exact request.",
+        reasons=[*decision.reasons, "approval:token_valid"],
+        routing_path="approval",
+        agent_message="Sentinel allows this exact action under a protected one-use approval.",
         suggested_safe_actions=[],
-        confirmation_id=None,
+        approval_id=None,
     )
+
+
+def _run_executor(
+    app: FastAPI,
+    *,
+    command: str,
+    shell_type: str,
+    slot_acquired: bool = False,
+) -> ExecutionResult:
+    if not slot_acquired and not app.state.execution_limiter.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many concurrent sandbox executions; retry shortly.",
+        )
+    try:
+        try:
+            return app.state.executor.run(command=command, shell_type=shell_type)
+        except Exception as exc:
+            return ExecutionResult(
+                stdout="",
+                stderr="",
+                exit_code=None,
+                timed_out=False,
+                duration_ms=0,
+                error=f"Executor failed: {type(exc).__name__}",
+            )
+    finally:
+        if not slot_acquired:
+            app.state.execution_limiter.release()
+
+
+def _validate_execution_action(app: FastAPI, action: CanonicalAction) -> None:
+    validators = {
+        name: getattr(app.state.executor, name, None)
+        for name in (
+            "validate_configuration",
+            "validate_operation",
+            "validate_targets",
+            "run",
+        )
+    }
+    missing = [
+        name
+        for name, validator in validators.items()
+        if not callable(validator)
+    ]
+    if missing:
+        raise _ExecutorCapabilityError(
+            "executor is missing required methods: "
+            + ", ".join(sorted(missing))
+        )
+    validators["validate_configuration"]()
+    operation_validator = getattr(app.state.executor, "validate_operation", None)
+    try:
+        operation_validator(action.operation)
+    except ValueError as exc:
+        raise _ExecutorCapabilityError(str(exc)) from exc
+    validators["validate_targets"](action.targets)
+
+
+def _request_approval(
+    app: FastAPI,
+    binding: ApprovalBinding,
+) -> Any:
+    try:
+        return app.state.approval_service.request(binding)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Approval queue is unavailable; request failed closed.",
+        ) from exc
+
+
+def _write_pre_decision_audit(
+    app: FastAPI,
+    payload: ContractEvaluateRequest,
+    request_id: str,
+    resolved: _ResolvedContractRequest,
+    *,
+    execute_requested: bool,
+) -> None:
+    details: dict[str, Any] = {
+        "action_family": "shell",
+        "execution_requested": execute_requested,
+        **_untrusted_identity_details(payload.user_id, payload.agent_id),
+    }
+    if resolved.match is not None:
+        details["action_fingerprint"] = resolved.match.action_fingerprint
+    _audit_write(
+        app,
+        AuditEvent(
+            event_type="pre_decision",
+            request_id=request_id,
+            session_id=payload.session_id,
+            task_id=resolved.task_id,
+            contract_id=payload.contract_id,
+            contract_version=payload.version,
+            environment=resolved.environment,  # type: ignore[arg-type]
+            details=details,
+        ),
+    )
+
+
+def _write_approval_issue_audit(app: FastAPI, token: Any) -> None:
+    binding = token.binding
+    _audit_write(
+        app,
+        AuditEvent(
+            event_type="exact_action_approved",
+            user_id=token.approver_id,
+            session_id=binding.session_id,
+            contract_id=binding.contract_id,
+            contract_version=binding.contract_version,
+            environment=binding.environment,
+            reason_codes=["approval:issued_by_protected_channel"],
+            details={
+                "approval_id": token.approval_id,
+                "approver_channel": token.approver_channel,
+                "action_fingerprint": binding.action_fingerprint,
+            },
+        ),
+    )
+
+
+def _write_execution_admitted_audit(
+    app: FastAPI,
+    payload: ContractEvaluateRequest,
+    decision: DecisionResult,
+    resolved: _ResolvedContractRequest,
+    approval_id: str | None = None,
+) -> None:
+    _audit_write_required(
+        app,
+        AuditEvent(
+            event_type="execution_admitted",
+            request_id=decision.request_id,
+            session_id=payload.session_id,
+            task_id=resolved.task_id,
+            contract_id=payload.contract_id,
+            contract_version=payload.version,
+            environment=resolved.environment,  # type: ignore[arg-type]
+            verdict="allow",
+            reason_codes=decision.reasons,
+            details={
+                "attempt_id": payload.attempt_id,
+                "action_fingerprint": (
+                    resolved.match.action_fingerprint if resolved.match else None
+                ),
+                "authority_epoch": (
+                    resolved.record.authority_epoch if resolved.record else None
+                ),
+                "approval_id": approval_id,
+                **_untrusted_identity_details(payload.user_id, payload.agent_id),
+            },
+        ),
+    )
+
+
+def _write_post_execution_audit(
+    app: FastAPI,
+    payload: ContractEvaluateRequest,
+    decision: DecisionResult,
+    resolved: _ResolvedContractRequest,
+) -> None:
+    execution = decision.execution
+    assert execution is not None
+    _audit_write(
+        app,
+        AuditEvent(
+            event_type="post_execution",
+            request_id=decision.request_id,
+            session_id=payload.session_id,
+            task_id=resolved.task_id,
+            contract_id=payload.contract_id,
+            contract_version=payload.version,
+            environment=resolved.environment,  # type: ignore[arg-type]
+            verdict="allow",
+            reason_codes=decision.reasons,
+            details={
+                "action_fingerprint": (
+                    resolved.match.action_fingerprint if resolved.match else None
+                ),
+                "exit_code": execution.exit_code,
+                "timed_out": execution.timed_out,
+                "executor_error": execution.error is not None,
+                **_untrusted_identity_details(payload.user_id, payload.agent_id),
+            },
+        ),
+    )
+
+
+def _write_decision_audit(
+    app: FastAPI,
+    payload: ContractEvaluateRequest,
+    decision: DecisionResult,
+    resolved: _ResolvedContractRequest,
+    *,
+    execute_requested: bool,
+) -> None:
+    details: dict[str, Any] = {
+        "action_family": "shell",
+        "execution_requested": execute_requested,
+        **_untrusted_identity_details(payload.user_id, payload.agent_id),
+        "execution_route": (
+            "docker" if execute_requested and decision.verdict == "allow" else "none"
+        ),
+    }
+    if resolved.match is not None:
+        details["action_fingerprint"] = resolved.match.action_fingerprint
+    _audit_write(
+        app,
+        AuditEvent(
+            event_type="decision",
+            request_id=decision.request_id,
+            session_id=payload.session_id,
+            task_id=resolved.task_id,
+            contract_id=payload.contract_id,
+            contract_version=payload.version,
+            environment=resolved.environment,  # type: ignore[arg-type]
+            verdict=decision.verdict,
+            reason_codes=decision.reasons,
+            details=details,
+        ),
+    )
+
+
+def _append_admitted_session_action(
+    app: FastAPI,
+    payload: ContractEvaluateRequest,
+    resolved: _ResolvedContractRequest,
+) -> None:
+    action = resolved.action
+    record = resolved.record
+    assert action is not None
+    assert record is not None
+    try:
+        app.state.session_store.append_action(
+            payload.session_id,
+            SessionAction(
+                action_id=f"attempt:{payload.attempt_id}",
+                action_type="shell.execute",
+                summary=(
+                    f"{action.family} {action.operation} "
+                    f"targets={len(action.targets)} "
+                    f"effects={','.join(sorted(action.effects)[:16]) or 'none'}"
+                ),
+                task_id=record.task_id,
+                sensitive_resources=_security_categories(action),
+                metadata={
+                    "admitted": True,
+                    "family": action.family,
+                    "operation": action.operation,
+                    "target_count": len(action.targets),
+                    "audience_target_count": len(action.audience_targets),
+                    "effects": sorted(action.effects)[:32],
+                    "security_categories": _security_categories(action),
+                    "target_hashes": [
+                        hashlib.sha256(target.encode("utf-8")).hexdigest()
+                        for target in action.targets[:32]
+                    ],
+                },
+            ),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Execution admission history could not be retained; executor was not started.",
+        ) from exc
+
+
+def _write_legacy_pre_audit(
+    app: FastAPI,
+    payload: EvaluateRequest,
+    request_id: str,
+) -> None:
+    _audit_write(
+        app,
+        AuditEvent(
+            event_type="pre_decision",
+            request_id=request_id,
+            session_id=payload.session_id,
+            environment=payload.environment,
+            details={
+                "legacy_non_authorizing": True,
+                **_untrusted_identity_details(payload.user_id, payload.agent_id),
+            },
+        ),
+    )
+
+
+def _write_legacy_post_audit(
+    app: FastAPI,
+    payload: EvaluateRequest,
+    decision: DecisionResult,
+) -> None:
+    execution = decision.execution
+    assert execution is not None
+    _audit_write(
+        app,
+        AuditEvent(
+            event_type="post_execution",
+            request_id=decision.request_id,
+            session_id=payload.session_id,
+            environment=payload.environment,
+            verdict="allow",
+            reason_codes=decision.reasons,
+            details={
+                "legacy_non_authorizing": True,
+                "exit_code": execution.exit_code,
+                "timed_out": execution.timed_out,
+                **_untrusted_identity_details(payload.user_id, payload.agent_id),
+            },
+        ),
+    )
+
+
+def _write_legacy_decision_audit(
+    app: FastAPI,
+    payload: EvaluateRequest,
+    decision: DecisionResult,
+    *,
+    execute_requested: bool,
+) -> None:
+    _audit_write(
+        app,
+        AuditEvent(
+            event_type="decision",
+            request_id=decision.request_id,
+            session_id=payload.session_id,
+            environment=payload.environment,
+            verdict=decision.verdict,
+            reason_codes=decision.reasons,
+            details={
+                "legacy_non_authorizing": True,
+                "execution_requested": execute_requested,
+                "execution_route": (
+                    "docker"
+                    if execute_requested and decision.verdict == "allow"
+                    else "none"
+                ),
+                **_untrusted_identity_details(payload.user_id, payload.agent_id),
+            },
+        ),
+    )
+
+
+def _audit_write(app: FastAPI, event: AuditEvent) -> None:
+    try:
+        app.state.audit_store.write(event)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Audit evidence could not be retained; request failed closed.",
+        ) from exc
+
+
+def _audit_write_required(app: FastAPI, event: AuditEvent) -> None:
+    try:
+        app.state.audit_store.write_required(event)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Required audit evidence could not be committed; "
+                "executor was not started."
+            ),
+        ) from exc
+
+
+def _write_optional_execution_telemetry(
+    writer: Any,
+    *args: Any,
+    **kwargs: Any,
+) -> None:
+    try:
+        writer(*args, **kwargs)
+    except HTTPException:
+        pass
+
+
+def _untrusted_identity_details(user_id: str, agent_id: str) -> dict[str, Any]:
+    return {
+        "caller_identity_trusted": False,
+        "claimed_user_id_hash": hashlib.sha256(user_id.encode("utf-8")).hexdigest(),
+        "claimed_agent_id_hash": hashlib.sha256(agent_id.encode("utf-8")).hexdigest(),
+    }
+
+
+def _audit_health(store: AuditStore) -> AuditHealth:
+    try:
+        return store.health
+    except Exception as exc:
+        return AuditHealth(
+            status="degraded",
+            detail=f"Audit health unavailable: {type(exc).__name__}",
+            fallback_event_count=0,
+            fallback_capacity=0,
+        )
+
+
+def _session_action_to_history(action: SessionAction) -> dict[str, Any]:
+    return {
+        "type": action.action_type,
+        "summary": action.summary,
+        "sensitive_resources": list(action.sensitive_resources),
+        "metadata": dict(action.metadata),
+    }
+
+
+def _security_categories(action: CanonicalAction) -> list[str]:
+    categories: set[str] = set()
+    lowered_targets = [target.lower() for target in action.targets]
+    if any(
+        indicator in target
+        for target in lowered_targets
+        for indicator in (
+            ".env",
+            ".aws",
+            "credential",
+            "id_rsa",
+            ".pem",
+            "private_key",
+            "secret",
+        )
+    ):
+        categories.add("credential")
+    if any(".env" in target for target in lowered_targets):
+        categories.add("environment_variables")
+    if any("customer" in target for target in lowered_targets):
+        categories.add("customer_data")
+    if action.environment == "production":
+        categories.add("production")
+    if action.operation in {"network", "external_communication"}:
+        categories.add("external_communication")
+    categories.update(
+        effect
+        for effect in action.effects
+        if effect in {"credential_access", "network", "external_communication"}
+    )
+    return sorted(categories)
 
 
 def _replace_decision(
@@ -213,23 +1399,38 @@ def _replace_decision(
     routing_path: str | None = None,
     agent_message: str | None = None,
     suggested_safe_actions: list[str] | None = None,
-    confirmation_id: str | None = None,
+    approval_id: str | None = None,
     execution: ExecutionResult | None = None,
 ) -> DecisionResult:
-    return DecisionResult(
+    selected_verdict = verdict or decision.verdict
+    replaced = DecisionResult(
         request_id=decision.request_id,
-        verdict=verdict or decision.verdict,  # type: ignore[arg-type]
-        risk_score=decision.risk_score,
-        risk_tier=decision.risk_tier,
+        verdict=selected_verdict,  # type: ignore[arg-type]
+        risk_score=(
+            VERDICT_RISK_SCORES[selected_verdict]  # type: ignore[index]
+            if verdict is not None
+            else decision.risk_score
+        ),
+        risk_tier=(
+            VERDICT_TO_RISK_TIER[selected_verdict]  # type: ignore[index]
+            if verdict is not None
+            else decision.risk_tier
+        ),
         reasons=reasons if reasons is not None else decision.reasons,
         routing_path=routing_path or decision.routing_path,  # type: ignore[arg-type]
         agent_message=agent_message or decision.agent_message,
-        suggested_safe_actions=suggested_safe_actions if suggested_safe_actions is not None else decision.suggested_safe_actions,
+        suggested_safe_actions=(
+            suggested_safe_actions
+            if suggested_safe_actions is not None
+            else decision.suggested_safe_actions
+        ),
         rule_decision=decision.rule_decision,
         model_prediction=decision.model_prediction,
-        confirmation_id=confirmation_id,
+        confirmation_id=decision.confirmation_id,
+        approval_id=approval_id,
         execution=execution if execution is not None else decision.execution,
     )
+    return replaced
 
 
 def response_from_decision(decision: DecisionResult) -> EvaluateResponse:
@@ -243,20 +1444,12 @@ def response_from_decision(decision: DecisionResult) -> EvaluateResponse:
         agent_message=decision.agent_message,
         suggested_safe_actions=decision.suggested_safe_actions,
         confirmation_id=decision.confirmation_id,
-        execution=decision.execution.to_response_payload() if decision.execution is not None else None,
-    )
-
-
-def _confirmation_request_from_payload(payload: EvaluateRequest, recent_actions: list[dict[str, Any]]) -> ConfirmationRequest:
-    return ConfirmationRequest(
-        context=payload.context,
-        command=payload.command,
-        environment=payload.environment,
-        shell_type=payload.shell_type,
-        recent_actions=recent_actions,
-        session_id=payload.session_id,
-        agent_id=payload.agent_id,
-        user_id=payload.user_id,
+        approval_id=decision.approval_id,
+        execution=(
+            decision.execution.to_response_payload()
+            if decision.execution is not None
+            else None
+        ),
     )
 
 
@@ -268,5 +1461,69 @@ def _model_to_dict(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
-app = create_app()
+def _model_to_json_dict(value: Any) -> dict[str, Any]:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json", warnings=False)
+    if hasattr(value, "json"):
+        import json
 
+        return json.loads(value.json())
+    return dict(value)
+
+
+def _default_executor() -> DockerExecutor:
+    kwargs: dict[str, Any] = {}
+    image = os.environ.get("SENTINEL_EXECUTOR_IMAGE")
+    if image:
+        kwargs["image"] = image
+    workspace = os.environ.get("SENTINEL_EXECUTOR_WORKSPACE")
+    if workspace:
+        kwargs["workspace"] = Path(workspace)
+    timeout = _positive_int_env("SENTINEL_EXECUTOR_TIMEOUT_SECONDS")
+    if timeout is not None:
+        kwargs["timeout_seconds"] = timeout
+    readonly = os.environ.get("SENTINEL_EXECUTOR_READONLY_WORKSPACE")
+    if readonly is not None:
+        kwargs["read_only_workspace"] = _strict_bool_env(
+            "SENTINEL_EXECUTOR_READONLY_WORKSPACE",
+            readonly,
+        )
+    return DockerExecutor(**kwargs)
+
+
+def _max_concurrent_executions() -> int:
+    return _positive_int_env("SENTINEL_MAX_CONCURRENT_EXECUTIONS") or 8
+
+
+def _positive_int_env(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _strict_bool_env(name: str, raw: str) -> bool:
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a recognized boolean value")
+
+
+def _module_ml_enabled() -> bool:
+    raw = os.environ.get("SENTINEL_ENABLE_ML")
+    if raw is None or raw == "false":
+        return False
+    if raw == "true":
+        return True
+    raise ValueError(
+        "SENTINEL_ENABLE_ML must be exactly 'true' or 'false'"
+    )
+
+
+app = create_app(load_model=_module_ml_enabled())

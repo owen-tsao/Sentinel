@@ -8,8 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     HOME=/tmp
 
-RUN groupadd --system sentinel \
-    && useradd --system --gid sentinel --home-dir /workspace --shell /usr/sbin/nologin sentinel \
+RUN groupadd --gid 65532 sentinel \
+    && useradd --uid 65532 --gid 65532 --home-dir /workspace --shell /usr/sbin/nologin sentinel \
     && mkdir -p /workspace /tmp/sentinel \
     && chown -R sentinel:sentinel /workspace /tmp/sentinel
 

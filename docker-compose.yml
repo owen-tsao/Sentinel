@@ -7,7 +7,7 @@ services:
       context: .
       dockerfile: docker/api.Dockerfile
     ports:
-      - "${SENTINEL_API_PORT:-8000}:8000"
+      - "127.0.0.1:${SENTINEL_API_PORT:-8000}:8000"
     volumes:
       - ./policies:/app/policies:ro
       - ./models:/app/models:ro
