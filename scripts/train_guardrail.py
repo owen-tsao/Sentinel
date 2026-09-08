@@ -9,7 +9,10 @@ and decision layers.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.metadata as importlib_metadata
 import json
+import platform
 import random
 import sys
 from dataclasses import dataclass
@@ -27,6 +30,32 @@ DEFAULT_CHECKPOINT_OBJECTIVE = "bounded_fpr"
 DEFAULT_CHECKPOINT_MIN_RECALL = 0.9
 DEFAULT_CHECKPOINT_MAX_FPR = 0.3
 CHECKPOINT_OBJECTIVES = ("bounded_fpr", "dangerous_recall")
+INPUT_FORMAT_VERSION = "sentinel-bounded-fields-v3"
+MODEL_COMMAND_CHARS = 128
+MODEL_CONTEXT_CHARS = 400
+MODEL_HISTORY_ITEMS = 3
+MODEL_HISTORY_FIELD_CHARS = 48
+MODEL_HISTORY_TOTAL_CHARS = 160
+TRAINING_METADATA_SCHEMA_VERSION = "sentinel-training-metadata-v1"
+CHECKPOINT_ARTIFACT_NAMES = {
+    "config.json",
+    "model.safetensors",
+    "pytorch_model.bin",
+    "special_tokens_map.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.txt",
+}
+GROUP_FIELDS = ("trajectory_id", "template_family", "contract_group_id", "group_id")
+SYNTHETIC_SOURCE_MARKERS = (
+    "synthetic",
+    "generated",
+    "llm",
+    "gpt",
+    "claude",
+    "model_failure",
+)
+TRUSTED_PROVENANCE_KINDS = {"human_authored", "benchmark", "observed_trace"}
 
 
 @dataclass(frozen=True)
@@ -54,34 +83,172 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def validate_training_splits(
+    train_rows: list[dict[str, Any]],
+    validation_rows: list[dict[str, Any]],
+    eval_rows: list[dict[str, Any]],
+) -> None:
+    """Reject direct training inputs that bypass pipeline integrity checks."""
+
+    group_owners: dict[tuple[str, str], str] = {}
+    examples: dict[tuple[str, str, str, str], tuple[int, str]] = {}
+    for split_name, rows in (
+        ("train", train_rows),
+        ("validation", validation_rows),
+        ("eval", eval_rows),
+    ):
+        for index, row in enumerate(rows, start=1):
+            row_id = str(row.get("id", f"{split_name}-{index}"))
+            source = str(row.get("source", "")).lower()
+            provenance = row.get("provenance")
+            provenance_kind = (
+                str(
+                    provenance.get("kind")
+                    or provenance.get("origin")
+                    or provenance.get("type")
+                    or ""
+                )
+                .strip()
+                .lower()
+                .replace("-", "_")
+                if isinstance(provenance, dict)
+                else ""
+            )
+            synthetic = (
+                row.get("is_synthetic") is True
+                or any(marker in source for marker in SYNTHETIC_SOURCE_MARKERS)
+                or bool(provenance_kind)
+                and provenance_kind not in TRUSTED_PROVENANCE_KINDS
+            )
+            if synthetic:
+                reviewed = (
+                    row.get("review_status") == "human_reviewed"
+                    and all(
+                        str(row.get(field, "")).strip()
+                        for field in (
+                            "reviewer_id",
+                            "reviewed_at",
+                            "review_policy_version",
+                            "review_content_sha256",
+                        )
+                    )
+                    and str(row["review_content_sha256"]).lower()
+                    == _training_review_content_sha256(row)
+                )
+                if not reviewed:
+                    raise ValueError(
+                        f"{row_id}: unreviewed synthetic row cannot be used for training"
+                    )
+            groups = [
+                (field, str(row[field]))
+                for field in GROUP_FIELDS
+                if str(row.get(field, "")).strip()
+            ]
+            if not groups:
+                raise ValueError(
+                    f"{row_id}: training rows require at least one grouping identifier"
+                )
+            for group in groups:
+                owner = group_owners.setdefault(group, split_name)
+                if owner != split_name:
+                    raise ValueError(
+                        f"{row_id}: group {group} overlaps {owner} and {split_name}"
+                    )
+            key = (
+                str(row.get("context", "")),
+                json.dumps(row.get("recent_actions", []), sort_keys=True),
+                str(row.get("command", "")),
+                str(row.get("environment", "")),
+            )
+            label = row.get("label")
+            if type(label) is not int or label not in (0, 1):
+                raise ValueError(f"{row_id}: label must be integer 0 or 1")
+            previous = examples.setdefault(key, (int(label), row_id))
+            if previous[0] != int(label):
+                raise ValueError(
+                    f"{row_id}: conflicts with {previous[1]} for identical example"
+                )
+
+
+def _training_review_content_sha256(row: dict[str, Any]) -> str:
+    payload = {
+        key: value
+        for key, value in row.items()
+        if key not in {"review_status", "review_content_sha256"}
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def format_recent_actions(recent_actions: Any) -> str:
     if not isinstance(recent_actions, list) or not recent_actions:
         return "None"
 
     formatted: list[str] = []
-    for index, action in enumerate(recent_actions[-5:], start=1):
+    for index, action in enumerate(recent_actions[-MODEL_HISTORY_ITEMS:], start=1):
         if not isinstance(action, dict):
-            formatted.append(f"{index}. {str(action)[:240]}")
+            formatted.append(
+                f"{index}. {_head_tail_excerpt(str(action), MODEL_HISTORY_FIELD_CHARS)}"
+            )
             continue
-        summary = str(action.get("summary", "")).strip() or "No summary"
+        summary = _head_tail_excerpt(
+            str(action.get("summary", "")).strip() or "No summary",
+            MODEL_HISTORY_FIELD_CHARS,
+        )
         action_type = str(action.get("type", "unknown")).strip() or "unknown"
         resources = action.get("sensitive_resources", [])
-        resources_text = ", ".join(str(resource) for resource in resources) if isinstance(resources, list) and resources else "none"
+        resources_text = (
+            _head_tail_excerpt(
+                ", ".join(str(resource) for resource in resources),
+                MODEL_HISTORY_FIELD_CHARS,
+            )
+            if isinstance(resources, list) and resources
+            else "none"
+        )
         formatted.append(f"{index}. type={action_type}; summary={summary}; sensitive_resources={resources_text}")
-    return "\n".join(formatted)
+    return _head_tail_excerpt(
+        "\n".join(formatted),
+        MODEL_HISTORY_TOTAL_CHARS,
+    )
 
 
 def row_to_text(row: dict[str, Any]) -> str:
     """Format one Sentinel row as the text DistilBERT will classify."""
 
+    proposed_action = row.get("command") or row.get("action") or row.get("proposed_action") or ""
+    if isinstance(proposed_action, dict):
+        proposed_action = proposed_action.get("raw_command") or json.dumps(proposed_action, sort_keys=True)
+    command_text = _head_tail_excerpt(str(proposed_action).strip(), MODEL_COMMAND_CHARS)
+    context_text = _head_tail_excerpt(
+        str(row.get("context", "")).strip(),
+        MODEL_CONTEXT_CHARS,
+    )
     return "\n".join(
         [
-            f"Context: {str(row.get('context', '')).strip()}",
-            f"Recent actions:\n{format_recent_actions(row.get('recent_actions'))}",
+            # Keep this byte-for-byte aligned with serving. Bound each field so
+            # long caller input cannot hide the command suffix or recent actions.
+            f"Command: {command_text}",
             f"Environment: {str(row.get('environment', 'sandbox')).strip()}",
-            f"Command: {str(row.get('command', '')).strip()}",
+            f"Recent actions:\n{format_recent_actions(row.get('recent_actions'))}",
+            f"Context: {context_text}",
         ]
     )
+
+
+def _head_tail_excerpt(value: str, maximum_chars: int) -> str:
+    if len(value) <= maximum_chars:
+        return value
+    marker = " …[middle omitted]… "
+    remaining = maximum_chars - len(marker)
+    left = remaining // 2
+    right = remaining - left
+    return f"{value[:left]}{marker}{value[-right:]}"
 
 
 def rows_to_examples(rows: list[dict[str, Any]], limit: int | None = None) -> list[TrainingExample]:
@@ -219,6 +386,14 @@ def build_checkpoint_candidate(
     min_recall: float,
     max_fpr: float,
 ) -> dict[str, Any]:
+    if metrics.get("dangerous_recall") is None:
+        raise ValueError(
+            "checkpoint selection requires validation examples with label=1"
+        )
+    if metrics.get("false_positive_rate") is None:
+        raise ValueError(
+            "checkpoint selection requires validation examples with label=0"
+        )
     recall = _metric_value(metrics.get("dangerous_recall"))
     fpr = _metric_value(metrics.get("false_positive_rate"))
     accuracy = _metric_value(metrics.get("accuracy"))
@@ -304,7 +479,168 @@ def parse_thresholds(value: str) -> list[float]:
     return thresholds
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def build_training_metadata(
+    args: argparse.Namespace,
+    tokenizer: Any,
+    *,
+    model: Any | None = None,
+    torch: Any | None = None,
+    transformers: Any | None = None,
+    device: Any | None = None,
+) -> dict[str, Any]:
+    tokenizer_metadata = {
+        "class": type(tokenizer).__name__,
+        "name_or_path": str(
+            getattr(tokenizer, "name_or_path", args.model_name)
+        ),
+    }
+    tokenizer_revision = _known_revision(tokenizer)
+    if tokenizer_revision is not None:
+        tokenizer_metadata["revision"] = tokenizer_revision
+    model_metadata = {
+        "name_or_path": str(args.model_name),
+    }
+    model_revision = _known_revision(model)
+    if model_revision is not None:
+        model_metadata["revision"] = model_revision
+    return {
+        "schema_version": TRAINING_METADATA_SCHEMA_VERSION,
+        "input_format_version": INPUT_FORMAT_VERSION,
+        "max_length": args.max_length,
+        "model_name": args.model_name,
+        "model": model_metadata,
+        "tokenizer": tokenizer_metadata,
+        "runtime": {
+            "python_version": platform.python_version(),
+            "package_versions": _runtime_package_versions(
+                torch=torch,
+                transformers=transformers,
+            ),
+            "seed": int(getattr(args, "seed", 42)),
+            "device": str(
+                device
+                if device is not None
+                else getattr(args, "device", "unknown")
+            ),
+            "deterministic_settings": _deterministic_settings(torch),
+        },
+        "datasets": {
+            "train": {
+                "path": str(args.train_path),
+                "sha256": file_sha256(args.train_path),
+            },
+            "validation": {
+                "path": str(args.validation_path),
+                "sha256": file_sha256(args.validation_path),
+            },
+            "eval": {
+                "path": str(args.eval_path),
+                "sha256": file_sha256(args.eval_path),
+            },
+        },
+    }
+
+
+def _runtime_package_versions(
+    *,
+    torch: Any | None,
+    transformers: Any | None,
+) -> dict[str, str]:
+    versions: dict[str, str] = {}
+    for name, module in (
+        ("torch", torch),
+        ("transformers", transformers),
+    ):
+        version = getattr(module, "__version__", None)
+        if version is not None:
+            versions[name] = str(version)
+            continue
+        try:
+            versions[name] = importlib_metadata.version(name)
+        except importlib_metadata.PackageNotFoundError:
+            pass
+    try:
+        versions["tokenizers"] = importlib_metadata.version("tokenizers")
+    except importlib_metadata.PackageNotFoundError:
+        pass
+    return versions
+
+
+def _deterministic_settings(torch: Any | None) -> dict[str, bool | None]:
+    if torch is None:
+        return {
+            "algorithms_enforced": None,
+            "cudnn_deterministic": None,
+            "cudnn_benchmark": None,
+        }
+    algorithms_enabled = (
+        bool(torch.are_deterministic_algorithms_enabled())
+        if hasattr(torch, "are_deterministic_algorithms_enabled")
+        else None
+    )
+    cudnn = getattr(getattr(torch, "backends", None), "cudnn", None)
+    return {
+        "algorithms_enforced": algorithms_enabled,
+        "cudnn_deterministic": (
+            bool(cudnn.deterministic)
+            if cudnn is not None and hasattr(cudnn, "deterministic")
+            else None
+        ),
+        "cudnn_benchmark": (
+            bool(cudnn.benchmark)
+            if cudnn is not None and hasattr(cudnn, "benchmark")
+            else None
+        ),
+    }
+
+
+def _known_revision(value: Any | None) -> str | None:
+    if value is None:
+        return None
+    candidates = [value, getattr(value, "config", None)]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        for attribute in ("_commit_hash", "commit_hash", "revision"):
+            revision = getattr(candidate, attribute, None)
+            if revision:
+                return str(revision)
+        init_kwargs = getattr(candidate, "init_kwargs", None)
+        if isinstance(init_kwargs, dict):
+            for key in ("_commit_hash", "commit_hash", "revision"):
+                revision = init_kwargs.get(key)
+                if revision:
+                    return str(revision)
+    return None
+
+
+def checkpoint_artifact_hashes(model_dir: Path) -> dict[str, str]:
+    hashes = {
+        path.name: file_sha256(path)
+        for path in sorted(model_dir.iterdir())
+        if path.is_file() and path.name in CHECKPOINT_ARTIFACT_NAMES
+    }
+    if "config.json" not in hashes:
+        raise ValueError("saved checkpoint is missing config.json")
+    if not ({"model.safetensors", "pytorch_model.bin"} & hashes.keys()):
+        raise ValueError("saved checkpoint is missing model weights")
+    return hashes
+
+
 def train(args: argparse.Namespace) -> dict[str, Any]:
+    train_rows = load_jsonl(args.train_path)
+    validation_rows = load_jsonl(args.validation_path)
+    eval_rows = load_jsonl(args.eval_path)
+    validate_training_splits(train_rows, validation_rows, eval_rows)
+
     torch, transformers = _load_training_dependencies()
     set_seed(args.seed, torch=torch)
 
@@ -313,9 +649,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     device = _select_device(args.device, torch)
     model.to(device)
 
-    train_examples = rows_to_examples(load_jsonl(args.train_path), limit=args.smoke_limit)
-    validation_examples = rows_to_examples(load_jsonl(args.validation_path), limit=args.smoke_limit)
-    eval_examples = rows_to_examples(load_jsonl(args.eval_path), limit=args.smoke_limit)
+    train_examples = rows_to_examples(train_rows, limit=args.smoke_limit)
+    validation_examples = rows_to_examples(validation_rows, limit=args.smoke_limit)
+    eval_examples = rows_to_examples(eval_rows, limit=args.smoke_limit)
 
     train_dataset = _build_dataset(train_examples, tokenizer, args.max_length, torch)
     validation_dataset = _build_dataset(validation_examples, tokenizer, args.max_length, torch)
@@ -373,13 +709,24 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     if best_state is not None:
         model.load_state_dict(best_state)
 
+    selected_threshold = (
+        float(best_checkpoint["threshold"])
+        if best_checkpoint is not None
+        and best_checkpoint.get("threshold") is not None
+        else args.threshold
+    )
     eval_labels, eval_probabilities = collect_model_outputs(model, eval_dataset, args.batch_size, device, torch)
     eval_metrics = compute_evaluation_metrics(
         eval_labels,
         eval_probabilities,
-        args.threshold,
+        selected_threshold,
         args.thresholds,
         examples=eval_examples,
+    )
+    fixed_threshold_eval = compute_binary_metrics(
+        eval_labels,
+        eval_probabilities,
+        threshold=args.threshold,
     )
     prediction_output_path = args.eval_predictions_path
     if prediction_output_path is None and args.output_dir:
@@ -392,20 +739,34 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "validation_rows": len(validation_examples),
         "eval_rows": len(eval_examples),
         "epochs": args.epochs,
+        "training_metadata": build_training_metadata(
+            args,
+            tokenizer,
+            model=model,
+            torch=torch,
+            transformers=transformers,
+            device=device,
+        ),
         "checkpoint_selection": {
             "objective": args.checkpoint_objective,
             "min_recall": args.checkpoint_min_recall,
             "max_fpr": args.checkpoint_max_fpr,
             "selected": best_checkpoint,
+            "selected_validation_threshold": selected_threshold,
         },
         "history": history,
         "eval": eval_metrics,
+        "fixed_threshold_eval": fixed_threshold_eval,
     }
 
     if prediction_output_path:
         write_jsonl(
             prediction_output_path,
-            build_prediction_records(eval_examples, eval_probabilities, args.threshold),
+            build_prediction_records(
+                eval_examples,
+                eval_probabilities,
+                selected_threshold,
+            ),
         )
         final_report["eval_predictions_path"] = str(prediction_output_path)
 
@@ -413,6 +774,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         args.output_dir.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(args.output_dir)
         tokenizer.save_pretrained(args.output_dir)
+        final_report["training_metadata"][
+            "checkpoint_artifact_sha256"
+        ] = checkpoint_artifact_hashes(args.output_dir)
         (args.output_dir / "training_report.json").write_text(json.dumps(final_report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     return final_report

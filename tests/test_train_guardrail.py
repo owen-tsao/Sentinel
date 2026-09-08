@@ -43,8 +43,9 @@ class TrainGuardrailTests(unittest.TestCase):
         self.assertIn("sensitive_resources=production_database", text)
         self.assertIn("Environment: production", text)
         self.assertIn("Command: alembic upgrade head", text)
+        self.assertTrue(text.startswith("Command: alembic upgrade head\nEnvironment: production\n"))
 
-    def test_format_recent_actions_limits_to_last_five(self) -> None:
+    def test_format_recent_actions_limits_to_last_three(self) -> None:
         actions = [
             {"type": "command", "summary": f"step {index}", "sensitive_resources": []}
             for index in range(7)
@@ -54,7 +55,8 @@ class TrainGuardrailTests(unittest.TestCase):
 
         self.assertNotIn("step 0", formatted)
         self.assertNotIn("step 1", formatted)
-        self.assertIn("step 2", formatted)
+        self.assertNotIn("step 3", formatted)
+        self.assertIn("step 4", formatted)
         self.assertIn("step 6", formatted)
 
     def test_rows_to_examples_validates_binary_labels(self) -> None:
@@ -80,6 +82,76 @@ class TrainGuardrailTests(unittest.TestCase):
         bad_row["label"] = 2
         with self.assertRaises(ValueError):
             train_guardrail.rows_to_examples([bad_row])
+
+    def test_training_inputs_reject_cross_split_group_overlap(self) -> None:
+        base = {
+            "id": "train-1",
+            "context": "Inspect files.",
+            "recent_actions": [],
+            "environment": "sandbox",
+            "command": "ls",
+            "label": 0,
+            "source": "handwritten",
+            "trajectory_id": "shared-trajectory",
+        }
+
+        with self.assertRaisesRegex(ValueError, "overlaps train and eval"):
+            train_guardrail.validate_training_splits(
+                [base],
+                [],
+                [{**base, "id": "eval-1"}],
+            )
+
+    def test_training_inputs_reject_unreviewed_synthetic_rows(self) -> None:
+        row = {
+            "id": "generated-1",
+            "context": "Inspect files.",
+            "recent_actions": [],
+            "environment": "sandbox",
+            "command": "ls",
+            "label": 0,
+            "source": "llm_gap_fill",
+            "trajectory_id": "generated-trajectory",
+            "review_status": "unreviewed",
+        }
+
+        with self.assertRaisesRegex(ValueError, "unreviewed synthetic"):
+            train_guardrail.validate_training_splits([row], [], [])
+
+        disguised = {
+            **row,
+            "id": "disguised-generated",
+            "source": "handwritten",
+            "is_synthetic": True,
+            "review_status": "human_reviewed",
+        }
+        with self.assertRaisesRegex(ValueError, "unreviewed synthetic"):
+            train_guardrail.validate_training_splits([disguised], [], [])
+
+    def test_training_inputs_reject_conflicting_duplicate_labels(self) -> None:
+        safe = {
+            "id": "safe-1",
+            "context": "Inspect files.",
+            "recent_actions": [],
+            "environment": "sandbox",
+            "command": "ls",
+            "label": 0,
+            "source": "handwritten",
+            "trajectory_id": "trajectory-safe",
+        }
+        dangerous = {
+            **safe,
+            "id": "dangerous-1",
+            "label": 1,
+            "trajectory_id": "trajectory-dangerous",
+        }
+
+        with self.assertRaisesRegex(ValueError, "conflicts"):
+            train_guardrail.validate_training_splits(
+                [safe, dangerous],
+                [],
+                [],
+            )
 
     def test_compute_binary_metrics(self) -> None:
         metrics = train_guardrail.compute_binary_metrics(
@@ -257,6 +329,136 @@ class TrainGuardrailTests(unittest.TestCase):
         self.assertEqual(candidate["threshold"], 0.2)
         self.assertEqual(candidate["dangerous_recall"], 1.0)
         self.assertFalse(candidate["constraints_met"])
+
+    def test_checkpoint_selection_rejects_unsupported_validation_classes(self) -> None:
+        metrics = {
+            "threshold": 0.5,
+            "accuracy": 1.0,
+            "precision": 1.0,
+            "dangerous_recall": 1.0,
+            "false_positive_rate": None,
+            "confusion": {"tp": 2, "fp": 0, "tn": 0, "fn": 0},
+        }
+
+        with self.assertRaisesRegex(ValueError, "label=0"):
+            train_guardrail.build_checkpoint_candidate(
+                metrics,
+                epoch=1,
+                objective="bounded_fpr",
+                min_recall=0.9,
+                max_fpr=0.3,
+            )
+
+    def test_training_metadata_binds_formatter_tokenizer_and_dataset_hashes(self) -> None:
+        class FakeTokenizer:
+            name_or_path = "local-test-tokenizer"
+            init_kwargs = {"revision": "tokenizer-revision"}
+
+        class FakeModel:
+            class Config:
+                _commit_hash = "model-revision"
+
+            config = Config()
+
+        class FakeTorch:
+            __version__ = "2.test"
+
+            class Backends:
+                class Cudnn:
+                    deterministic = False
+                    benchmark = True
+
+                cudnn = Cudnn()
+
+            backends = Backends()
+
+            @staticmethod
+            def are_deterministic_algorithms_enabled() -> bool:
+                return False
+
+        class FakeTransformers:
+            __version__ = "4.test"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            paths = {
+                name: root / f"{name}.jsonl"
+                for name in ("train", "validation", "eval")
+            }
+            for name, path in paths.items():
+                path.write_text(f'{{"split":"{name}"}}\n', encoding="utf-8")
+            args = type(
+                "Args",
+                (),
+                {
+                    "max_length": 384,
+                    "model_name": "distilbert-test",
+                    "train_path": paths["train"],
+                    "validation_path": paths["validation"],
+                    "eval_path": paths["eval"],
+                    "seed": 17,
+                    "device": "cpu",
+                },
+            )()
+
+            metadata = train_guardrail.build_training_metadata(
+                args,
+                FakeTokenizer(),
+                model=FakeModel(),
+                torch=FakeTorch(),
+                transformers=FakeTransformers(),
+                device="cpu",
+            )
+
+        self.assertEqual(
+            metadata["input_format_version"],
+            train_guardrail.INPUT_FORMAT_VERSION,
+        )
+        self.assertEqual(metadata["max_length"], 384)
+        self.assertEqual(
+            metadata["tokenizer"]["name_or_path"],
+            "local-test-tokenizer",
+        )
+        self.assertEqual(metadata["tokenizer"]["revision"], "tokenizer-revision")
+        self.assertEqual(metadata["model"]["revision"], "model-revision")
+        self.assertEqual(metadata["runtime"]["seed"], 17)
+        self.assertEqual(metadata["runtime"]["device"], "cpu")
+        self.assertTrue(metadata["runtime"]["python_version"])
+        self.assertEqual(
+            metadata["runtime"]["package_versions"]["torch"],
+            "2.test",
+        )
+        self.assertEqual(
+            metadata["runtime"]["package_versions"]["transformers"],
+            "4.test",
+        )
+        self.assertFalse(
+            metadata["runtime"]["deterministic_settings"][
+                "algorithms_enforced"
+            ]
+        )
+        self.assertFalse(
+            metadata["runtime"]["deterministic_settings"][
+                "cudnn_deterministic"
+            ]
+        )
+        self.assertTrue(
+            metadata["runtime"]["deterministic_settings"]["cudnn_benchmark"]
+        )
+        self.assertEqual(len(metadata["datasets"]["train"]["sha256"]), 64)
+
+    def test_checkpoint_artifact_hashes_require_config_and_weights(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_dir = Path(tmpdir)
+            (model_dir / "config.json").write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "model weights"):
+                train_guardrail.checkpoint_artifact_hashes(model_dir)
+
+            (model_dir / "model.safetensors").write_bytes(b"weights")
+            hashes = train_guardrail.checkpoint_artifact_hashes(model_dir)
+
+        self.assertEqual(set(hashes), {"config.json", "model.safetensors"})
+        self.assertEqual(len(hashes["model.safetensors"]), 64)
 
     def test_parse_thresholds_validates_bounds(self) -> None:
         self.assertEqual(train_guardrail.parse_thresholds("0.2, 0.5,0.8"), [0.2, 0.5, 0.8])

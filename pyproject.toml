@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sentinel-guardrail"
-version = "0.1.0"
-description = "Local guardrail API for AI-agent command evaluation."
+dynamic = ["version"]
+description = "Local-first task authorization and enforcement for AI-agent actions."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi",
-    "pydantic",
+    "pydantic<3",
     "uvicorn[standard]",
     "onnxruntime",
     "transformers",
@@ -19,8 +19,15 @@ dependencies = [
 [project.optional-dependencies]
 test = [
     "httpx",
+    "pytest",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "sentinel.__version__"}
 

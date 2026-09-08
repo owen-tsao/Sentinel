@@ -16,6 +16,7 @@ import random
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -64,6 +65,33 @@ WARN_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 READ_ONLY_PATTERNS = re.compile(
     r"^\s*(ls|pwd|cat|sed|grep|rg|find|du|df|head|tail|wc|which|git\s+(status|diff|log|show)|pytest\b|python\s+-m\s+pytest\b|id\b|whoami\b|ps\b)",
 )
+DESTRUCTIVE_ACTION_PATTERN = re.compile(
+    r"\b("
+    r"rm\b|rmdir\b|unlink\b|shred\b|truncate\b|wipe\b|"
+    r"delete(?:[_-]|\s)|destroy(?:[_-]|\s)|remove(?:[_-]|\s)|"
+    r"git\s+(clean\b|reset\s+--hard\b)|"
+    r"terraform\s+destroy\b|kubectl\s+delete\b|"
+    r"docker\s+(system\s+prune\b|volume\s+rm\b)|"
+    r"drop\s+(database|table)\b|delete\s+from\b"
+    r")",
+    re.I,
+)
+GROUP_FIELDS = ("trajectory_id", "template_family", "contract_group_id", "group_id")
+REVIEWED_STATUSES = {"human_reviewed"}
+VALID_REVIEW_STATUSES = REVIEWED_STATUSES | {"pending", "unreviewed"}
+KNOWN_SYNTHETIC_SOURCES = {
+    "llm_gap_fill",
+    "model_failure_v2",
+}
+SYNTHETIC_MARKERS = {"synthetic", "generated", "llm", "gpt", "claude", "model_failure"}
+TRUSTED_PROVENANCE_KINDS = {"human_authored", "benchmark", "observed_trace"}
+SYNTHETIC_REVIEW_FIELDS = {
+    "review_status",
+    "reviewer_id",
+    "reviewed_at",
+    "review_policy_version",
+    "review_content_sha256",
+}
 
 
 @dataclass
@@ -163,6 +191,11 @@ def classify_command(command: str, default_safe: bool = True) -> tuple[int, str,
     for pattern, risk_category, verdict in HIGH_RISK_PATTERNS:
         if pattern.search(stripped):
             return 1, risk_category, verdict
+    # Benchmark traces often contain destructive variants that do not match a
+    # narrow high-risk signature (for example, deleting a relative directory).
+    # Treat those as risky/confirmable instead of silently manufacturing a safe label.
+    if DESTRUCTIVE_ACTION_PATTERN.search(stripped):
+        return 1, "authorized_destructive", "confirm_required"
     for pattern, risk_category in WARN_PATTERNS:
         if pattern.search(stripped):
             return 0, risk_category, "warn"
@@ -173,6 +206,113 @@ def classify_command(command: str, default_safe: bool = True) -> tuple[int, str,
     return 1, "policy_violation", "confirm_required"
 
 
+def normalize_label(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int) and value in VALID_LABELS:
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized in {"0", "allow", "benign", "false", "harmless", "safe"}:
+            return 0
+        if normalized in {"1", "block", "dangerous", "harmful", "policy_violation", "true", "unsafe"}:
+            return 1
+    raise ValueError(f"label must identify safe/0 or unsafe/1, got {value!r}")
+
+
+def normalize_is_safe(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0 if value else 1
+    if isinstance(value, int) and value in VALID_LABELS:
+        return 0 if value == 1 else 1
+    if isinstance(value, str):
+        normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized in {"1", "benign", "harmless", "safe", "true"}:
+            return 0
+        if normalized in {"0", "dangerous", "false", "harmful", "unsafe"}:
+            return 1
+    raise ValueError(f"is_safe must identify safe/true or unsafe/false, got {value!r}")
+
+
+def is_synthetic_source(source: Any) -> bool:
+    normalized = str(source).strip().lower().replace("-", "_")
+    source_tokens = set(normalized.split("_"))
+    return (
+        normalized in KNOWN_SYNTHETIC_SOURCES
+        or normalized.startswith(("llm_", "gpt", "claude", "model_failure"))
+        or bool(source_tokens & SYNTHETIC_MARKERS)
+    )
+
+
+def is_synthetic_row(row: dict[str, Any]) -> bool:
+    if is_synthetic_source(row.get("source")) or row.get("is_synthetic") is True:
+        return True
+    provenance = row.get("provenance")
+    if provenance in (None, ""):
+        return False
+    if isinstance(provenance, dict):
+        kind = str(
+            provenance.get("kind")
+            or provenance.get("origin")
+            or provenance.get("type")
+            or ""
+        ).strip().lower().replace("-", "_")
+        if kind in TRUSTED_PROVENANCE_KINDS:
+            return False
+        return True
+    normalized = str(provenance).strip().lower().replace("-", "_")
+    return normalized not in TRUSTED_PROVENANCE_KINDS
+
+
+def review_content_sha256(row: dict[str, Any]) -> str:
+    payload = {
+        key: value
+        for key, value in row.items()
+        if key not in {"review_status", "review_content_sha256"}
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def is_reviewed_synthetic(row: dict[str, Any]) -> bool:
+    if not is_synthetic_row(row):
+        return True
+    if str(row.get("review_status", "")).strip().lower() != "human_reviewed":
+        return False
+    provenance = row.get("provenance")
+    if not isinstance(provenance, dict):
+        return False
+    provenance_kind = str(
+        provenance.get("kind")
+        or provenance.get("origin")
+        or provenance.get("type")
+        or ""
+    ).strip().lower().replace("-", "_")
+    if provenance_kind not in {"synthetic", "generated"}:
+        return False
+    if not str(provenance.get("generator", "")).strip():
+        return False
+    if not all(
+        str(row.get(field, "")).strip()
+        for field in ("reviewer_id", "review_policy_version")
+    ):
+        return False
+    try:
+        datetime.fromisoformat(
+            str(row.get("reviewed_at", "")).replace("Z", "+00:00")
+        )
+    except ValueError:
+        return False
+    expected_hash = str(row.get("review_content_sha256", "")).strip().lower()
+    return bool(expected_hash) and expected_hash == review_content_sha256(row)
+
+
 def normalize_row(row: dict[str, Any], source_hint: str | None = None) -> dict[str, Any]:
     normalized = dict(row)
     if not normalized.get("id"):
@@ -180,16 +320,24 @@ def normalize_row(row: dict[str, Any], source_hint: str | None = None) -> dict[s
     normalized["context"] = str(normalized.get("context", "")).strip()
     normalized["command"] = str(normalized.get("command", "")).strip()
     normalized["environment"] = str(normalized.get("environment", "sandbox")).strip() or "sandbox"
-    normalized["source"] = str(normalized.get("source", source_hint or "unknown"))
+    normalized["source"] = str(normalized.get("source", source_hint or "unknown")).strip()
+    if is_synthetic_row(normalized):
+        normalized["review_status"] = (
+            str(normalized.get("review_status", "")).strip().lower()
+            or "unreviewed"
+        )
     normalized["recent_actions"] = normalize_recent_actions(normalized.get("recent_actions"))
     if "label" in normalized:
-        normalized["label"] = int(normalized["label"])
+        normalized["label"] = normalize_label(normalized["label"])
     if not normalized.get("risk_category") or not normalized.get("expected_verdict") or "label" not in normalized:
         label, risk_category, verdict = classify_command(normalized["command"])
         normalized.setdefault("label", label)
         normalized.setdefault("risk_category", risk_category)
         normalized.setdefault("expected_verdict", verdict)
     normalized["notes"] = str(normalized.get("notes", f"Converted from {normalized['source']}."))
+    if not any(str(normalized.get(field, "")).strip() for field in GROUP_FIELDS):
+        normalized["group_id"] = stable_id("context-group", normalized["context"])
+        normalized["group_id_origin"] = "derived_exact_context"
     return normalized
 
 
@@ -210,6 +358,17 @@ def validate_row(row: dict[str, Any], index: int) -> list[str]:
         errors.append(f"{row.get('id', index)}: empty context")
     if not str(row.get("command", "")).strip():
         errors.append(f"{row.get('id', index)}: empty command")
+    if is_synthetic_row(row):
+        review_status = str(row.get("review_status", "")).strip().lower()
+        if review_status not in VALID_REVIEW_STATUSES:
+            errors.append(
+                f"{row.get('id', index)}: synthetic source requires a valid review_status"
+            )
+        elif review_status == "human_reviewed" and not is_reviewed_synthetic(row):
+            errors.append(
+                f"{row.get('id', index)}: reviewed synthetic row requires generated provenance, "
+                "reviewer_id, reviewed_at, review_policy_version, and a matching review_content_sha256"
+            )
     return errors
 
 
@@ -283,6 +442,13 @@ def convert_terminalbench(
             stats.skipped_by_reason["terminalbench_missing_steps"] += 1
             continue
         context = str(record.get("prompt") or record.get("trial_name") or record.get("task_name") or "Terminal-Bench task")
+        trajectory_id = stable_id(
+            "terminalbench-trajectory",
+            path.name,
+            record_index,
+            record.get("trial_id"),
+            record.get("task_name"),
+        )
         previous_actions: list[dict[str, Any]] = []
         commands_from_record = 0
         command_ordinal = 0
@@ -305,6 +471,7 @@ def convert_terminalbench(
                 rows.append(
                     {
                         "id": stable_id("terminalbench", path.name, record_index, record.get("trial_id"), step_index, command_ordinal, command),
+                        "trajectory_id": trajectory_id,
                         "context": context,
                         "recent_actions": previous_actions[-5:],
                         "command": command,
@@ -313,6 +480,15 @@ def convert_terminalbench(
                         "risk_category": risk_category,
                         "source": "terminalbench",
                         "expected_verdict": verdict,
+                        "is_synthetic": True,
+                        "provenance": {
+                            "kind": "generated",
+                            "generator": "sentinel_terminalbench_command_heuristic",
+                            "label_method": "deterministic_command_heuristic",
+                            "benchmark_source": "terminalbench",
+                            "benchmark_path": str(path),
+                        },
+                        "review_status": "unreviewed",
                         "notes": "Converted from Terminal-Bench trajectory. Labels are heuristic; intended mainly for benign command diversity.",
                     }
                 )
@@ -408,6 +584,7 @@ def convert_osharm(results_dir: Path, include_non_shell: bool, stats: PipelineSt
             continue
         task = log.get("task", {})
         context = str(task.get("instruction") or task.get("example_id") or better_log_path.parent.name)
+        trajectory_id = stable_id("osharm-trajectory", better_log_path.parent.as_posix())
         judgment = load_nearest_judgment(better_log_path.parent) or {}
         violation_step = judgment.get("violation_step")
         safety = judgment.get("safety")
@@ -435,6 +612,7 @@ def convert_osharm(results_dir: Path, include_non_shell: bool, stats: PipelineSt
                 rows.append(
                     {
                         "id": stable_id("osharm", better_log_path.parent.as_posix(), step_index, action_ordinal, action),
+                        "trajectory_id": trajectory_id,
                         "context": context,
                         "recent_actions": previous_actions[-5:],
                         "command": f"tool:pyautogui {action}" if "pyautogui." in action else action,
@@ -668,11 +846,32 @@ def convert_atbench(path: Path, stats: PipelineStats, limit: int | None) -> list
         label_value = record.get("label")
         if label_value is None and isinstance(record.get("labels"), dict):
             is_safe = record["labels"].get("is_safe")
-            label_value = 0 if is_safe is True else 1 if is_safe is False else None
+            if is_safe is not None:
+                try:
+                    label_value = normalize_is_safe(is_safe)
+                except ValueError:
+                    stats.skipped_by_reason["atbench_invalid_label"] += 1
+                    continue
         if label_value is None and "is_safe" in record:
-            label_value = 0 if record.get("is_safe") is True else 1 if record.get("is_safe") is False else None
+            try:
+                label_value = normalize_is_safe(record.get("is_safe"))
+            except ValueError:
+                stats.skipped_by_reason["atbench_invalid_label"] += 1
+                continue
+        if label_value is not None:
+            try:
+                label_value = normalize_label(label_value)
+            except ValueError:
+                stats.skipped_by_reason["atbench_invalid_label"] += 1
+                continue
 
         context, actions = extract_atbench_actions(record)
+        trajectory_id = stable_id(
+            "atbench-trajectory",
+            source_name,
+            record.get("id", record.get("conv_id")),
+            context,
+        )
         if not actions:
             fallback_commands = extract_tool_actions(record)
             actions = [
@@ -705,6 +904,7 @@ def convert_atbench(path: Path, stats: PipelineStats, limit: int | None) -> list
             rows.append(
                 {
                     "id": stable_id("atbench", record.get("id", record.get("conv_id")), index, command),
+                    "trajectory_id": trajectory_id,
                     "context": context,
                     "recent_actions": action.get("recent_actions", []),
                     "command": command,
@@ -723,27 +923,86 @@ def convert_atbench(path: Path, stats: PipelineStats, limit: int | None) -> list
 
 
 def dedupe_rows(rows: list[dict[str, Any]], stats: PipelineStats) -> list[dict[str, Any]]:
-    seen_ids: set[str] = set()
-    seen_examples: set[tuple[str, str, str, str]] = set()
+    seen_ids: dict[str, dict[str, Any]] = {}
+    seen_examples: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     deduped: list[dict[str, Any]] = []
     for row in rows:
         row_id = row["id"]
         if row_id in seen_ids:
             stats.duplicate_ids.append(row_id)
+            existing_by_id = seen_ids[row_id]
+            if _dedupe_key(existing_by_id) != _dedupe_key(row):
+                raise ValueError(f"duplicate id {row_id!r} refers to different examples")
+            conflicts = _policy_conflicts(existing_by_id, row)
+            if conflicts:
+                raise ValueError(
+                    f"duplicate id {row_id!r} has conflicting policy fields: "
+                    f"{', '.join(conflicts)}"
+                )
             continue
-        seen_ids.add(row_id)
-        key = (
-            row["context"],
-            json.dumps(row["recent_actions"], sort_keys=True),
-            row["command"],
-            row["environment"],
-        )
+        seen_ids[row_id] = row
+        key = _dedupe_key(row)
         if key in seen_examples:
+            existing = seen_examples[key]
+            conflicts = _policy_conflicts(existing, row)
+            if conflicts:
+                raise ValueError(
+                    "conflicting duplicate examples "
+                    f"{existing['id']!r} and {row_id!r}: {', '.join(conflicts)}"
+                )
             stats.duplicate_examples += 1
             continue
-        seen_examples.add(key)
+        seen_examples[key] = row
         deduped.append(row)
     return deduped
+
+
+def validate_duplicate_conflicts(rows: list[dict[str, Any]]) -> None:
+    seen_ids: dict[str, dict[str, Any]] = {}
+    seen_examples: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        row_id = str(row["id"])
+        existing_by_id = seen_ids.setdefault(row_id, row)
+        if existing_by_id is not row:
+            if _dedupe_key(existing_by_id) != _dedupe_key(row):
+                raise ValueError(
+                    f"duplicate id {row_id!r} refers to different examples"
+                )
+            conflicts = _policy_conflicts(existing_by_id, row)
+            if conflicts:
+                raise ValueError(
+                    f"duplicate id {row_id!r} has conflicting policy fields: "
+                    f"{', '.join(conflicts)}"
+                )
+        key = _dedupe_key(row)
+        existing = seen_examples.setdefault(key, row)
+        if existing is not row:
+            conflicts = _policy_conflicts(existing, row)
+            if conflicts:
+                raise ValueError(
+                    "conflicting duplicate examples "
+                    f"{existing['id']!r} and {row_id!r}: {', '.join(conflicts)}"
+                )
+
+
+def _policy_conflicts(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> list[str]:
+    return [
+        field
+        for field in ("label", "expected_verdict", "risk_category")
+        if left.get(field) != right.get(field)
+    ]
+
+
+def _dedupe_key(row: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(row["context"]),
+        json.dumps(row["recent_actions"], sort_keys=True),
+        str(row["command"]),
+        str(row["environment"]),
+    )
 
 
 def split_rows(
@@ -753,23 +1012,106 @@ def split_rows(
     validation_ratio: float,
 ) -> dict[str, list[dict[str, Any]]]:
     rng = random.Random(seed)
-    grouped: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
-        grouped[(row["source"], row["label"])].append(row)
-
     splits = {"train": [], "validation": [], "eval": []}
-    for group_rows in grouped.values():
-        shuffled = list(group_rows)
+
+    # Unreviewed synthetic rows are quarantined from every model split. If one
+    # shares a group with reviewed rows, quarantine the whole group to preserve
+    # both review and trajectory-disjointness guarantees.
+    eligible_units: list[list[dict[str, Any]]] = []
+    for unit_rows in _group_rows(rows):
+        if any(is_synthetic_row(row) and not is_reviewed_synthetic(row) for row in unit_rows):
+            continue
+        else:
+            eligible_units.append(unit_rows)
+
+    stratified_units: dict[tuple[tuple[str, int, int], ...], list[list[dict[str, Any]]]] = defaultdict(list)
+    for unit_rows in eligible_units:
+        counts = Counter((str(row["source"]), int(row["label"])) for row in unit_rows)
+        signature = tuple(sorted((source, label, count) for (source, label), count in counts.items()))
+        stratified_units[signature].append(unit_rows)
+
+    for group_units in stratified_units.values():
+        shuffled = list(group_units)
         rng.shuffle(shuffled)
         eval_count = max(1, round(len(shuffled) * eval_ratio)) if len(shuffled) >= 5 else 0
         validation_count = max(1, round(len(shuffled) * validation_ratio)) if len(shuffled) >= 10 else 0
-        splits["eval"].extend(shuffled[:eval_count])
-        splits["validation"].extend(shuffled[eval_count : eval_count + validation_count])
-        splits["train"].extend(shuffled[eval_count + validation_count :])
+        for unit_rows in shuffled[:eval_count]:
+            splits["eval"].extend(unit_rows)
+        for unit_rows in shuffled[eval_count : eval_count + validation_count]:
+            splits["validation"].extend(unit_rows)
+        for unit_rows in shuffled[eval_count + validation_count :]:
+            splits["train"].extend(unit_rows)
 
     for split_rows_ in splits.values():
         split_rows_.sort(key=lambda row: row["id"])
     return splits
+
+
+def _split_group_key(row: dict[str, Any]) -> str:
+    identifiers = _split_group_identifiers(row)
+    if not identifiers:
+        raise ValueError(
+            f"{row.get('id', '<unknown>')}: split row requires one of {GROUP_FIELDS}"
+        )
+    return sorted(identifiers)[0]
+
+
+def _split_group_identifiers(row: dict[str, Any]) -> set[str]:
+    return {
+        str(row[field]).strip()
+        for field in GROUP_FIELDS
+        if str(row.get(field, "")).strip()
+    }
+
+
+def _group_rows(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    parents = list(range(len(rows)))
+
+    def root(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = root(left)
+        right_root = root(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    owner_by_identifier: dict[str, int] = {}
+    for index, row in enumerate(rows):
+        identifiers = _split_group_identifiers(row)
+        if not identifiers:
+            raise ValueError(
+                f"{row.get('id', index)}: split row requires one of {GROUP_FIELDS}"
+            )
+        for identifier in identifiers:
+            owner = owner_by_identifier.setdefault(identifier, index)
+            union(index, owner)
+
+    grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for index, row in enumerate(rows):
+        grouped[root(index)].append(row)
+    return sorted(
+        grouped.values(),
+        key=lambda unit: min(str(row["id"]) for row in unit),
+    )
+
+
+def quarantine_unreviewed_synthetic(
+    rows: list[dict[str, Any]],
+    stats: PipelineStats,
+) -> list[dict[str, Any]]:
+    """Remove unreviewed generated groups before model splitting."""
+
+    retained: list[dict[str, Any]] = []
+    for unit_rows in _group_rows(rows):
+        if any(is_synthetic_row(row) and not is_reviewed_synthetic(row) for row in unit_rows):
+            stats.skipped_by_reason["synthetic_unreviewed_quarantine"] += len(unit_rows)
+        else:
+            retained.extend(unit_rows)
+    return retained
 
 
 def reserve_holdout(
@@ -787,7 +1129,24 @@ def reserve_holdout(
         return [], rows
 
     rng = random.Random(seed)
-    candidates = [row for row in rows if row["source"] == source]
+    units = _group_rows(rows)
+    unit_by_row_id = {
+        str(row["id"]): unit_index
+        for unit_index, unit_rows in enumerate(units)
+        for row in unit_rows
+    }
+    ineligible_holdout_units = {
+        unit_index
+        for unit_index, unit_rows in enumerate(units)
+        if any(is_synthetic_row(row) for row in unit_rows)
+    }
+    candidates = [
+        row
+        for row in rows
+        if row["source"] == source
+        and not is_synthetic_row(row)
+        and unit_by_row_id[str(row["id"])] not in ineligible_holdout_units
+    ]
     if not candidates:
         return [], rows
 
@@ -811,6 +1170,19 @@ def reserve_holdout(
         trimmed = sorted(heldout_ids)[:count]
         heldout_ids = set(trimmed)
 
+    # If one selected row belongs to a task/contract family, reserve the whole
+    # family. A slightly larger holdout is safer than leaking a near-duplicate
+    # family member into training.
+    heldout_unit_indexes = {
+        unit_by_row_id[str(row["id"])]
+        for row in candidates
+        if row["id"] in heldout_ids
+    }
+    heldout_ids = {
+        row["id"]
+        for row in rows
+        if unit_by_row_id[str(row["id"])] in heldout_unit_indexes
+    }
     heldout = sorted((row for row in rows if row["id"] in heldout_ids), key=lambda row: row["id"])
     remaining_rows = [row for row in rows if row["id"] not in heldout_ids]
     return heldout, remaining_rows
@@ -905,8 +1277,14 @@ def main() -> int:
             print(f"validation error: {error}")
         return 1
 
-    deduped = dedupe_rows(normalized_rows, stats)
-    diagnostic_deduped = dedupe_rows(normalized_diagnostic_rows, stats)
+    try:
+        validate_duplicate_conflicts(normalized_rows)
+        reviewed_rows = quarantine_unreviewed_synthetic(normalized_rows, stats)
+        deduped = dedupe_rows(reviewed_rows, stats)
+        diagnostic_deduped = dedupe_rows(normalized_diagnostic_rows, stats)
+    except ValueError as exc:
+        print(f"validation error: {exc}")
+        return 1
     heldout_seed_eval, split_input = reserve_holdout(
         deduped,
         source=args.seed_eval_source,

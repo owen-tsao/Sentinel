@@ -1,99 +1,178 @@
-# Scripts
+# Script command index
 
-This folder will contain project automation.
+Run commands from the repository root. Generated datasets, model artifacts, local spike output, and unreviewed review queues are not source evidence and should stay out of commits.
 
-Planned scripts:
+## Authority and contract evaluation
 
-- `data_pipeline.py`: validate, merge, deduplicate, and split JSONL examples.
-- `train_guardrail.py`: train the PyTorch command-risk model.
-- `export_onnx.py`: export the trained model for lightweight inference.
-- `evaluate_model.py`: measure recall, false positive rate, confusion matrix, and latency.
+### `build_contract_golden_candidates.py`
 
-Week 1 does not need the full data pipeline yet. The immediate goal is to define the schema and create a trusted starter dataset.
-
-## Data Pipeline
-
-Run the local seed pipeline:
+Regenerates the 60-row unreviewed core candidate queue and Markdown review packet:
 
 ```bash
-python3 scripts/data_pipeline.py --examples-dir data/examples --output-dir data/processed
+python3 scripts/build_contract_golden_candidates.py
 ```
 
-Optional benchmark inputs can be added after exporting/downloading them locally:
+Outputs:
+
+- `data/evaluation/contract_golden_candidates.jsonl`
+- `data/evaluation/contract_golden_review.md`
+
+Both outputs are generated and ignored. The builder always marks rows unreviewed; running it does not approve data.
+
+### `build_communications_contract_candidates.py`
+
+Regenerates the 30-row unreviewed provider-metadata candidate queue and review packet:
+
+```bash
+python3 scripts/build_communications_contract_candidates.py
+```
+
+Outputs:
+
+- `data/evaluation/contract_communications_candidates.jsonl`
+- `data/evaluation/contract_communications_review.md`
+
+These outputs are also generated, ignored, and non-authoritative.
+
+### `evaluate_contracts.py`
+
+Evaluates reviewed contract/action JSONL with deterministic matching and writes an optional manifest:
+
+```bash
+python3 scripts/evaluate_contracts.py \
+  data/evaluation/contract_combined_reviewed.jsonl \
+  --minimum-rows-per-category 1 \
+  --manifest /tmp/sentinel-known-regression.json
+```
+
+The minimum is `1` only because reviewed categories are sparse, so this command
+is regression-only. Sparse coverage remains a blocker for blind promotion.
+The only supported role is currently `known_regression`. Promotion is disabled
+until protected blind-set registration exists. Use `--comparison-dataset`,
+`--training-dataset`, and `--validation-dataset` to check declared group
+separation; never overwrite the committed baseline or historical regression
+manifests for an exploratory run.
+
+## Legacy data and rules diagnostics
+
+### `data_pipeline.py`
+
+Validates, normalizes, deduplicates, and splits legacy `(context, recent_actions, command, environment)` JSONL:
+
+```bash
+python3 scripts/data_pipeline.py \
+  --examples-dir data/examples \
+  --output-dir data/processed
+```
+
+Optional benchmark inputs:
 
 ```bash
 python3 scripts/data_pipeline.py \
   --terminalbench-jsonl path/to/terminalbench.jsonl \
   --atbench-jsonl path/to/atbench.jsonl \
-  --cuaharm-config-jsonl path/to/cuaharm_terminal_configs.jsonl \
+  --cuaharm-config-jsonl path/to/cuaharm-config.jsonl \
   --osharm-results-dir path/to/os-harm/results \
   --output-dir data/processed
 ```
 
-The pipeline writes reproducible processed JSONL files and `source_report.json` under `data/processed/`, which are ignored by git because they are generated artifacts.
+Files under `data/processed/` are generated and ignored. CUAHarm, OS-Harm, and ATBench conversions are diagnostic unless the source exposes enough pre-action, action-level authority evidence for fresh Sentinel review. TerminalBench heuristic labels are quarantined from promotion data.
 
-By default, it also reserves 14 handwritten rows in `data/processed/sentinel_seed_eval.jsonl`. Keep that file conceptually separate from training data; it is the trusted gold check for whether rules or models still match Sentinel's label policy after benchmark rows are added.
+### `evaluate_rules.py`
 
-CUAHarm static task/config inputs are treated as diagnostic inventory unless you also have real agent trajectories. Their setup commands and evaluator commands are not used as training examples because they are not agent-proposed actions.
-
-ATBench rows are converted only when the pipeline can extract concrete tool actions. Unsafe ATBench trajectories are filtered to likely sink/mutation actions named in the dataset's rationale, so source-only actions such as searches are not blindly labeled unsafe.
-
-OS-Harm rows are written to `data/processed/sentinel_osharm_diagnostic.jsonl` instead of the main train/validation/eval split. The converter uses `judgment.json` `safety` and `violation_step` fields to localize unsafe desktop actions, but these GUI-control snippets should stay a small diagnostic slice until Sentinel has stronger general tool-action support.
-
-## Rules Baseline Evaluation
-
-Run the deterministic rules baseline against the held-out seed eval and processed eval files:
+Reports the deterministic legacy rules baseline, confusion data, source/category breakdowns, and sample failures:
 
 ```bash
 python3 scripts/evaluate_rules.py
-```
-
-Add OS-Harm diagnostic rows when you want to measure desktop-agent behavior separately:
-
-```bash
 python3 scripts/evaluate_rules.py --include-osharm
+python3 scripts/evaluate_rules.py --json
 ```
 
-The evaluator reports dangerous recall, benign block false positive rate, verdict confusion, source/risk-category breakdowns, and representative failure samples. Use this report to decide which rules or targeted examples are needed before scaling data or training the PyTorch model.
+This is a diagnostic for the legacy command-risk layer, not the contract promotion evaluator.
 
-## Guardrail Model Training
+## ML diagnostics and guarded export
 
-`train_guardrail.py` fine-tunes a pretrained DistilBERT-style text classifier on Sentinel's binary `label` field. It does not train a serious neural architecture from scratch, and it does not try to predict `expected_verdict`; verdicts remain part of the policy/rules layer.
+The current model is disabled. There is no independent reviewed calibration set, so no current threshold output can authorize export or serving.
+The base project does not install the heavy training/export toolchain. Run these
+commands only in a separately provisioned ML environment containing PyTorch;
+ONNX export also requires the `onnx` package. Their versions must be recorded in
+the generated report metadata before an artifact can be reviewed.
 
-Install training dependencies in the environment where you plan to train:
+### `train_guardrail.py`
+
+Fine-tunes the legacy binary command-risk classifier and writes a checkpoint plus `training_report.json`:
 
 ```bash
-python3 -m pip install torch transformers
+python3 scripts/train_guardrail.py \
+  --device cpu \
+  --smoke-limit 16 \
+  --epochs 1 \
+  --output-dir models/smoke-distilbert
 ```
 
-Use the Mac for a tiny CPU smoke run that checks data loading, tokenization, and metrics:
+Use this only as a local training diagnostic. A checkpoint is not deployable evidence.
+
+### `calibrate_thresholds.py`
+
+Renders threshold and weak-group analysis from a training report:
 
 ```bash
-python3 scripts/train_guardrail.py --device cpu --smoke-limit 16 --epochs 1 --output-dir models/smoke-distilbert
+python3 scripts/calibrate_thresholds.py \
+  --report models/smoke-distilbert/training_report.json
 ```
 
-Use Mac MPS for the current local fine-tuning loop:
+This script's output is a review aid. It is not an approved calibration artifact. Promotion requires a distinct human-reviewed calibration dataset with content-bound hashes and provenance.
+
+### `export_onnx.py`
+
+Exports a checkpoint only when current formatter/checkpoint metadata and a human-reviewed, content-bound calibration artifact all validate:
 
 ```bash
-python3 scripts/train_guardrail.py --device mps --epochs 5 --batch-size 8 --output-dir models/sentinel-distilbert-mps
+python3 scripts/export_onnx.py \
+  --model-dir models/sentinel-distilbert \
+  --output-path models/sentinel-distilbert-onnx/model.onnx \
+  --thresholds-path path/to/reviewed-thresholds.json \
+  --calibration-dataset-path path/to/independent-calibration.jsonl
 ```
 
-Keep the 3070/CUDA machine as an optional final quality lane, not a blocker for Week 5 serving work. Use it when larger datasets, repeated hyperparameter sweeps, longer training comparisons, or final model-candidate selection would benefit from faster GPU throughput:
+The command fails closed when the calibration data, hashes, review metadata, checkpoint metadata, or input format is missing or stale. The current repository intentionally does not contain qualifying independent calibration data.
+
+### `measure_onnx_latency.py`
+
+Measures local CPU ONNX inference latency for an already valid serving artifact:
 
 ```bash
-python3 scripts/train_guardrail.py --device cuda --epochs 5 --batch-size 8 --output-dir models/sentinel-distilbert-cuda
+python3 scripts/measure_onnx_latency.py \
+  --onnx-path models/sentinel-distilbert-onnx/model.onnx \
+  --model-dir models/sentinel-distilbert-mps-v2
 ```
 
-The script reports accuracy, precision, dangerous recall, false positive rate, and a binary confusion matrix. Treat the model's positive-class probability as a risk score that will later be combined with deterministic rules and policy.
+Latency does not imply model quality or promotion.
 
-Before treating a CUDA run as the ONNX candidate, compare its `training_report.json` against the Mac baseline with the threshold calibration and latency tools. Faster training alone is not enough; the selected checkpoint still needs better dangerous recall, acceptable false positive rate, and serving latency.
+## Provider metadata diagnostic
 
-## Docker Smoke Check
+### `run_live_metadata_spike.py`
 
-Run the optional local Docker smoke check after Docker Desktop is running:
+Runs one bounded, read-only Slack or Google Workspace metadata probe. It never sends, shares, modifies, or grants production authority.
+
+```bash
+SENTINEL_SPIKE_SLACK_TOKEN=... \
+  python3 scripts/run_live_metadata_spike.py \
+  --output data/spikes/local/slack-summary.json \
+  slack --channel-id CHANNEL_ID
+```
+
+Google subcommands are `google-drive --file-id`, `gmail --draft-id`, and `calendar --calendar-id --event-id`; they use `SENTINEL_SPIKE_GOOGLE_TOKEN`. Keep credentials in environment variables and local output under `data/spikes/local/`. The script refuses to overwrite an existing summary.
+
+## Docker verification
+
+### `docker_smoke_check.py`
+
+Requires Docker Desktop and available local ports:
 
 ```bash
 python3 scripts/docker_smoke_check.py
+python3 scripts/docker_smoke_check.py --port 8010
 ```
 
-The script validates `docker-compose.yml`, builds the API and executor images, starts only the API service, checks `/health`, sends one `/evaluate` request, and then tears the Compose project down. It accepts `--port` if local port `8000` is already in use.
+The smoke validates Compose configuration, builds the API and executor images, checks non-root read-only sandbox execution, exercises trusted activation through durable SQLite audit, verifies destructive blocking, confirms the Compose API has no Docker socket, and tears down its project. Use `--skip-build` only when intentionally reusing current images and `--keep-running` only for manual inspection.

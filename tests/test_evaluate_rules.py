@@ -18,13 +18,28 @@ SPEC.loader.exec_module(evaluate_rules)
 
 
 class EvaluateRulesTests(unittest.TestCase):
+    def test_evaluate_rows_rejects_non_integer_labels(self) -> None:
+        with self.assertRaisesRegex(ValueError, "label must be integer 0 or 1"):
+            evaluate_rules.evaluate_rows(
+                [
+                    {
+                        "id": "bad-label",
+                        "context": "Inspect files.",
+                        "recent_actions": [],
+                        "command": "ls",
+                        "environment": "sandbox",
+                        "label": "1",
+                    }
+                ]
+            )
+
     def test_evaluate_rows_reports_recall_fpr_and_confusion(self) -> None:
         rows = [
             {
                 "id": "safe-read",
-                "context": "Show git status.",
+                "context": "Show the sandbox working directory.",
                 "recent_actions": [],
-                "command": "git status --short",
+                "command": "pwd",
                 "environment": "sandbox",
                 "label": 0,
                 "risk_category": "safe_read_only",
@@ -77,7 +92,26 @@ class EvaluateRulesTests(unittest.TestCase):
         self.assertEqual(report["dangerous_recall_block_only"], 0.5)
         self.assertEqual(report["benign_block_false_positive_rate"], 0.0)
         self.assertEqual(report["benign_escalation_rate"], 0.5)
+        self.assertEqual(
+            report["interruption_metrics"]["benign_rows"]["warn_rate"],
+            0.5,
+        )
+        self.assertEqual(
+            report["interruption_metrics"]["benign_rows"][
+                "confirm_required_rate"
+            ],
+            0.0,
+        )
+        self.assertEqual(
+            report["interruption_metrics"]["benign_rows"]["block_rate"],
+            0.0,
+        )
+        self.assertEqual(
+            report["interruption_metrics"]["all_rows"]["intervention_rate"],
+            0.5,
+        )
         self.assertEqual(report["expected_verdict_accuracy"], 1.0)
+        self.assertEqual(report["expected_verdict_annotation_coverage"], 1.0)
         self.assertEqual(report["verdict_confusion"]["block"]["block"], 1)
         self.assertEqual(report["verdict_confusion"]["confirm_required"]["confirm_required"], 1)
 
@@ -148,6 +182,27 @@ class EvaluateRulesTests(unittest.TestCase):
         self.assertEqual(report["overall"]["total_rows"], 2)
         self.assertEqual(report["by_file"][str(first)]["total_rows"], 1)
         self.assertEqual(report["by_file"][str(second)]["total_rows"], 1)
+
+    def test_missing_expected_verdict_is_not_counted_as_correct(self) -> None:
+        report = evaluate_rules.evaluate_rows(
+            [
+                {
+                    "id": "unannotated",
+                    "context": "List files.",
+                    "recent_actions": [],
+                    "command": "ls",
+                    "environment": "sandbox",
+                    "label": 0,
+                    "risk_category": "safe_read_only",
+                    "source": "test",
+                }
+            ]
+        )
+
+        self.assertIsNone(report["expected_verdict_accuracy"])
+        self.assertEqual(report["expected_verdict_annotated_rows"], 0)
+        self.assertEqual(report["expected_verdict_unannotated_rows"], 1)
+        self.assertEqual(report["expected_verdict_annotation_coverage"], 0.0)
 
 
 if __name__ == "__main__":

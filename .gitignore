@@ -25,6 +25,7 @@ htmlcov/
 *.pt
 *.pth
 *.onnx
+*.safetensors
 checkpoints/
 models/
 runs/
@@ -33,12 +34,29 @@ data/raw/
 data/processed/*.jsonl
 data/processed/*.json
 !data/processed/.gitkeep
+data/spikes/local/
+data/evaluation/contract_golden_candidates.jsonl
+data/evaluation/contract_golden_review.md
+data/evaluation/contract_communications_candidates.jsonl
+data/evaluation/contract_communications_review.md
+
+# Local runtime state can contain command and audit history
+*.db
+*.sqlite
+*.sqlite3
+*.db-*
+*.sqlite-*
+*.sqlite3-*
+*.db.*
+*.sqlite.*
+*.sqlite3.*
 
 # IDE and OS
 .idea/
 .vscode/
 *.swp
 .DS_Store
+cursor_handover.md
 
 # Logs and local AWS/Terraform
 *.log

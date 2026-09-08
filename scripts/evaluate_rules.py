@@ -21,6 +21,7 @@ from sentinel.decision.rules import RuleDecision, evaluate_command  # noqa: E402
 
 INTERVENTION_VERDICTS = {"confirm_required", "block"}
 ESCALATION_VERDICTS = {"warn", "confirm_required", "block"}
+VALID_VERDICTS = {"allow", "warn", "confirm_required", "block"}
 DEFAULT_INPUTS = (
     Path("data/processed/sentinel_seed_eval.jsonl"),
     Path("data/processed/sentinel_eval.jsonl"),
@@ -46,6 +47,17 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
 def evaluate_rows(rows: list[dict[str, Any]], sample_limit: int = 10) -> dict[str, Any]:
     evaluated: list[tuple[dict[str, Any], RuleDecision]] = []
     for row in rows:
+        label = row.get("label")
+        if type(label) is not int or label not in (0, 1):
+            raise ValueError(
+                f"{row.get('id', '<unknown>')}: label must be integer 0 or 1"
+            )
+        expected_verdict = row.get("expected_verdict")
+        if expected_verdict not in (None, "") and expected_verdict not in VALID_VERDICTS:
+            raise ValueError(
+                f"{row.get('id', '<unknown>')}: invalid expected_verdict "
+                f"{expected_verdict!r}"
+            )
         decision = evaluate_command(
             context=str(row.get("context", "")),
             command=str(row.get("command", "")),
@@ -75,10 +87,15 @@ def evaluate_rows(rows: list[dict[str, Any]], sample_limit: int = 10) -> dict[st
         for row, decision in benign_rows
         if decision.verdict in ESCALATION_VERDICTS
     ]
-    verdict_mismatches = [
+    annotated_verdicts = [
         (row, decision)
         for row, decision in evaluated
-        if row.get("expected_verdict") and decision.verdict != row.get("expected_verdict")
+        if row.get("expected_verdict") in VALID_VERDICTS
+    ]
+    verdict_mismatches = [
+        (row, decision)
+        for row, decision in annotated_verdicts
+        if decision.verdict != row.get("expected_verdict")
     ]
 
     return {
@@ -93,7 +110,21 @@ def evaluate_rows(rows: list[dict[str, Any]], sample_limit: int = 10) -> dict[st
         "dangerous_recall_block_only": _ratio(len(dangerous_blocks), len(dangerous_rows)),
         "benign_block_false_positive_rate": _ratio(len(benign_blocks), len(benign_rows)),
         "benign_escalation_rate": _ratio(len(benign_escalations), len(benign_rows)),
-        "expected_verdict_accuracy": _ratio(total - len(verdict_mismatches), total),
+        "interruption_metrics": {
+            "all_rows": _interruption_metrics(evaluated),
+            "benign_rows": _interruption_metrics(benign_rows),
+            "dangerous_rows": _interruption_metrics(dangerous_rows),
+        },
+        "expected_verdict_annotated_rows": len(annotated_verdicts),
+        "expected_verdict_unannotated_rows": total - len(annotated_verdicts),
+        "expected_verdict_annotation_coverage": _ratio(
+            len(annotated_verdicts),
+            total,
+        ),
+        "expected_verdict_accuracy": _ratio(
+            len(annotated_verdicts) - len(verdict_mismatches),
+            len(annotated_verdicts),
+        ),
         "verdict_confusion": _verdict_confusion(evaluated),
         "source_breakdown": _breakdown(evaluated, key="source"),
         "risk_category_breakdown": _breakdown(evaluated, key="risk_category"),
@@ -130,6 +161,22 @@ def print_human_summary(report: dict[str, Any]) -> None:
     print(f"Dangerous recall (block only): {_format_pct(overall['dangerous_recall_block_only'])}")
     print(f"Benign block FPR: {_format_pct(overall['benign_block_false_positive_rate'])}")
     print(f"Benign escalation rate: {_format_pct(overall['benign_escalation_rate'])}")
+    benign_interruptions = overall["interruption_metrics"]["benign_rows"]
+    print(
+        "Benign verdict rates: "
+        f"warn={_format_pct(benign_interruptions['warn_rate'])}, "
+        f"confirm={_format_pct(benign_interruptions['confirm_required_rate'])}, "
+        f"block={_format_pct(benign_interruptions['block_rate'])}"
+    )
+    print(
+        "Overall interruption rates: "
+        f"escalation={_format_pct(overall['interruption_metrics']['all_rows']['escalation_rate'])}, "
+        f"confirm-or-block={_format_pct(overall['interruption_metrics']['all_rows']['intervention_rate'])}"
+    )
+    print(
+        "Expected verdict annotation coverage: "
+        f"{_format_pct(overall['expected_verdict_annotation_coverage'])}"
+    )
     print(f"Expected verdict accuracy: {_format_pct(overall['expected_verdict_accuracy'])}")
     print(f"Predicted verdicts: {overall['predicted_verdict_counts']}")
     print(f"Top reason codes: {dict(Counter(overall['predicted_reason_code_counts']).most_common(8))}")
@@ -211,8 +258,44 @@ def _breakdown(evaluated: list[tuple[dict[str, Any], RuleDecision]], key: str) -
             "predicted_verdict_counts": dict(Counter(decision.verdict for _, decision in group_rows)),
             "dangerous_recall_intervention": _ratio(len(interventions), len(dangerous)),
             "benign_block_false_positive_rate": _ratio(len(benign_blocks), len(benign)),
+            "interruption_metrics": {
+                "all_rows": _interruption_metrics(group_rows),
+                "benign_rows": _interruption_metrics(benign),
+                "dangerous_rows": _interruption_metrics(dangerous),
+            },
         }
     return breakdown
+
+
+def _interruption_metrics(
+    evaluated: list[tuple[dict[str, Any], RuleDecision]],
+) -> dict[str, Any]:
+    counts = Counter(decision.verdict for _, decision in evaluated)
+    total = len(evaluated)
+    return {
+        "rows": total,
+        "allow_count": counts["allow"],
+        "warn_count": counts["warn"],
+        "confirm_required_count": counts["confirm_required"],
+        "block_count": counts["block"],
+        "allow_rate": _ratio(counts["allow"], total),
+        "warn_rate": _ratio(counts["warn"], total),
+        "confirm_required_rate": _ratio(
+            counts["confirm_required"],
+            total,
+        ),
+        "block_rate": _ratio(counts["block"], total),
+        "escalation_count": sum(counts[value] for value in ESCALATION_VERDICTS),
+        "escalation_rate": _ratio(
+            sum(counts[value] for value in ESCALATION_VERDICTS),
+            total,
+        ),
+        "intervention_count": sum(counts[value] for value in INTERVENTION_VERDICTS),
+        "intervention_rate": _ratio(
+            sum(counts[value] for value in INTERVENTION_VERDICTS),
+            total,
+        ),
+    }
 
 
 def _samples(pairs: list[tuple[dict[str, Any], RuleDecision]], limit: int) -> list[dict[str, Any]]:

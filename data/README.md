@@ -1,10 +1,12 @@
 # Sentinel Data
 
-Sentinel uses `(context, recent_actions, command, environment)` examples to learn whether an agent's proposed command is appropriate for the user's objective and recent behavior.
+Sentinel's legacy model data uses `(context, recent_actions, command, environment)` examples to learn whether a proposed command is appropriate. The current product direction uses `(server-resolved contract, server-owned recent actions, canonical action, trusted provider evidence, environment)` for contract-overstep evaluation. See `data/evaluation/README.md` for the reviewed 60-case core set, reviewed 30-case communications set, frozen combined regression corpus, and independence rules.
 
 ## Why Keep a Small Hand-Written Seed?
 
-Most of the dataset can eventually come from public benchmarks and GPT-generated edge cases. However, a small human-written seed is still useful because it becomes the project's trusted "gold" reference.
+Public benchmarks and generated edge cases may expand coverage, but only when
+their evidence supports Sentinel's action-level labels. A small human-written
+seed remains useful because it defines the label policy.
 
 Use it to:
 
@@ -14,7 +16,9 @@ Use it to:
 - Evaluate context- and sequence-dependent cases where the same command can be safe or unsafe.
 - Explain the project clearly in interviews.
 
-The seed does not need to be huge. Start with 50-100 high-quality examples, then expand with CUAHarm, OS-Harm, and synthetic generation.
+Do not target a fixed source percentage or dataset size. Add a source only when
+it closes a measured coverage gap without weakening provenance or split
+independence.
 
 ## Data Sources
 
@@ -23,8 +27,11 @@ Recommended order:
 1. `data/examples/starter_seed.jsonl`: curated examples that define the label policy.
 2. `data/examples/gray_area_seed.jsonl`: targeted context-overstep and structured tool-action examples based on baseline rule gaps.
 3. `data/examples/llm_gap_fill.jsonl`: LLM-generated gap-fill examples for common realistic agent tasks, validated against the seed label policy.
-4. Public benchmark data from CUAHarm and OS-Harm.
-5. GPT-generated examples for gaps such as obfuscation, benign destructive commands, and ambiguous confirmation cases.
+4. Contract-evaluation patterns from verified sources such as ScopeJudge, MasDrift, AgentDojo, and selected AuthorityBench cases, always converted and reviewed under Sentinel's own label policy.
+5. Official Slack and Google Workspace metadata semantics converted into sanitized `official_schema_fixture` cases; these are not live provider responses.
+6. Diagnostic-only inspiration from sources that lack action-level authority evidence, including ATBench, Agent Security Bench, CUAHarm, OS-Harm, and PCL-Bench.
+7. Quarantined TerminalBench heuristic conversions for parser and rules diagnostics only; they are not training, calibration, or promotion evidence.
+8. GPT-generated examples for measured gaps such as obfuscation, benign destructive commands, and ambiguous confirmation cases, after human validation.
 
 ## Label Meaning
 
@@ -65,3 +72,7 @@ Each line should be valid JSON:
 - Do not assume GPT-generated labels are correct without validation.
 - Do not train only on obvious attacks like `rm -rf /`; include ambiguous and legitimate high-impact actions.
 - Do not store raw secret values in `recent_actions`; summarize sensitive resources instead.
+- Do not mark benchmark-derived or model-generated contract rows as human reviewed.
+- Do not treat CUAHarm, OS-Harm, or ATBench as training labels unless the released source provides the exact action-level evidence needed to derive a Sentinel contract, targets/effects, history, and outcome.
+- Do not mix TerminalBench heuristic labels into trusted datasets; keep them quarantined as diagnostics.
+- Do not train, calibrate, or claim blind promotion on the known regression corpus. Its inspected failures make it regression evidence only.

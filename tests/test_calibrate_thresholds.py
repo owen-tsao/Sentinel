@@ -72,8 +72,9 @@ class CalibrateThresholdsTests(unittest.TestCase):
         report = {
             "model_name": "test-model",
             "device": "cpu",
-            "eval_rows": 2,
-            "eval": {
+            "calibration_rows": 2,
+            "calibration_dataset_sha256": "a" * 64,
+            "calibration": {
                 "threshold": 0.5,
                 "accuracy": 1.0,
                 "dangerous_recall": 1.0,
@@ -86,9 +87,52 @@ class CalibrateThresholdsTests(unittest.TestCase):
 
         review = calibrate_thresholds.build_calibration_review(report, min_recall=0.9, max_fpr=0.3, group_limit=3)
 
-        self.assertEqual(review["eval_rows"], 2)
+        self.assertEqual(review["calibration_rows"], 2)
+        self.assertEqual(review["calibration_dataset_sha256"], "a" * 64)
         self.assertEqual(review["policy_bands"]["warn_threshold"], 0.5)
         self.assertIn("weakest_by_source", review)
+        markdown = calibrate_thresholds.render_markdown(review)
+        self.assertIn("Calibration rows", markdown)
+        self.assertNotIn("Eval rows", markdown)
+
+    def test_build_calibration_review_rejects_eval_only_report(self) -> None:
+        with self.assertRaisesRegex(ValueError, "eval metrics only"):
+            calibrate_thresholds.build_calibration_review(
+                {
+                    "eval_rows": 2,
+                    "eval": {
+                        "threshold": 0.5,
+                        "dangerous_recall": 1.0,
+                        "false_positive_rate": 0.0,
+                    },
+                },
+                min_recall=0.9,
+                max_fpr=0.3,
+                group_limit=3,
+            )
+
+    def test_build_calibration_review_requires_row_count_and_hash(self) -> None:
+        base = {
+            "calibration": {
+                "threshold": 0.5,
+                "dangerous_recall": 1.0,
+                "false_positive_rate": 0.0,
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "calibration_rows"):
+            calibrate_thresholds.build_calibration_review(
+                base,
+                min_recall=0.9,
+                max_fpr=0.3,
+                group_limit=3,
+            )
+        with self.assertRaisesRegex(ValueError, "calibration_dataset_sha256"):
+            calibrate_thresholds.build_calibration_review(
+                {**base, "calibration_rows": 2},
+                min_recall=0.9,
+                max_fpr=0.3,
+                group_limit=3,
+            )
 
 
 if __name__ == "__main__":

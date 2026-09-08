@@ -22,9 +22,12 @@ def load_report(path: Path) -> dict[str, Any]:
     return report
 
 
-def threshold_rows(eval_metrics: dict[str, Any]) -> list[dict[str, Any]]:
+def threshold_rows(calibration_metrics: dict[str, Any]) -> list[dict[str, Any]]:
     rows_by_threshold: dict[float, dict[str, Any]] = {}
-    for metrics in [eval_metrics, *eval_metrics.get("threshold_sweep", [])]:
+    for metrics in [
+        calibration_metrics,
+        *calibration_metrics.get("threshold_sweep", []),
+    ]:
         threshold = metrics.get("threshold")
         if threshold is None:
             continue
@@ -70,9 +73,9 @@ def recommend_policy_bands(
 
     notes: list[str] = []
     if not recall_target_rows:
-        notes.append(f"No evaluated threshold reached dangerous recall >= {min_recall:.2f}; warn threshold uses the best available recall.")
+        notes.append(f"No calibration threshold reached dangerous recall >= {min_recall:.2f}; warn threshold uses the best available recall.")
     if not bounded_rows:
-        notes.append(f"No evaluated threshold kept false positive rate <= {max_fpr:.2f}; confirm threshold uses the best available tradeoff.")
+        notes.append(f"No calibration threshold kept false positive rate <= {max_fpr:.2f}; confirm threshold uses the best available tradeoff.")
     if warn_row["threshold"] >= confirm_row["threshold"]:
         notes.append("Warn and confirm thresholds overlap; treat this as a signal that the model is not well calibrated enough for nuanced tiers.")
     notes.append("Do not use the model alone for block decisions; reserve block for deterministic rules and policy.")
@@ -87,8 +90,8 @@ def recommend_policy_bands(
     }
 
 
-def weakest_groups(eval_metrics: dict[str, Any], group_key: str, limit: int) -> dict[str, list[dict[str, Any]]]:
-    groups = eval_metrics.get(group_key, {})
+def weakest_groups(calibration_metrics: dict[str, Any], group_key: str, limit: int) -> dict[str, list[dict[str, Any]]]:
+    groups = calibration_metrics.get(group_key, {})
     if not isinstance(groups, dict):
         return {"dangerous_recall": [], "false_positive_rate": []}
 
@@ -117,18 +120,37 @@ def weakest_groups(eval_metrics: dict[str, Any], group_key: str, limit: int) -> 
 
 
 def build_calibration_review(report: dict[str, Any], min_recall: float, max_fpr: float, group_limit: int) -> dict[str, Any]:
-    eval_metrics = report.get("eval", {})
-    if not isinstance(eval_metrics, dict):
-        raise ValueError("report does not contain an eval metrics object")
-    rows = threshold_rows(eval_metrics)
+    calibration_metrics = report.get("calibration")
+    if not isinstance(calibration_metrics, dict):
+        if isinstance(report.get("eval"), dict):
+            raise ValueError(
+                "report contains eval metrics only; serving thresholds require "
+                "a distinct report['calibration'] metrics object"
+            )
+        raise ValueError("report does not contain a calibration metrics object")
+    calibration_rows = report.get("calibration_rows")
+    if (
+        type(calibration_rows) is not int
+        or calibration_rows <= 0
+    ):
+        raise ValueError("report requires a positive calibration_rows count")
+    calibration_dataset_sha256 = str(
+        report.get("calibration_dataset_sha256", "")
+    ).strip().lower()
+    if not _is_sha256(calibration_dataset_sha256):
+        raise ValueError(
+            "report requires a valid calibration_dataset_sha256"
+        )
+    rows = threshold_rows(calibration_metrics)
     return {
         "model_name": report.get("model_name"),
         "device": report.get("device"),
-        "eval_rows": report.get("eval_rows"),
+        "calibration_rows": calibration_rows,
+        "calibration_dataset_sha256": calibration_dataset_sha256,
         "thresholds": rows,
         "policy_bands": recommend_policy_bands(rows, min_recall=min_recall, max_fpr=max_fpr),
-        "weakest_by_risk_category": weakest_groups(eval_metrics, "by_risk_category", group_limit),
-        "weakest_by_source": weakest_groups(eval_metrics, "by_source", group_limit),
+        "weakest_by_risk_category": weakest_groups(calibration_metrics, "by_risk_category", group_limit),
+        "weakest_by_source": weakest_groups(calibration_metrics, "by_source", group_limit),
     }
 
 
@@ -137,7 +159,8 @@ def render_markdown(review: dict[str, Any]) -> str:
     lines = [
         "# Threshold Calibration Review",
         "",
-        f"- Eval rows: `{review.get('eval_rows')}`",
+        f"- Calibration rows: `{review.get('calibration_rows')}`",
+        f"- Calibration dataset SHA-256: `{review.get('calibration_dataset_sha256')}`",
         f"- Recommended warn threshold: `{bands['warn_threshold']}`",
         f"- Recommended confirm threshold: `{bands['confirm_threshold']}`",
         "- Model block threshold: `none`",
@@ -182,7 +205,16 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    review = build_calibration_review(load_report(args.report), args.min_recall, args.max_fpr, args.group_limit)
+    try:
+        review = build_calibration_review(
+            load_report(args.report),
+            args.min_recall,
+            args.max_fpr,
+            args.group_limit,
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     if args.format == "json":
         print(json.dumps(review, indent=2, sort_keys=True))
     else:
@@ -217,6 +249,12 @@ def _format_metric(value: Any) -> str:
     if value is None:
         return "n/a"
     return f"{float(value):.4f}"
+
+
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value
+    )
 
 
 if __name__ == "__main__":
