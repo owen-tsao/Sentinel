@@ -6,7 +6,7 @@ This repository is a production-grade foundation: its trust boundaries, persiste
 
 ## Current status
 
-Week 10 is implemented on `feature/week-10-task-authority` and is ready for clean commits.
+Week 10 is complete and merged into `main`. Week 11 begins with the protected local control-center plan.
 
 - Versioned contracts, one active task per session, server-owned history, canonical multi-target shell actions, exact-action test approvals, SQLite state, and at-most-once execution attempts are implemented.
 - A clean Python 3.11 container run passes all 477 tests, and the Docker authority/execution smoke passes.
@@ -185,6 +185,8 @@ The Docker smoke requires Docker Desktop, builds both images, validates the non-
 
 - [Product Architecture](./docs/Product%20Architecture.md) — current Week 10 boundary and Week 11 targets
 - [Roadmap](./docs/Roadmap.md) — sequencing and release gates
+- [Week 10 handover](./docs/Week%2010%20Handover.md) — verified foundation and new-chat starting state
+- [Week 11 plan](./docs/Week%2011%20Plan.md) — final reviewed control-center implementation plan
 - [Data strategy](./docs/data_strategy.md) — dataset evidence and promotion rules
 - [Evaluation data](./data/evaluation/README.md) — reviewed artifacts and regression history
 - [Threat model](./docs/week1_threat_model.md) — initial risks and policy categories

@@ -6,7 +6,7 @@ Project Sentinel is a local-first, OAuth-like authorization layer for agent task
 
 This roadmap separates the work into two phases:
 
-- **Part 1: Summer MVP (Weeks 1-12)** builds the core guardrail engine, persistent task-authority layer, local Docker execution, SQLite audit logging, a full local web control center, a public marketing site, and one measured coding-agent integration. In-editor/MCP clarification and a thin diagnostic CLI are supporting surfaces.
+- **Part 1: Summer MVP (Weeks 1-12)** builds the core guardrail engine, persistent task-authority layer, local Docker execution, SQLite audit logging, one protected local control-center flow, a public marketing site, and one measured coding-agent integration. In-editor/MCP clarification and a thin diagnostic CLI are supporting surfaces.
 - **Part 2: Post-Summer Expansion** turns the local product into a hosted/hybrid agent authorization platform with organizations, protected provider credentials, regional or customer-hosted enforcement, and managed execution infrastructure.
 
 ## Product Thesis
@@ -19,7 +19,6 @@ Sentinel's near-term wedge is not enterprise-wide agent discovery or a general p
 - propose an editable prompt and structured `ActionContract` without silently changing user intent,
 - keep one accepted task contract active across many compliant commands and tool calls,
 - let a new direct instruction from the trusted user narrow, replace, or clearly extend the current task without repeated approval,
-- let users save and reuse common safe task patterns while creating fresh authority for every run,
 - require separate approval only when a task adds sensitive authority such as production access, credentials, deployment, external sending, or broad deletion,
 - intercept shell, file, MCP, database, cloud, and Git actions through a host hook or mandatory proxy,
 - deterministically compare each proposed action with the accepted contract,
@@ -28,7 +27,7 @@ Sentinel's near-term wedge is not enterprise-wide agent discovery or a general p
 - require confirmation for high-risk but possibly legitimate actions,
 - run approved commands in a restricted Docker sandbox,
 - write audit logs to a local SQLite store,
-- expose the system through FastAPI and a full local web control center for onboarding, contracts, approvals, templates, rules, audit, and health,
+- expose the system through FastAPI and a protected local control center for onboarding, initial contract activation, exact approval, audit, and health,
 - use in-editor/MCP prompt revision only as a compact supporting feature,
 - publish a separate marketing site that explains and demonstrates the product without receiving protected local data.
 
@@ -41,7 +40,7 @@ Sentinel's near-term wedge is not enterprise-wide agent discovery or a general p
 - **Only trusted user input can expand authority:** agent suggestions and content read from tools, webpages, messages, or files can never grant new permissions.
 - **The contract is the boundary:** task identity, operation, exact target, environment, maximum scope, constraints, rollback requirements, authorization source, lifecycle, and approval state must be machine-checkable.
 - **Exact-action approval is exceptional:** one-time approval is reserved for sensitive actions and must not turn every ordinary command into a permission prompt.
-- **Learn convenience, never permission:** saved templates and future personalization may suggest familiar targets and safety steps, but only a fresh trusted instruction or protected approval can activate authority.
+- **Learn convenience, never permission:** future saved templates and personalization may suggest familiar targets and safety steps, but only a fresh trusted instruction or protected approval can activate authority.
 - **Temporal context matters:** decisions should consider the recent action window for the agent session, not only the current command.
 - **Malicious is different from destructive:** authorized destructive work may be allowed or require confirmation; malicious or agent-gone-haywire actions should block.
 - **Deterministic policy comes first:** critical allow/block rules and environment policy short-circuit before ML inference whenever possible.
@@ -51,7 +50,7 @@ Sentinel's near-term wedge is not enterprise-wide agent discovery or a general p
 - **Docker is not a production security boundary:** local Docker is acceptable for the Summer MVP proof-of-concept; enterprise execution requires stronger isolation such as managed orchestration, microVMs, or hardened Kubernetes controls.
 - **Audit everything:** allowed, blocked, warned, and confirmation-required requests must all be logged.
 - **Local-first security:** teams should be able to test policies and commands locally before using hosted infrastructure.
-- **Web app is the primary product:** contract creation, authority management, approval, audit, templates, rules, onboarding, and health belong in the local control center.
+- **Web app is the primary product:** contract creation, authority management, approval, audit, onboarding, and health belong in the local control center. Templates and custom rules are later extensions.
 - **Integrate where work happens:** Cursor, Codex, MCP, and similar surfaces should provide compact clarification and status, then route protected review to the web control center.
 - **Scale without replacing the core:** a future hosted control plane may manage organizations, identity, policy, and audit indexing while enforcement remains local, regional, or customer-hosted.
 
@@ -67,12 +66,11 @@ The Summer MVP is complete when Sentinel can:
 - Version, replace, narrow, expire, and revoke task authority while preserving its trusted source.
 - Let direct trusted user instructions move to a different ordinary task without stale-contract blocks; require review for sensitive capability expansion.
 - Bind one-use exact-action approvals to a specific contract version and canonical action.
-- Save, edit, delete, and reuse a task template that creates a fresh proposed contract rather than permanent authority.
 - Evaluate requests using deterministic contract/rule enforcement, with ONNX scoring only if it proves value beyond the rules-only baseline.
 - Return structured verdicts: `allow`, `warn`, `confirm_required`, or `block`.
 - Run approved commands in a restricted local Docker executor.
 - Record audit events in a local SQLite store with a JSONL export/debug format.
-- Provide a full local web control center, a public marketing site, and a measured coding-agent integration.
+- Provide one protected local control-center flow, a public marketing site, and a measured coding-agent integration.
 - Keep any CLI limited to non-blocking health, fixture evaluation, and CI diagnostics.
 - Produce system metrics: contract-overstep recall, compliant-action false interruption rate, enforcement coverage, approval bypass rate, p50/p99 inference latency, sandbox latency, and audit logging success rate.
 
@@ -83,7 +81,7 @@ Public marketing site -> installation and product education only
 
 Local web control center
         |
-        | onboarding, contracts, active tasks, approvals, templates, rules, audit
+        | onboarding, initial contract activation, active authority, approval, audit
         v
 FastAPI control service + SQLite
         |
@@ -337,12 +335,13 @@ Response + audit event
 - Close release-blocking rule, approval, API resource-limit, executor, model-input, and data-split safety debt.
 - Implement persistent `ActionContract` lifecycle, one active task per session, canonical multi-target matching, server-owned history, and atomic exact-action approval.
 - Implement SQLite audit evidence for every authority, decision, approval, and execution transition.
-- Define only the non-authorizing `TaskTemplate` schema and audit event shapes needed by Week 11; do not implement save/reuse behavior yet.
+- Keep template save/reuse out of Week 10; define only the audit event shapes
+  needed by the protected Week 11 core flow.
 - Rebuild evaluation around human-reviewed contract compliance and compare ML with the rules-only baseline.
 
 **Done when:** the insecure agent-callable approval path is disabled; persistent contract lifecycle/store/API/matcher tests pass; one Sentinel-owned shell path completes active contract → canonical action → decision → Docker release → ordered audit end to end; the Cursor capability matrix makes its advisory status explicit; exact approval is tested only through an isolated test harness until Week 11 provides the protected human interface; bypass/replay/concurrency/redaction tests pass; and a human-reviewed golden evaluation either justifies optional ML or records a rules-only release decision.
 
-**Current result:** the Week 10 foundation is implemented on `feature/week-10-task-authority`.
+**Current result:** the Week 10 foundation is complete and merged into `main`.
 
 - Authority: immutable contract versions, one active task per session, trusted-event replay rejection, authority epochs, audited transitions, and server-side active-contract resolution are implemented. Runtime mutation remains internal/test-only until Week 11 provides protected provenance and controls.
 - Decisions: raw shell input is canonicalized on the server into complete targets/effects, checked against the active contract, and evaluated with server-owned recent history. Caller identity and caller history do not grant authority.
@@ -355,7 +354,9 @@ Response + audit event
 - Verification: a clean Python 3.11 container run passes all 477 tests. The Docker smoke also passes the trusted activation → durable admission → read-only non-root execution → ordered audit path, destructive blocking, API socket isolation, and legacy no-authority gating.
 - ML: serving is disabled. Without an independent reviewed calibration set, calibration, export, and serving fail closed.
 
-**Week 10 local summary:** the implementation and release verification are complete. Commit the reviewed foundation on the feature branch, then merge it only after the commit snapshots remain green. No private external plan is required to understand or verify this milestone.
+**Week 10 local summary:** implementation, review, verification, clean commits,
+and the local merge are complete. The durable handover is
+[Week 10 Handover](./Week%2010%20Handover.md).
 
 **ML promotion gate (not a Week 10 commit blocker):** before any model can be promoted, create a fresh preregistered, group-disjoint blind set; prove training, validation, calibration, and blind-evaluation independence; review and content-bind the calibration data; and pass the documented metrics without inspecting failures first. If those conditions are not met, Sentinel ships rules-only and keeps model serving disabled.
 
@@ -363,76 +364,34 @@ Response + audit event
 
 Week 10's contract references, server-owned history, canonical actions, and trusted prompt envelopes supersede the earlier Week 2/4/6 context-command schemas.
 
-### Week 11: Full Local Web Control Center
+### Week 11: Protected Local Control-Center Core
 
-**Goal:** Build the primary product experience as a full local web app backed by the trusted FastAPI service.
+**Goal:** Prove one polished, protected local control-center flow for a developer supervising a coding agent in one repository.
 
-**Tasks:**
+The reviewed implementation checklist is
+[Week 11 Plan](./Week%2011%20Plan.md). That plan supersedes the broader
+aspirational scope that previously appeared here.
 
-- Build the local web control center with focused pages for:
-  - onboarding and agent connection status,
-  - active, pending, suspended, expired, and revoked task authority,
-  - contract creation, review, version history, and action-versus-contract differences,
-  - exact-action approval and denial,
-  - reusable task templates,
-  - custom rules,
-  - audit history, decision explanations, and service health.
-- Add a clarification API and contract editor that:
-  - explains which security-relevant fields are missing,
-  - shows an editable proposed prompt and structured contract,
-  - preserves the original prompt for comparison,
-  - never executes merely because the proposal was generated.
-- Add risk-adaptive task-mode presets rather than separate products:
-  - coding/workspace mode uses trusted repository, branch, selected-file, and environment context from the host,
-  - research-only and personal-assistant modes default to narrower browser, file, and communication permissions,
-  - operations mode requires explicit environment and target scope,
-  - low-risk work creates or updates a visible task summary without questions; only boundary-changing ambiguity interrupts.
-- Add multi-turn task transitions:
-  - continue the active contract across ordinary matching actions,
-  - create a new version when the trusted user narrows or extends the same objective,
-  - start a new lineage and suspend the previous task when the trusted user starts an unrelated objective,
-  - reactivate a suspended task only from a fresh trusted user event,
-  - show a small contract update rather than a blocking approval for ordinary low-risk changes,
-  - require explicit review only for sensitive authority expansion,
-  - prevent untrusted content and the agent itself from changing task authority.
-- Add authority management to the local interface:
-  - show active, pending, and suspended task scope,
-  - accept or reject sensitive amendments,
-  - revoke an active task,
-  - show when an unrelated prompt started a new task lineage,
-  - switch back to a suspended task only from a fresh trusted user action,
-  - keep the previous contract active when an amendment is rejected.
-- Add manual reusable task templates:
-  - save an accepted contract pattern as a named routine,
-  - inspect, edit, version, and delete templates,
-  - create a fresh proposed contract from a selected template,
-  - show changed targets, environments, and sensitive capabilities before activation,
-  - never treat the template itself as authority.
-- Ship and measure the coding preset first. General-agent presets remain policy/fixture validation until a host provides mandatory interception.
-- Show an action-versus-contract review:
-  - operation, target, environment, and scope differences,
-  - expected and forbidden side effects,
-  - rollback/dry-run obligations,
-  - deterministic reasons and any model escalation signal.
-- Implement an approver trust boundary that the guarded agent cannot self-call:
-  - approve or deny one exact canonical action,
-  - record approver identity/channel and expiry,
-  - consume approval atomically,
-  - reject replay, changed targets, changed scopes, and changed environments,
-  - invalidate approval when its contract is superseded, suspended, expired, or revoked.
-- Add supporting Cursor, Codex, and MCP surfaces:
-  - show compact clarification and active-contract status where the developer works,
-  - deep-link contract edits and sensitive approvals to the local web control center,
-  - keep prompt revision useful but secondary to the full web product,
-  - keep every surface advisory unless it proves authenticated user provenance and mandatory action mediation.
-- Add custom blocker management:
-  - list, create, edit, enable/disable, and delete user-defined deny/confirm rules,
-  - scope rules to canonical action, resource, environment, agent, or session,
-  - enforce escalation-only behavior,
-  - test a rule against a sample command before enabling it.
-- Add focused audit views for clarification, contract mismatch, approval, and execution events. Defer decorative charts and broad settings work if they compete with the core UX.
+**Implementation order:**
 
-**Deliverable:** A user can install and open Sentinel's local web control center, connect a supported development workflow, create and manage task authority, move between ordinary tasks, save and reuse safe templates as fresh authority, review sensitive expansions, approve one exact high-risk action, and inspect the resulting audit evidence.
+1. Prove one-use browser pairing, fixed workspace binding, raw-prompt
+   non-persistence, and one truthful confirmation/retry action.
+2. Add protected control routes around the existing authority, approval, and
+   audit services while leaving agent routes unchanged.
+3. Add server-owned denial, approval, automatic retry, and atomic consumption.
+4. Build the Next.js shell with Overview, Tasks, Approvals, and Audit.
+5. Complete one real Playwright path through FastAPI and Docker.
+6. Run full security, correctness, accessibility, and release verification.
+
+**Deliverable:** From the local web app, a paired human can create and edit a
+task contract, explicitly activate it, inspect workspace authority, deny or
+approve one exact action, observe one server-owned retry, and inspect the
+ordered audit evidence. The UI must clearly state that no mandatory external
+agent is connected.
+
+**Deferred from Week 11:** templates, custom rules, broad task presets,
+multi-workspace management, GitHub OAuth, marketing, ML, production provider
+enforcement, and mandatory external-agent integration.
 
 ### Week 12: Mandatory Integration, Marketing Site, and Release Candidate
 
@@ -446,26 +405,19 @@ Week 10's contract references, server-owned history, canonical actions, and trus
   - documents supported versus advisory integrations and installation,
   - remains completely separate from local contracts, approvals, credentials, output, and audit data.
 - Keep the CLI optional and thin: health, offline fixture evaluation, and machine-readable CI diagnostics only. Defer interactive contract, approval, template, and audit commands to the web app.
-- Run end-to-end tests covering onboarding, prompt clarification, contract acceptance, task switching, action matching, exact approval, API, local web app, Docker executor, and audit logging.
+- Run end-to-end tests covering onboarding, prompt clarification, initial contract acceptance, action matching, exact approval, API, local web app, Docker executor, and audit logging.
 - Select one coding-agent path only after a tiny interception spike proves authenticated user provenance or routes authority through the protected web app, plus complete mediation of the protected action. If no candidate passes, keep all host integrations advisory and demonstrate only the Sentinel-owned API → Docker boundary.
 - Run the real-agent boundary evaluation through the selected mandatory adapter/proxy. Evaluate Cursor separately as an advisory clarification/deep-link surface:
   - ambiguous high-impact prompts,
   - clear compliant requests,
   - multiple ordinary actions under one task contract,
-  - trusted user transitions to a different repository area,
-  - sensitive task expansion requiring review,
-  - rejected expansion leaving previous authority active,
-  - unrelated tasks receiving separate contract lineages while prior tasks are suspended,
   - stale or replayed trusted prompt events and concurrent amendment conflicts,
   - multi-target actions whose second target exceeds authority,
-  - template reuse producing a fresh task and expiry,
-  - sensitive template fields still requiring review,
-  - untrusted content failing to influence saved preferences,
   - untrusted content attempting to grant itself authority,
   - target/environment/scope oversteps,
   - subagent and indirect-script bypass attempts,
   - ordinary benign development tasks.
-- Measure overstep catch rate, false interruptions, unnecessary repeated approvals, task-transition accuracy, template reuse and clarification reduction, clarification acceptance/edit rate, enforcement-path coverage, and approval bypass rate.
+- Measure overstep catch rate, false interruptions, unnecessary repeated approvals, clarification acceptance/edit rate, enforcement-path coverage, and approval bypass rate.
 - Document adapter limitations explicitly; do not claim enforcement for hosts or tools that can bypass Sentinel.
 - Freeze the Summer MVP scope and document installation, local usage, and operational limits.
 
@@ -482,11 +434,12 @@ These are intentionally excluded from the first 12 weeks:
 - Production container orchestration.
 - Datadog/Splunk streaming integrations.
 - Slack/email approval queues.
-- Rich organization-wide policy authoring; Week 11 includes only simple local custom rules.
+- Rich organization-wide policy authoring; local custom rules are deferred.
 - Full managed deployment for customer workloads.
 - Production-ready real-agent framework adapters.
 - A general-purpose prompt-writing assistant unrelated to high-impact action safety.
-- Automatic permission expansion based on learned behavior; the Summer MVP supports only user-created templates.
+- Automatic permission expansion based on learned behavior; any future
+  user-created template must still produce a fresh reviewed contract.
 - Enforcement claims for hosts or tools that do not provide complete interception.
 
 ## Part 2: Post-Summer Expansion - Hosted/Hybrid Production Scaling

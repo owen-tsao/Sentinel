@@ -4,7 +4,14 @@ This document is the source of truth for product behavior, trust boundaries, sch
 
 ## 1. Executive Summary
 
-Project Sentinel is a local-first, OAuth-like authorization layer for agent tasks. Its planned primary product surface is a local web control center for creating contracts, viewing active task authority, handling approvals, managing safe task templates and rules, and reviewing audit evidence. That control center is a Week 11 target, not a current interface. The enforcement layer keeps each accepted contract active across multiple compliant actions and prevents agents from gaining authority through tool output, webpages, messages, files, subagents, or their own reasoning.
+Project Sentinel is a local-first, OAuth-like authorization layer for agent
+tasks. Its planned primary product surface is a local web control center for
+creating contracts, viewing active task authority, handling approvals, and
+reviewing audit evidence; safe templates and custom rules are later extensions.
+Week 11 proves the protected core flow, not the entire eventual control center.
+The enforcement layer keeps each accepted contract active across multiple
+compliant actions and prevents agents from gaining authority through tool
+output, webpages, messages, files, subagents, or their own reasoning.
 
 The existing command-risk engine remains useful infrastructure: deterministic policy handles obvious decisions, an optional model handles ambiguity and contract-overstep signals, exact-action approvals govern legitimate high-impact work, Docker contains locally approved commands, and SQLite provides an independent audit trail. Small Cursor, Codex, MCP, or other host integrations may provide in-editor prompt clarification and status, but they are supporting features rather than the primary product or an enforcement boundary by themselves. Coding agents provide the Summer MVP's measurable proving ground; general autonomous agents with files, messages, provider connections, and outbound tools are the longer-term product wedge.
 
@@ -58,7 +65,9 @@ The core value is not "AI magically knows what is bad" or "a longer prompt is au
 - Run allowed commands inside a restricted Docker sandbox, not directly on the host.
 - Log all decisions to a local SQLite audit store behind a swappable `AuditStore` interface, with a JSONL export for debugging.
 - Produce measurable results: recall, false positive rate, latency, and sandbox behavior.
-- Provide a full local web control center for onboarding, task authority, approvals, templates, rules, audit review, and system health.
+- Provide a protected local control center for onboarding, task authority,
+  approvals, audit review, and system health; add templates and custom rules
+  only after the core flow is proven.
 - Provide a public marketing site that explains the problem, product boundary, local-first trust model, and installation path without receiving protected local data.
 - Retain only a thin diagnostic CLI for scripts, CI, and developer troubleshooting; it is not the primary product surface.
 - Provide small Cursor, Codex, MCP, and host-agnostic integration surfaces that make prompt clarification visible where developers already work while keeping authority and review in the web control center.
@@ -225,7 +234,13 @@ The Week 10 host-run API can launch executor containers. The Compose API intenti
 
 ### 4.2 Week 11 target
 
-Week 11 adds the local web control center, protected authority provenance, contract lifecycle controls, and a human exact-action approval channel. Supporting host integrations remain advisory until they prove both trusted user provenance and complete mediation. The control plane—contracts, policy, identity, approvals, and audit—remains separate from the enforcement plane that intercepts actions.
+Week 11 adds the protected local control-center core: browser pairing, initial
+contract activation, one server-owned supervision session, exact-action
+approval/denial, and audit review. Broader lifecycle controls remain later
+work. Supporting host integrations remain advisory until they prove both
+trusted user provenance and complete mediation. The control plane—contracts,
+policy, identity, approvals, and audit—remains separate from the enforcement
+plane that intercepts actions.
 
 A future hosted deployment may move the control plane to managed infrastructure while retaining local, regional, or customer-hosted enforcement so sensitive code, credentials, and actions do not have to pass through the public marketing site or an unrelated SaaS frontend.
 
@@ -382,7 +397,10 @@ Neither caller-provided identity nor a legacy `user_confirmed` or `confirmation_
 
 #### Week 11 target
 
-The protected local control interface will let a human approve or deny one exact action through a channel the guarded agent cannot call as itself. It will also review sensitive contract amendments while keeping the previous active version authoritative until an approved replacement is committed. Rejection will leave previous authority unchanged.
+The protected local control interface will let a human approve or deny one
+exact action through a channel the guarded agent cannot call as itself.
+Sensitive contract amendment controls are deferred beyond the Week 11 core
+slice.
 
 ### 5.7 Response Strategy
 
@@ -489,37 +507,45 @@ The `AuditStore` interface keeps the storage backend swappable: a hosted deploym
 
 Every request should be logged, including blocked and malformed requests when possible. Audit events should record proposed, pending, accepted, rejected, superseded, suspended, expired, and revoked contract transitions; task/lineage IDs; trusted event provenance; canonical actions; mismatch reasons; approval actor/channel; atomic approval consumption; execution route; and execution reports. Raw secrets and unnecessary prompt content must not be persisted.
 
-### 5.10 Week 11 Target: Local Web Control Center, Marketing Site, and Thin CLI
+### 5.10 Week 11 Target: Protected Local Control Center
 
-Purpose: Make the local web control center the primary product while retaining small integration and diagnostic surfaces.
+Purpose: Prove one protected end-to-end human-control flow over the Week 10
+authority and enforcement foundation.
 
-None of these product interfaces is present in the Week 10 API. The following responsibilities are targets, not current runtime claims.
+No web or protected control interface is present in the Week 10 API. The
+reviewed implementation checklist is
+[Week 11 Plan](./Week%2011%20Plan.md).
 
-Local web control center responsibilities (single-user and localhost for the MVP):
+Week 11 local control-center responsibilities:
 
-- Provide onboarding, connection status, service health, and clear local-only boundaries.
-- Show why a high-impact prompt is ambiguous and which fields are missing.
-- Present an editable proposed prompt and structured action contract.
-- Show active, pending, and suspended task authority, contract lineage/version, and trusted source.
-- Accept or reject sensitive amendments while keeping the previous contract active until approval.
-- Revoke an active task, show when an unrelated prompt starts a new task lineage, and allow only a fresh trusted user action to reactivate a suspended task.
-- Show an action-versus-contract diff before approval.
-- Approve or deny one exact action through a channel the guarded agent cannot self-call.
-- Manage custom deny/confirm rules and review audit records.
-- Provide useful settings and focused reporting without becoming an enterprise analytics dashboard.
+- Pair one browser through a short-lived, one-use capability and protect every
+  human control route from unpaired agent/API callers.
+- Resolve one reviewed local workspace at startup and prevent runtime switching
+  or path escape.
+- Show deterministic clarification questions and an editable structured
+  contract without persisting the raw prompt.
+- Require explicit activation and show the active authority for the current
+  workspace/session throughout the app.
+- Approve or deny one exact action without returning approval credentials to
+  the browser or guarded agent.
+- Let a server-owned demo runner retry the exact approved action and consume
+  approval atomically at durable admission.
+- Show compact operational status and the exact ordered audit evidence.
+- State clearly that no mandatory external agent is connected.
 
-Public marketing site responsibilities:
+Week 12 public marketing site responsibilities:
 
 - Explain Sentinel's task-authorization purpose and how it differs from a prompt assistant or passive monitoring.
 - Show the local-first trust model, supported integrations, limitations, installation, and a focused product demonstration.
 - Remain separate from protected contracts, approvals, credentials, command output, and local audit data.
 
-Thin CLI responsibilities:
+Continuing thin CLI responsibilities:
 
 - Expose health, fixture evaluation, and machine-readable diagnostics for development and CI.
-- Avoid duplicating contract authoring, approval, template management, or audit exploration already provided by the web control center.
+- Avoid duplicating contract authoring, approval, audit exploration, or future
+  template management in the CLI.
 
-In-editor and MCP responsibilities:
+Deferred in-editor and MCP responsibilities:
 
 - Offer compact clarification, contract-status, and deep-link actions in Cursor, Codex, or another host.
 - Route protected review to the local web control center.
@@ -692,9 +718,17 @@ Exact details and paths depend on configuration. `status` is `ok` only when mode
 
 ### 7.6 Week 11 target routes
 
-Week 11 will design protected control-plane routes for trusted prompt provenance, contract proposal/activation/amendment/revocation, task switching, exact-action approval, and audit review. Candidate shapes include authority transitions, contract decisions, session task activation, and protected approval decisions.
+Week 11 will implement only the protected control routes needed for one
+supervision session: browser pairing, status, deterministic contract drafting,
+explicit initial activation, current authority, pending approval
+approve/deny, and audit review. Amendment, revocation, reactivation, task
+switching, templates, and custom-rule routes are deferred.
 
-These routes are targets, not current API commitments. Their final design must derive human identity and channel from a protected local interface, reject replayed trusted events, use compare-and-swap lifecycle checks, and keep the guarded agent unable to mint or expand authority.
+These routes are targets, not current API commitments. Their design must derive
+human identity and channel from a paired local interface, bind the browser and
+demo runner to one server-owned supervision session, reject replayed trusted
+events, use compare-and-swap lifecycle checks, and keep the guarded agent
+unable to mint or expand authority.
 
 ## 8. Data Schema
 
@@ -982,13 +1016,20 @@ Persistent `session/`, `audit/`, `approval/`, `authority/`, and `actions/` packa
 - Multi-turn tests for persistent contracts, same-task versioning, unrelated-task lineages, pending/rejected sensitive expansion, atomic approval consumption, expiry, revocation, and blocked untrusted authority changes.
 - Template tests proving that reuse creates a fresh contract, sensitive fields still require review, deleted templates grant nothing, and untrusted content cannot influence preferences.
 
-## 16. Week 11 Interface Target: Local Web Product with Supporting Agent Surfaces
+## 16. Broader Interface Direction After Week 11
 
-This entire section is a Week 11 target. None of these control-center workflows or lifecycle routes is exposed by the current Week 10 runtime.
+The final Week 11 slice is defined in
+[Week 11 Plan](./Week%2011%20Plan.md). It proves pairing, initial contract
+activation, one active supervision session, exact approval/denial, one
+server-owned retry, and audit review. The capabilities below are later product
+direction, not Week 11 commitments.
 
-The Summer MVP should make the local web control center the primary product experience. It will own onboarding, task contracts, authority state, exact-action approval, templates, custom rules, audit review, and health. Host integrations may stop vague high-impact requests, show a compact explanation, and deep-link into the relevant web review. In-editor or MCP prompt revision remains a useful side feature, not the product's main surface or a substitute for mandatory interception.
+The local web control center remains the primary product experience. Later
+iterations may add complete lifecycle management, templates, custom rules,
+multiple task presets, and host deep links without moving security authority
+into the frontend.
 
-Local web control center workflows:
+Later local control-center workflows:
 
 - Offer risk-adaptive presets for coding/workspace, research-only, personal-assistant communication, and operations tasks. Presets supply narrow defaults; they do not replace a reviewed contract.
 - In coding hosts, consume trusted repository, branch, selected-file, change, and environment metadata automatically so Sentinel asks only questions that change the security boundary.
@@ -1005,13 +1046,13 @@ Local web control center workflows:
 - Create, edit, test, and toggle custom blocker rules with validation feedback.
 - Review focused audit records for clarifications, contract mismatches, approvals, and executions.
 
-Supporting host/MCP workflows:
+Later supporting host/MCP workflows:
 
 - Show focused clarification or active-contract status where the developer is already working.
 - Deep-link to the local web control center for edits, authority changes, and approval.
 - Remain advisory when the host cannot provide authenticated user provenance or mandatory execution mediation.
 
-Thin CLI workflows, deferred behind the web product and real integration:
+Continuing thin CLI workflows:
 
 - `sentinel health` for service checks.
 - `sentinel eval-fixture --history history.json --contract fixture.json --action action.json` for offline diagnostics only.
