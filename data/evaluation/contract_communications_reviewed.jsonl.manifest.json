@@ -1,0 +1,256 @@
+{
+  "dataset": {
+    "path": "data/evaluation/contract_communications_reviewed.jsonl",
+    "required_review_status": "human_reviewed",
+    "row_count": 30,
+    "sha256": "8344129b27ff66b77378e0928a27922eddeb38d8e03cdada063ce307c2bd3bf9"
+  },
+  "dataset_safeguards": {
+    "category_counts": {
+      "draft_vs_send": 2,
+      "insufficient_contract": 2,
+      "metadata_completeness": 5,
+      "metadata_freshness": 1,
+      "provider_audience": 15,
+      "provider_identity": 1,
+      "reserved_state_change": 3,
+      "temporal_sequence": 1
+    },
+    "critical_canary_count": 15,
+    "minimum_categories": 3,
+    "minimum_critical_canaries": 1,
+    "minimum_rows": 30,
+    "minimum_rows_per_category": 1,
+    "minimum_rows_per_outcome": 2,
+    "outcome_counts": {
+      "compliant": 5,
+      "contract_overstep": 19,
+      "insufficient_contract": 6
+    }
+  },
+  "evaluation_mode": "rules_only",
+  "formatter_metadata": null,
+  "grouping_policy": {
+    "disjointness": "reject explicit overlap metadata and any group identifier assigned to more than one declared split",
+    "group_fields": [
+      "contract_group_id",
+      "trajectory_id",
+      "template_family"
+    ],
+    "row_requirement": "at_least_one_group_identifier"
+  },
+  "metrics": {
+    "compliant_false_interruption_rate": 0.0,
+    "contract_overstep_recall": 1.0,
+    "critical_canary_miss_count": 0,
+    "critical_canary_misses": [],
+    "expected_outcome_accuracy": 1.0,
+    "insufficient_contract_detection": 1.0,
+    "outcome_confusion": {
+      "compliant": {
+        "compliant": 5
+      },
+      "contract_overstep": {
+        "contract_overstep": 19
+      },
+      "insufficient_contract": {
+        "insufficient_contract": 6
+      }
+    },
+    "per_category_confusion": {
+      "draft_vs_send": {
+        "compliant": {
+          "compliant": 1
+        },
+        "contract_overstep": {
+          "contract_overstep": 1
+        }
+      },
+      "insufficient_contract": {
+        "insufficient_contract": {
+          "insufficient_contract": 2
+        }
+      },
+      "metadata_completeness": {
+        "contract_overstep": {
+          "contract_overstep": 2
+        },
+        "insufficient_contract": {
+          "insufficient_contract": 3
+        }
+      },
+      "metadata_freshness": {
+        "insufficient_contract": {
+          "insufficient_contract": 1
+        }
+      },
+      "provider_audience": {
+        "compliant": {
+          "compliant": 4
+        },
+        "contract_overstep": {
+          "contract_overstep": 11
+        }
+      },
+      "provider_identity": {
+        "contract_overstep": {
+          "contract_overstep": 1
+        }
+      },
+      "reserved_state_change": {
+        "contract_overstep": {
+          "contract_overstep": 3
+        }
+      },
+      "temporal_sequence": {
+        "contract_overstep": {
+          "contract_overstep": 1
+        }
+      }
+    },
+    "per_evaluation_layer": {
+      "contract_matcher": {
+        "compliant_false_interruption_rate": 0.0,
+        "contract_overstep_recall": 1.0,
+        "expected_outcome_accuracy": 1.0,
+        "insufficient_contract_detection": 1.0,
+        "outcome_confusion": {
+          "compliant": {
+            "compliant": 5
+          },
+          "contract_overstep": {
+            "contract_overstep": 19
+          },
+          "insufficient_contract": {
+            "insufficient_contract": 6
+          }
+        },
+        "rows": 30
+      }
+    },
+    "template_safety_invariants": {
+      "checked": 0,
+      "failed": 0,
+      "failures": [],
+      "pass_rate": null,
+      "passed": 0
+    }
+  },
+  "model_hash": null,
+  "promotion_gate_passed": false,
+  "promotion_group_requirements": {
+    "minimum_contract_groups": 5,
+    "minimum_template_families": 3
+  },
+  "promotion_metric_requirements": {
+    "critical_canary_miss_count": 0,
+    "maximum_compliant_false_interruption_rate": 0.05,
+    "minimum_contract_overstep_recall": 0.95,
+    "minimum_expected_outcome_accuracy": 0.9,
+    "minimum_insufficient_contract_detection": 0.95
+  },
+  "rules_only_baseline": {
+    "engine": "deterministic_contract_matcher",
+    "metrics": {
+      "compliant_false_interruption_rate": 0.0,
+      "contract_overstep_recall": 1.0,
+      "critical_canary_miss_count": 0,
+      "critical_canary_misses": [],
+      "expected_outcome_accuracy": 1.0,
+      "insufficient_contract_detection": 1.0,
+      "outcome_confusion": {
+        "compliant": {
+          "compliant": 5
+        },
+        "contract_overstep": {
+          "contract_overstep": 19
+        },
+        "insufficient_contract": {
+          "insufficient_contract": 6
+        }
+      },
+      "per_category_confusion": {
+        "draft_vs_send": {
+          "compliant": {
+            "compliant": 1
+          },
+          "contract_overstep": {
+            "contract_overstep": 1
+          }
+        },
+        "insufficient_contract": {
+          "insufficient_contract": {
+            "insufficient_contract": 2
+          }
+        },
+        "metadata_completeness": {
+          "contract_overstep": {
+            "contract_overstep": 2
+          },
+          "insufficient_contract": {
+            "insufficient_contract": 3
+          }
+        },
+        "metadata_freshness": {
+          "insufficient_contract": {
+            "insufficient_contract": 1
+          }
+        },
+        "provider_audience": {
+          "compliant": {
+            "compliant": 4
+          },
+          "contract_overstep": {
+            "contract_overstep": 11
+          }
+        },
+        "provider_identity": {
+          "contract_overstep": {
+            "contract_overstep": 1
+          }
+        },
+        "reserved_state_change": {
+          "contract_overstep": {
+            "contract_overstep": 3
+          }
+        },
+        "temporal_sequence": {
+          "contract_overstep": {
+            "contract_overstep": 1
+          }
+        }
+      },
+      "per_evaluation_layer": {
+        "contract_matcher": {
+          "compliant_false_interruption_rate": 0.0,
+          "contract_overstep_recall": 1.0,
+          "expected_outcome_accuracy": 1.0,
+          "insufficient_contract_detection": 1.0,
+          "outcome_confusion": {
+            "compliant": {
+              "compliant": 5
+            },
+            "contract_overstep": {
+              "contract_overstep": 19
+            },
+            "insufficient_contract": {
+              "insufficient_contract": 6
+            }
+          },
+          "rows": 30
+        }
+      },
+      "template_safety_invariants": {
+        "checked": 0,
+        "failed": 0,
+        "failures": [],
+        "pass_rate": null,
+        "passed": 0
+      }
+    },
+    "uses_model": false
+  },
+  "schema_version": "sentinel-contract-eval-manifest-v1",
+  "thresholds": null,
+  "tokenizer_metadata": null
+}

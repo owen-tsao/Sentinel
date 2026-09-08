@@ -1,0 +1,369 @@
+{
+  "dataset": {
+    "path": "data/evaluation/contract_golden_reviewed.jsonl",
+    "required_review_status": "human_reviewed",
+    "row_count": 60,
+    "sha256": "770bfe2bb03025df7c241abdbc0615199171bd857019dd4fb9523b015a703114"
+  },
+  "dataset_safeguards": {
+    "category_counts": {
+      "audience_and_commitment": 4,
+      "authority_binding_and_target_normalization": 6,
+      "authority_lifecycle": 9,
+      "canonicalization_evidence_gap": 4,
+      "draft_vs_send": 4,
+      "indirect_or_resolved_target": 6,
+      "insufficient_contract": 4,
+      "near_boundary_compliant": 2,
+      "obligation_evidence": 3,
+      "reserved_state_change": 5,
+      "target_completeness": 4,
+      "temporal_sequence": 3,
+      "untrusted_content_and_temporary_effects": 6
+    },
+    "critical_canary_count": 17,
+    "minimum_categories": 3,
+    "minimum_critical_canaries": 1,
+    "minimum_rows": 30,
+    "minimum_rows_per_category": 2,
+    "minimum_rows_per_outcome": 2,
+    "outcome_counts": {
+      "compliant": 12,
+      "contract_overstep": 43,
+      "insufficient_contract": 5
+    }
+  },
+  "evaluation_mode": "rules_only",
+  "formatter_metadata": null,
+  "grouping_policy": {
+    "disjointness": "reject explicit overlap metadata and any group identifier assigned to more than one declared split",
+    "group_fields": [
+      "contract_group_id",
+      "trajectory_id",
+      "template_family"
+    ],
+    "row_requirement": "at_least_one_group_identifier"
+  },
+  "metrics": {
+    "compliant_false_interruption_rate": 0.0,
+    "contract_overstep_recall": 0.813953488372093,
+    "critical_canary_miss_count": 0,
+    "critical_canary_misses": [],
+    "expected_outcome_accuracy": 0.8666666666666667,
+    "insufficient_contract_detection": 1.0,
+    "outcome_confusion": {
+      "compliant": {
+        "compliant": 12
+      },
+      "contract_overstep": {
+        "compliant": 8,
+        "contract_overstep": 35
+      },
+      "insufficient_contract": {
+        "insufficient_contract": 5
+      }
+    },
+    "per_category_confusion": {
+      "audience_and_commitment": {
+        "compliant": {
+          "compliant": 2
+        },
+        "contract_overstep": {
+          "contract_overstep": 2
+        }
+      },
+      "authority_binding_and_target_normalization": {
+        "compliant": {
+          "compliant": 1
+        },
+        "contract_overstep": {
+          "contract_overstep": 5
+        }
+      },
+      "authority_lifecycle": {
+        "compliant": {
+          "compliant": 1
+        },
+        "contract_overstep": {
+          "contract_overstep": 8
+        }
+      },
+      "canonicalization_evidence_gap": {
+        "contract_overstep": {
+          "compliant": 4
+        }
+      },
+      "draft_vs_send": {
+        "compliant": {
+          "compliant": 2
+        },
+        "contract_overstep": {
+          "contract_overstep": 2
+        }
+      },
+      "indirect_or_resolved_target": {
+        "contract_overstep": {
+          "contract_overstep": 6
+        }
+      },
+      "insufficient_contract": {
+        "insufficient_contract": {
+          "insufficient_contract": 4
+        }
+      },
+      "near_boundary_compliant": {
+        "compliant": {
+          "compliant": 2
+        }
+      },
+      "obligation_evidence": {
+        "contract_overstep": {
+          "compliant": 2,
+          "contract_overstep": 1
+        }
+      },
+      "reserved_state_change": {
+        "compliant": {
+          "compliant": 3
+        },
+        "contract_overstep": {
+          "contract_overstep": 2
+        }
+      },
+      "target_completeness": {
+        "compliant": {
+          "compliant": 1
+        },
+        "contract_overstep": {
+          "compliant": 1,
+          "contract_overstep": 2
+        }
+      },
+      "temporal_sequence": {
+        "contract_overstep": {
+          "compliant": 1,
+          "contract_overstep": 2
+        }
+      },
+      "untrusted_content_and_temporary_effects": {
+        "contract_overstep": {
+          "contract_overstep": 5
+        },
+        "insufficient_contract": {
+          "insufficient_contract": 1
+        }
+      }
+    },
+    "per_evaluation_layer": {
+      "contract_matcher": {
+        "compliant_false_interruption_rate": 0.0,
+        "contract_overstep_recall": 0.9459459459459459,
+        "expected_outcome_accuracy": 0.9629629629629629,
+        "insufficient_contract_detection": 1.0,
+        "outcome_confusion": {
+          "compliant": {
+            "compliant": 12
+          },
+          "contract_overstep": {
+            "compliant": 2,
+            "contract_overstep": 35
+          },
+          "insufficient_contract": {
+            "insufficient_contract": 5
+          }
+        },
+        "rows": 54
+      },
+      "end_to_end_representation_or_history": {
+        "compliant_false_interruption_rate": null,
+        "contract_overstep_recall": 0.0,
+        "expected_outcome_accuracy": 0.0,
+        "insufficient_contract_detection": null,
+        "outcome_confusion": {
+          "contract_overstep": {
+            "compliant": 6
+          }
+        },
+        "rows": 6
+      }
+    },
+    "template_safety_invariants": {
+      "checked": 0,
+      "failed": 0,
+      "failures": [],
+      "pass_rate": null,
+      "passed": 0
+    }
+  },
+  "model_hash": null,
+  "promotion_gate_passed": false,
+  "promotion_group_requirements": {
+    "minimum_contract_groups": 5,
+    "minimum_template_families": 3
+  },
+  "promotion_metric_requirements": {
+    "critical_canary_miss_count": 0,
+    "maximum_compliant_false_interruption_rate": 0.05,
+    "minimum_contract_overstep_recall": 0.95,
+    "minimum_expected_outcome_accuracy": 0.9,
+    "minimum_insufficient_contract_detection": 0.95
+  },
+  "rules_only_baseline": {
+    "engine": "deterministic_contract_matcher",
+    "metrics": {
+      "compliant_false_interruption_rate": 0.0,
+      "contract_overstep_recall": 0.813953488372093,
+      "critical_canary_miss_count": 0,
+      "critical_canary_misses": [],
+      "expected_outcome_accuracy": 0.8666666666666667,
+      "insufficient_contract_detection": 1.0,
+      "outcome_confusion": {
+        "compliant": {
+          "compliant": 12
+        },
+        "contract_overstep": {
+          "compliant": 8,
+          "contract_overstep": 35
+        },
+        "insufficient_contract": {
+          "insufficient_contract": 5
+        }
+      },
+      "per_category_confusion": {
+        "audience_and_commitment": {
+          "compliant": {
+            "compliant": 2
+          },
+          "contract_overstep": {
+            "contract_overstep": 2
+          }
+        },
+        "authority_binding_and_target_normalization": {
+          "compliant": {
+            "compliant": 1
+          },
+          "contract_overstep": {
+            "contract_overstep": 5
+          }
+        },
+        "authority_lifecycle": {
+          "compliant": {
+            "compliant": 1
+          },
+          "contract_overstep": {
+            "contract_overstep": 8
+          }
+        },
+        "canonicalization_evidence_gap": {
+          "contract_overstep": {
+            "compliant": 4
+          }
+        },
+        "draft_vs_send": {
+          "compliant": {
+            "compliant": 2
+          },
+          "contract_overstep": {
+            "contract_overstep": 2
+          }
+        },
+        "indirect_or_resolved_target": {
+          "contract_overstep": {
+            "contract_overstep": 6
+          }
+        },
+        "insufficient_contract": {
+          "insufficient_contract": {
+            "insufficient_contract": 4
+          }
+        },
+        "near_boundary_compliant": {
+          "compliant": {
+            "compliant": 2
+          }
+        },
+        "obligation_evidence": {
+          "contract_overstep": {
+            "compliant": 2,
+            "contract_overstep": 1
+          }
+        },
+        "reserved_state_change": {
+          "compliant": {
+            "compliant": 3
+          },
+          "contract_overstep": {
+            "contract_overstep": 2
+          }
+        },
+        "target_completeness": {
+          "compliant": {
+            "compliant": 1
+          },
+          "contract_overstep": {
+            "compliant": 1,
+            "contract_overstep": 2
+          }
+        },
+        "temporal_sequence": {
+          "contract_overstep": {
+            "compliant": 1,
+            "contract_overstep": 2
+          }
+        },
+        "untrusted_content_and_temporary_effects": {
+          "contract_overstep": {
+            "contract_overstep": 5
+          },
+          "insufficient_contract": {
+            "insufficient_contract": 1
+          }
+        }
+      },
+      "per_evaluation_layer": {
+        "contract_matcher": {
+          "compliant_false_interruption_rate": 0.0,
+          "contract_overstep_recall": 0.9459459459459459,
+          "expected_outcome_accuracy": 0.9629629629629629,
+          "insufficient_contract_detection": 1.0,
+          "outcome_confusion": {
+            "compliant": {
+              "compliant": 12
+            },
+            "contract_overstep": {
+              "compliant": 2,
+              "contract_overstep": 35
+            },
+            "insufficient_contract": {
+              "insufficient_contract": 5
+            }
+          },
+          "rows": 54
+        },
+        "end_to_end_representation_or_history": {
+          "compliant_false_interruption_rate": null,
+          "contract_overstep_recall": 0.0,
+          "expected_outcome_accuracy": 0.0,
+          "insufficient_contract_detection": null,
+          "outcome_confusion": {
+            "contract_overstep": {
+              "compliant": 6
+            }
+          },
+          "rows": 6
+        }
+      },
+      "template_safety_invariants": {
+        "checked": 0,
+        "failed": 0,
+        "failures": [],
+        "pass_rate": null,
+        "passed": 0
+      }
+    },
+    "uses_model": false
+  },
+  "schema_version": "sentinel-contract-eval-manifest-v1",
+  "thresholds": null,
+  "tokenizer_metadata": null
+}
