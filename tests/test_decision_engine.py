@@ -7,7 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from sentinel.decision.engine import evaluate_request  # noqa: E402
+from sentinel.decision.contract_policy import ContractMatchResult  # noqa: E402
+from sentinel.decision.engine import evaluate_contract_request, evaluate_request  # noqa: E402
 from sentinel.decision.policy import PolicyProfile, parse_policy_profile  # noqa: E402
 from sentinel.ml.inference import RiskPrediction  # noqa: E402
 
@@ -65,6 +66,78 @@ def policy_profile() -> PolicyProfile:
 
 
 class DecisionEngineTests(unittest.TestCase):
+    def test_contract_mismatch_blocks_without_model_inference(self) -> None:
+        model = FakeRiskModel(prediction(0.01, "allow"))
+        decision = evaluate_contract_request(
+            context="Create reviewed output.",
+            command="touch /workspace/escaped.txt",
+            environment="sandbox",
+            recent_actions=[],
+            contract_match=ContractMatchResult(
+                matches=False,
+                reason_codes=["contract:target_mismatch"],
+                contract_id="contract-1",
+                contract_version=1,
+                action_fingerprint="fingerprint",
+            ),
+            model=model,
+            policy_profile=policy_profile(),
+            request_id_factory=lambda: "contract-request-1",
+        )
+
+        self.assertEqual(decision.verdict, "block")
+        self.assertEqual(decision.routing_path, "contract")
+        self.assertIn("contract:target_mismatch", decision.reasons)
+        self.assertEqual(model.rows, [])
+
+    def test_policy_unavailable_blocks_matching_noncritical_contract_action(self) -> None:
+        model = FakeRiskModel(prediction(0.01, "allow"))
+        decision = evaluate_contract_request(
+            context="Create reviewed output.",
+            command="touch /workspace/build.txt",
+            environment="sandbox",
+            recent_actions=[],
+            contract_match=ContractMatchResult(
+                matches=True,
+                reason_codes=[],
+                contract_id="contract-1",
+                contract_version=1,
+                action_fingerprint="fingerprint",
+            ),
+            model=model,
+            policy_available=False,
+            request_id_factory=lambda: "contract-request-2",
+        )
+
+        self.assertEqual(decision.verdict, "block")
+        self.assertIn("policy:unavailable", decision.reasons)
+        self.assertEqual(model.rows, [])
+
+    def test_production_mutation_requires_confirmation_even_when_model_allows(self) -> None:
+        decision = evaluate_contract_request(
+            context="Create the reviewed production output.",
+            command="touch /workspace/build.txt",
+            environment="production",
+            recent_actions=[],
+            contract_match=ContractMatchResult(
+                matches=True,
+                reason_codes=[],
+                contract_id="contract-1",
+                contract_version=1,
+                action_fingerprint="fingerprint",
+            ),
+            action_operation="write",
+            model=FakeRiskModel(prediction(0.01, "allow")),
+            policy_profile=policy_profile(),
+            request_id_factory=lambda: "contract-request-3",
+        )
+
+        self.assertEqual(decision.verdict, "confirm_required")
+        self.assertIn(
+            "policy:production_change_requires_confirmation",
+            decision.reasons,
+        )
+
     def test_rule_block_short_circuits_model(self) -> None:
         model = FakeRiskModel(prediction(0.01, "allow"))
 
@@ -89,8 +162,8 @@ class DecisionEngineTests(unittest.TestCase):
         model = FakeRiskModel(prediction(0.99, "confirm_required"))
 
         decision = evaluate_request(
-            context="Show git status.",
-            command="git status --short",
+            context="Show the sandbox working directory.",
+            command="pwd",
             environment="sandbox",
             recent_actions=[],
             model=model,

@@ -7,12 +7,21 @@ from typing import Any, Callable, Literal
 from uuid import uuid4
 
 from sentinel.decision.policy import EnvironmentPolicy, PolicyProfile
+from sentinel.decision.contract_policy import ContractMatchResult
 from sentinel.decision.rules import RuleDecision, Verdict, evaluate_command
 from sentinel.execution import ExecutionResult
 from sentinel.ml.inference import RiskPrediction
 
 RiskTier = Literal["low", "medium", "high", "critical"]
-RoutingPath = Literal["rules", "policy", "model", "combined", "confirmation"]
+RoutingPath = Literal[
+    "rules",
+    "policy",
+    "model",
+    "combined",
+    "confirmation",
+    "contract",
+    "approval",
+]
 
 VERDICT_RISK_SCORES: dict[Verdict, float] = {
     "allow": 0.05,
@@ -54,6 +63,7 @@ class DecisionResult:
     rule_decision: RuleDecision
     model_prediction: RiskPrediction | None = None
     confirmation_id: str | None = None
+    approval_id: str | None = None
     execution: ExecutionResult | None = None
 
 
@@ -113,6 +123,112 @@ def evaluate_request(
         _result_from_model(request_id, rule_decision, prediction, environment, shell_type),
         environment_policy,
         prediction,
+    )
+
+
+def evaluate_contract_request(
+    *,
+    context: str,
+    command: str,
+    environment: str,
+    recent_actions: list[dict[str, Any]],
+    contract_match: ContractMatchResult | None,
+    action_operation: str | None = None,
+    canonicalization_error: str | None = None,
+    model: RiskModelProtocol | None = None,
+    policy_profile: PolicyProfile | None = None,
+    policy_available: bool = True,
+    request_id_factory: RequestIdFactory | None = None,
+) -> DecisionResult:
+    """Evaluate critical rules, then immutable contract boundaries, then model risk.
+
+    A model is never invoked for malformed actions, contract mismatches, or
+    unavailable policy. That ordering prevents probabilistic output from
+    weakening deterministic authority checks.
+    """
+
+    request_id = (request_id_factory or _new_request_id)()
+    rule_decision = evaluate_command(
+        context=context,
+        command=command,
+        environment=environment,
+        recent_actions=recent_actions,
+    )
+    if rule_decision.verdict == "block":
+        return _result_from_rule(request_id, rule_decision, environment, "unknown")
+    if canonicalization_error is not None:
+        return _contract_block(
+            request_id,
+            rule_decision,
+            environment,
+            [canonicalization_error],
+        )
+    if contract_match is None or not contract_match.matches:
+        reasons = (
+            contract_match.reason_codes
+            if contract_match is not None
+            else ["contract:not_found"]
+        )
+        return _contract_block(request_id, rule_decision, environment, reasons)
+    if not policy_available:
+        return _contract_block(
+            request_id,
+            rule_decision,
+            environment,
+            ["policy:unavailable"],
+        )
+    decision = evaluate_request(
+        context=context,
+        command=command,
+        environment=environment,
+        shell_type="unknown",
+        recent_actions=recent_actions,
+        model=model,
+        policy_profile=policy_profile,
+        request_id_factory=lambda: request_id,
+    )
+    environment_policy = (
+        policy_profile.policy_for(environment) if policy_profile is not None else None
+    )
+    if (
+        environment_policy is not None
+        and environment_policy.name == "production"
+        and environment_policy.production_change_requires_confirmation
+        and action_operation is not None
+        and action_operation != "read"
+        and decision.verdict != "block"
+    ):
+        return _escalate_to_confirmation(
+            decision,
+            f"policy:{environment_policy.name}_change_requires_confirmation",
+        )
+    return decision
+
+
+def _contract_block(
+    request_id: str,
+    rule_decision: RuleDecision,
+    environment: str,
+    reason_codes: list[str],
+) -> DecisionResult:
+    return DecisionResult(
+        request_id=request_id,
+        verdict="block",
+        risk_score=VERDICT_RISK_SCORES["block"],
+        risk_tier="critical",
+        reasons=[
+            *_base_reasons(rule_decision, environment, "unknown"),
+            *reason_codes,
+        ],
+        routing_path="contract",
+        agent_message=(
+            "Sentinel blocked this action because it is outside the active "
+            "server-resolved contract or required policy is unavailable."
+        ),
+        suggested_safe_actions=[
+            "Refresh the active contract and submit an action within its exact scope."
+        ],
+        rule_decision=rule_decision,
     )
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -159,6 +160,53 @@ class ConfirmationTests(unittest.TestCase):
 
         self.assertEqual(results.count(True), 1)
         self.assertEqual(results.count(False), 7)
+
+    def test_pending_and_token_ttls_use_injected_clock(self) -> None:
+        now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+
+        def clock() -> datetime:
+            return now
+
+        store = InMemoryConfirmationStore(
+            confirmation_id_factory=lambda: "confirmation-1",
+            token_factory=lambda: "token-1",
+            clock=clock,
+            pending_ttl=timedelta(seconds=10),
+            token_ttl=timedelta(seconds=5),
+        )
+        pending = store.create_pending(confirmation_request(), "confirm_required")
+
+        now += timedelta(seconds=10)
+        self.assertIsNone(store.get_pending(pending.confirmation_id))
+        self.assertIsNone(store.approve(pending.confirmation_id))
+
+        now += timedelta(seconds=1)
+        pending = store.create_pending(confirmation_request(), "confirm_required")
+        self.assertIsNotNone(store.approve(pending.confirmation_id))
+        now += timedelta(seconds=5)
+        self.assertFalse(store.consume_token("token-1", confirmation_request()))
+
+    def test_store_evicts_oldest_items_at_capacity(self) -> None:
+        confirmation_ids = iter(("confirmation-1", "confirmation-2", "confirmation-3"))
+        tokens = iter(("token-1", "token-2"))
+        store = InMemoryConfirmationStore(
+            confirmation_id_factory=lambda: next(confirmation_ids),
+            token_factory=lambda: next(tokens),
+            max_pending_confirmations=2,
+            max_tokens=1,
+        )
+
+        first = store.create_pending(confirmation_request(command="rm -rf ./one"), "confirm_required")
+        second = store.create_pending(confirmation_request(command="rm -rf ./two"), "confirm_required")
+        store.create_pending(confirmation_request(command="rm -rf ./three"), "confirm_required")
+
+        self.assertIsNone(store.get_pending(first.confirmation_id))
+        first_token = store.approve(second.confirmation_id)
+        self.assertIsNotNone(first_token)
+        third_token = store.approve("confirmation-3")
+        self.assertIsNotNone(third_token)
+        self.assertFalse(store.consume_token("token-1", confirmation_request(command="rm -rf ./two")))
+        self.assertTrue(store.consume_token("token-2", confirmation_request(command="rm -rf ./three")))
 
 
 if __name__ == "__main__":

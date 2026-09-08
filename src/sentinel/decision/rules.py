@@ -8,7 +8,9 @@ where deterministic policy works and where model inference is needed.
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 Verdict = Literal["allow", "warn", "confirm_required", "block"]
@@ -28,9 +30,7 @@ CONFIRM = "confirm_required"
 WARN = "warn"
 ALLOW = "allow"
 
-READ_ONLY_PATTERN = re.compile(
-    r"^\s*(ls|pwd|cat|sed|grep|rg|find|du|df|head|tail|wc|which|git\s+(status|diff|log|show)|pytest\b|python\s+-m\s+pytest\b|id\b|whoami\b|ps\b)",
-)
+SIMPLE_READ_ONLY_COMMANDS = {"ls", "cat", "grep", "du", "df", "head", "tail", "wc", "which", "ps"}
 
 
 def evaluate_command(
@@ -47,7 +47,8 @@ def evaluate_command(
     and can also skip model inference because the policy verdict is known.
     """
 
-    normalized = " ".join(command.strip().split())
+    raw_command = command.strip()
+    normalized = " ".join(raw_command.split())
     lower_command = normalized.lower()
     lower_context = context.lower()
     env = environment.lower()
@@ -55,32 +56,25 @@ def evaluate_command(
     history_text = _history_text(history)
     combined_text = f"{lower_context} {history_text}"
 
-    critical = _critical_block(lower_command, combined_text, env)
+    command_is_literal_inspection = _is_literal_search_command(raw_command) or _is_git_inspection(raw_command)
+    policy_command = "" if command_is_literal_inspection else lower_command
+    critical = _critical_block(policy_command, combined_text, env)
     if critical:
         return critical
 
-    context_overstep = _context_overstep(lower_command, lower_context, history_text, env)
+    context_overstep = _context_overstep(policy_command, lower_context, history_text, env)
     if context_overstep:
         return context_overstep
 
-    confirmation = _confirmation_required(lower_command, lower_context, history_text, env)
+    confirmation = _confirmation_required(policy_command, lower_context, history_text, env)
     if confirmation:
         return confirmation
 
-    warning = _warning(lower_command)
+    warning = _warning(raw_command)
     if warning:
         return warning
 
-    if _safe_read_only_cloud_command(lower_command):
-        return RuleDecision(
-            verdict=ALLOW,
-            risk_category="safe_read_only",
-            reason_code="safe_read_only_cloud_command",
-            reason="Read-only cloud command matches an explicit low-risk inspection pattern.",
-            skip_model=env != "production",
-        )
-
-    if READ_ONLY_PATTERN.search(lower_command):
+    if _is_strict_read_only_command(raw_command, env):
         return RuleDecision(
             verdict=ALLOW,
             risk_category="safe_read_only",
@@ -89,7 +83,7 @@ def evaluate_command(
             skip_model=env == "sandbox",
         )
 
-    if env == "sandbox" and _sandbox_scoped_mutation(lower_command, combined_text):
+    if env == "sandbox" and _sandbox_scoped_mutation(raw_command, combined_text):
         return RuleDecision(
             verdict=ALLOW,
             risk_category="authorized_destructive",
@@ -108,7 +102,7 @@ def evaluate_command(
 
 
 def _critical_block(command: str, context_and_history: str, environment: str) -> RuleDecision | None:
-    if re.search(r"\brm\s+-rf\s+/(?:\s|$)", command):
+    if re.search(r"""\brm\s+-rf\s+/(?:[\s'";]|$)""", command):
         return _decision(BLOCK, "system_destruction", "root_filesystem_deletion", "Refuses recursive deletion of the root filesystem.")
 
     if re.search(r"\bchmod\s+-r\s+777\s+/", command):
@@ -222,42 +216,218 @@ def _confirmation_required(command: str, context: str, history: str, environment
     return None
 
 
+def _is_strict_read_only_command(command: str, environment: str) -> bool:
+    """Allow only single commands whose arguments cannot add side effects."""
+
+    if environment != "sandbox":
+        return False
+    arguments = _single_shell_command_arguments(command)
+    if arguments is None:
+        return False
+
+    executable = arguments[0].lower()
+    if "/" in executable:
+        return False
+    if executable in {"pwd", "id", "whoami"}:
+        return len(arguments) == 1
+    if executable in SIMPLE_READ_ONLY_COMMANDS:
+        path_arguments = _path_arguments_for_read_command(executable, arguments[1:])
+        if _has_non_workspace_absolute_path(path_arguments):
+            return False
+        if executable == "tail" and any(
+            argument.startswith("--follow")
+            or (argument.startswith("-") and not argument.startswith("--") and "f" in argument.lower())
+            or re.fullmatch(r"\+\d*f", argument.lower()) is not None
+            for argument in arguments[1:]
+        ):
+            return False
+        return True
+    if executable == "rg":
+        blocked_options = {"--pre", "--hostname-bin", "-z", "--search-zip"}
+        return "--no-config" in arguments[1:] and not _has_non_workspace_absolute_path(
+            _path_arguments_for_read_command(executable, arguments[1:])
+        ) and not any(
+            argument in blocked_options
+            or any(argument.startswith(f"{option}=") for option in {"--pre", "--hostname-bin"})
+            or (
+                argument.startswith("-")
+                and not argument.startswith("--")
+                and "z" in argument[1:].lower()
+            )
+            for argument in arguments[1:]
+        )
+    if executable == "find":
+        mutating_actions = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprint0", "-fprintf"}
+        return (
+            not _has_non_workspace_absolute_path(arguments[1:])
+            and not mutating_actions.intersection(argument.lower() for argument in arguments[1:])
+        )
+    return False
+
+
+def _single_shell_command_arguments(command: str) -> list[str] | None:
+    if _contains_unquoted_shell_control(command):
+        return None
+    try:
+        arguments = shlex.split(command)
+    except ValueError:
+        return None
+    return arguments or None
+
+
+def _contains_unquoted_shell_control(command: str) -> bool:
+    quote: str | None = None
+    escaped = False
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if character == "\\" and quote != "'":
+            escaped = True
+            index += 1
+            continue
+        if character in {"'", '"'}:
+            if quote is None:
+                quote = character
+            elif quote == character:
+                quote = None
+            index += 1
+            continue
+        if quote != "'" and character == "`":
+            return True
+        if quote != "'" and command[index : index + 2] in {"$(", "${"}:
+            return True
+        if quote is None and character in "\n\r;&|<>":
+            return True
+        index += 1
+    return False
+
+
+def _has_non_workspace_absolute_path(arguments: list[str]) -> bool:
+    for argument in arguments:
+        if any(character in argument for character in "${}") or argument.startswith("~"):
+            return True
+        candidate = argument.split("=", 1)[1] if argument.startswith("-") and "=" in argument else argument
+        if any(character in candidate for character in "${}") or candidate.startswith("~"):
+            return True
+        if candidate.startswith("/"):
+            normalized = Path(candidate).resolve(strict=False)
+        elif "/" in candidate or candidate in {".", ".."}:
+            normalized = (Path("/workspace") / candidate).resolve(strict=False)
+        else:
+            continue
+        if normalized != Path("/workspace") and not normalized.is_relative_to(Path("/workspace")):
+            return True
+    return False
+
+
+def _path_arguments_for_read_command(executable: str, arguments: list[str]) -> list[str]:
+    if executable not in {"rg", "grep"}:
+        return arguments
+    positional = [argument for argument in arguments if not argument.startswith("-")]
+    return positional[1:] if positional else []
+
+
+def _is_literal_search_command(command: str) -> bool:
+    arguments = _single_shell_command_arguments(command)
+    return bool(arguments and arguments[0].lower() in {"grep", "rg"})
+
+
+def _is_git_inspection(command: str) -> bool:
+    arguments = _single_shell_command_arguments(command)
+    if arguments is None or len(arguments) < 2 or arguments[0].lower() != "git":
+        return False
+    blocked_global_options = {"-c", "--config-env", "--exec-path", "--paginate", "-p"}
+    if blocked_global_options.intersection(arguments[1:]):
+        return False
+    subcommand = arguments[1].lower()
+    if subcommand not in {"status", "diff", "log", "show"}:
+        return False
+    blocked_subcommand_options = {"--ext-diff", "--textconv"}
+    if blocked_subcommand_options.intersection(arguments[2:]):
+        return False
+    return not any(argument == "--output" or argument.startswith("--output=") for argument in arguments[2:])
+
+
 def _warning(command: str) -> RuleDecision | None:
-    if re.search(r"\b(pip|npm|pnpm|yarn|apt-get|apt|brew|conda)\s+(install|add|update|upgrade)\b", command):
+    lower_command = command.lower()
+    literal_search = _is_literal_search_command(command)
+    if _is_git_inspection(command):
+        return _decision(
+            WARN,
+            "safe_read_only",
+            "git_inspection_may_run_configured_helpers",
+            "Shell-based Git inspection can refresh metadata or invoke repository-configured helpers; use a canonical host Git action for automatic allow.",
+        )
+
+    if _is_read_only_cloud_inspection(command):
+        return _decision(
+            WARN,
+            "safe_read_only",
+            "cloud_inspection_uses_auth_and_network",
+            "Cloud inspection may invoke configured credential helpers and makes authenticated network requests.",
+        )
+
+    if not literal_search and re.search(r"\b(pip|npm|pnpm|yarn|apt-get|apt|brew|conda)\s+(install|add|update|upgrade)\b", lower_command):
         return _decision(WARN, "safe_build_or_install", "package_install_or_update", "Package installation or update can change the environment and may use network.")
 
-    if re.search(r"^\s*(env|printenv)\b", command):
+    if re.search(r"^\s*(env|printenv)\b", lower_command):
         return _decision(WARN, "safe_read_only", "environment_variable_read", "Environment variable reads may expose secrets in output.")
 
-    if re.search(r"\bgrep\b.*(aws_secret_access_key|id_rsa|\.pem)|\bfind\b.*(id_rsa|\.pem)", command):
+    if re.search(r"\bgrep\b.*(aws_secret_access_key|id_rsa|\.pem)|\bfind\b.*(id_rsa|\.pem)", lower_command):
         return _decision(WARN, "safe_read_only", "local_secret_discovery", "Local secret discovery is allowed but sensitive.")
 
-    if re.search(r"\bpython\s+-m\s+http\.server\b", command):
+    if re.search(r"\bpython\s+-m\s+http\.server\b", lower_command):
         return _decision(WARN, "network_abuse", "local_network_listener", "Starting a local server opens a network listener.")
 
-    if re.search(r"\bbash\s+\./", command):
+    if re.search(r"\bbash\s+\./", lower_command):
         return _decision(WARN, "safe_build_or_install", "local_script_execution", "Local script execution is allowed with warning.")
 
     return None
 
 
 def _sandbox_scoped_mutation(command: str, context_and_history: str) -> bool:
-    scoped_targets = ("./dist", "./build", "./tmp", "/workspace/tmp", ".pytest_cache", "__pycache__", ".mypy_cache", "./cache")
-    if any(target in command for target in scoped_targets):
+    arguments = _single_shell_command_arguments(command)
+    if arguments is None:
+        return False
+    lowered = [argument.lower() for argument in arguments]
+    if lowered == ["python", "-m", "venv", ".venv"]:
         return True
-    if re.search(r"\bdocker\s+builder\s+prune\b", command):
-        return True
-    if re.search(r"\bpython\s+-m\s+venv\s+\.venv\b", command):
-        return True
-    if re.search(r"\bchmod\s+(\+x|[-+a-z,=]+)\s+\./", command):
-        return True
-    if re.search(r"\btar\s+-czf\b", command) and not re.search(r"\b(curl|wget|nc|scp)\b", command):
-        return True
-    return "disposable" in context_and_history and re.search(r"\brm\s+-rf\b|\bdropdb\b", command) is not None
+    if lowered[0] != "rm":
+        return False
+
+    allowed_options = {"-r", "-f", "-rf", "-fr", "-R", "-Rf", "-fR", "--recursive", "--force", "--"}
+    targets = [argument for argument in arguments[1:] if not argument.startswith("-")]
+    if not targets or any(argument not in allowed_options for argument in arguments[1:] if argument.startswith("-")):
+        return False
+
+    allowed_roots = {
+        Path("/workspace/dist"),
+        Path("/workspace/build"),
+        Path("/workspace/tmp"),
+        Path("/workspace/.pytest_cache"),
+        Path("/workspace/__pycache__"),
+        Path("/workspace/.mypy_cache"),
+        Path("/workspace/cache"),
+    }
+    for target in targets:
+        if any(character in target for character in "*?[$~{}"):
+            return False
+        normalized = (Path("/workspace") / target).resolve(strict=False) if not target.startswith("/") else Path(target).resolve(strict=False)
+        if not any(normalized == root or normalized.is_relative_to(root) for root in allowed_roots):
+            return False
+    return True
 
 
-def _safe_read_only_cloud_command(command: str) -> bool:
-    return bool(re.search(r"^\s*aws\s+(sts\s+get-caller-identity|s3\s+ls)\b", command))
+def _is_read_only_cloud_inspection(command: str) -> bool:
+    arguments = _single_shell_command_arguments(command)
+    if arguments is None or len(arguments) < 3:
+        return False
+    lowered = [argument.lower() for argument in arguments[:3]]
+    return lowered in (["aws", "sts", "get-caller-identity"], ["aws", "s3", "ls"])
 
 
 def _exposes_credential_material(command: str) -> bool:
@@ -293,6 +463,12 @@ def _history_text(recent_actions: list[dict[str, Any]]) -> str:
         resources = action.get("sensitive_resources", [])
         if isinstance(resources, list):
             parts.extend(str(resource).lower() for resource in resources)
+        metadata = action.get("metadata", {})
+        if isinstance(metadata, dict):
+            for key in ("security_categories", "effects"):
+                values = metadata.get(key, [])
+                if isinstance(values, list):
+                    parts.extend(str(value).lower() for value in values)
     return " ".join(parts)
 
 
