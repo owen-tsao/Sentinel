@@ -1,8 +1,8 @@
 # Cursor Rules for Project Sentinel
 
 ## Project Intent
-- Sentinel is a backend security API for AI-agent command execution, not a website.
-- Follow `Final Plan.md` for architecture decisions and `Weekly Structure.md` for implementation order.
+- Sentinel is a local-first task-authorization and enforcement backend for AI-agent actions; its local UI supports clarification and approval rather than acting as a standalone website.
+- Follow `docs/Product Architecture.md` for architecture decisions and `docs/Roadmap.md` for implementation order.
 - Optimize for a strong summer portfolio project: measurable behavior, clear explanations, and focused scope.
 
 ## Working Style
@@ -31,12 +31,13 @@
 
 ## Core Product Rules
 - Always distinguish malicious behavior from destructive but authorized behavior.
-- Labels and decisions must depend on `context`, `recent_actions`, `command`, and `environment`, not command text alone.
+- Target decisions must use the server-resolved active contract, server-owned recent history, canonical action with every affected target/effect, environment, and adapter enforcement coverage. Caller-provided context or history is not authority.
 - Use risk tiers: `allow`, `warn`, `confirm_required`, and `block`.
 - High-risk but possibly legitimate actions should require confirmation instead of being blindly allowed or permanently blocked.
 - Critical actions such as root deletion, credential theft, exfiltration, broad production deletion, or defense evasion should block.
 - Block/confirm responses should include clear reasons and agent-facing guidance so well-behaved agents can recover instead of retrying the same mistake.
 - Deterministic rules and environment policy should short-circuit obvious allow/block decisions before model inference; invoke ONNX only for gray-area requests.
+- Saved templates and learned preferences may suggest safer task defaults, but they never grant authority or weaken deterministic policy.
 
 ## Python/API Standards
 - Use Python 3.11+, type hints, and Pydantic models for API schemas.

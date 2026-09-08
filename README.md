@@ -1,218 +1,190 @@
 # Project Sentinel
 
-Enterprise guardrail engine for AI-agent actions: evaluate commands with deterministic policy and sequence-aware ML, run approved actions in a local Docker executor, manage blockers and reports through a local web dashboard (with a minimal CLI for scripting), and audit decisions to a local SQLite store.
+Sentinel is a local-first task-authorization backend for AI agents. It keeps accepted task authority on the server, turns proposed shell commands into canonical actions, checks those actions against the active contract and deterministic policy, and records the decision before any sandboxed execution.
 
-## Docs
+This repository is a production-grade foundation: its trust boundaries, persistence, replay controls, audit admission, and fail-closed behavior are tested. It is not yet a production-ready product. There is no human approval/control UI, no protected runtime authority API, no mandatory agent integration, and no production-grade execution isolation.
 
-- [docs/Weekly Structure.md](./docs/Weekly%20Structure.md) — enterprise roadmap and 12-week Engine & CLI MVP
-- [docs/Final Plan.md](./docs/Final%20Plan.md) — architecture and component specs
-- [docs/week1_threat_model.md](./docs/week1_threat_model.md) — initial threat model and risk categories
-- [docs/data_strategy.md](./docs/data_strategy.md) — dataset strategy and labeling guidance
+## Current status
 
-## Status
+Week 10 is implemented on `feature/week-10-task-authority` and is ready for clean commits.
 
-Week 9 sandboxed execution. Sentinel can evaluate proposed commands through a local API using deterministic rules first, local environment policy profiles, ONNX model scoring when a local model artifact is available, and exact-request confirmation tokens for high-risk but potentially legitimate actions. Commands with a final `allow` verdict can now run in an ephemeral, restricted Docker sandbox through `POST /execute`.
+- Versioned contracts, one active task per session, server-owned history, canonical multi-target shell actions, exact-action test approvals, SQLite state, and at-most-once execution attempts are implemented.
+- A clean Python 3.11 container run passes all 477 tests, and the Docker authority/execution smoke passes.
+- The current API exposes only `GET /health`, `POST /evaluate`, and `POST /execute`.
+- Authority changes and approval issuance are internal/test-only until Week 11 adds a protected provenance and human-control interface.
+- Shell execution is read-only for Week 10. Write and delete operations are rejected before execution admission.
+- Cursor and legacy OpenClaw integrations are advisory. They do not prove complete interception or trusted direct-user provenance.
+- ML serving is disabled. There is no independent calibration set, and calibration/export/serving fail closed.
 
-## Stack
+The frozen 90-row reviewed regression corpus has SHA-256 `8488862b2da4744bf08f33ee413982f290181feea8c81e7d42f8f1034c62feec`. The non-promoting v5 regression result is 98.8889% expected accuracy, 100% overstep recall, 100% insufficient-contract detection, 5.8824% compliant false interruption, zero critical misses, and eight missing reason expectations. It is regression evidence, not blind promotion evidence.
 
-- PyTorch (training) + ONNX Runtime (inference)
-- FastAPI
-- Docker
-- SQLite (audit logs, with JSONL export)
+## Architecture
 
-## Local API
+```text
+Untrusted agent request
+        |
+        v
+FastAPI: resolve active contract and session history from server state
+        |
+        v
+Canonicalize raw shell command -> contract matcher -> deterministic policy
+        |
+        +--> allow / warn / confirm_required / block
+        |
+        v (allow on POST /execute only)
+Durable admission audit + at-most-once attempt reservation
+        |
+        v
+Ephemeral read-only Docker executor
+        |
+        v
+Stored response and ordered audit evidence
+```
 
-Use a Python 3.11+ environment, then install the local package with API and test dependencies:
+`SENTINEL_STATE_DB` enables SQLite persistence for contracts, session history, execution attempts, and audit evidence. Without it, the in-memory stores support evaluation and tests, but the default in-memory audit store cannot authorize real execution.
+
+Deterministic rules and contract policy are the authority. Optional ML may only escalate gray-area risk after it has independent calibration and promotion evidence; it may never create permission.
+
+## Quick start
+
+Use Python 3.11 or newer:
 
 ```bash
 python3 -m pip install -e ".[test]"
-```
-
-Start the evaluation service:
-
-```bash
 PYTHONPATH=src uvicorn sentinel.api.main:app --reload
-```
-
-Check service health:
-
-```bash
 curl http://127.0.0.1:8000/health
 ```
 
-If the ONNX model artifact is not present, health returns `status: "degraded"`. That is expected during local development: deterministic rules still run, and gray-area requests fall back to `confirm_required` instead of being allowed blindly.
+ML loading is opt-in. Module startup loads ONNX only when
+`SENTINEL_ENABLE_ML=true` is set exactly; injected applications must pass
+`create_app(load_model=True)`. By default, health reports
+`model_loaded: false` and `model_detail: "Model loading is disabled."` while
+deterministic contract and policy enforcement remains active.
 
-Evaluate a command without executing it:
+ONNX metadata binds the model, checkpoint/tokenizer files, and reviewed serving
+thresholds with SHA-256 digests. This detects accidental swaps and inconsistent
+local edits in Sentinel's same-user threat model; it is not a cryptographic
+signature, because the same local user can replace both an artifact and its
+metadata.
 
-```bash
-curl -X POST http://127.0.0.1:8000/evaluate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "context": "Show git status for this repository.",
-    "command": "git status --short",
-    "recent_actions": [],
-    "environment": "sandbox",
-    "shell_type": "bash",
-    "session_id": "local-session",
-    "agent_id": "local-agent",
-    "user_id": "local-user"
-  }'
+## Current API
+
+### `GET /health`
+
+Returns:
+
+```json
+{
+  "status": "degraded",
+  "model_loaded": false,
+  "policy_loaded": true,
+  "audit_status": "ok",
+  "model_path": "models/sentinel-distilbert-onnx/model.onnx",
+  "model_detail": "Model loading is disabled.",
+  "policy_detail": null,
+  "audit_detail": null,
+  "detail": "Model loading is disabled."
+}
 ```
 
-`POST /evaluate` never executes commands. It returns a structured verdict with a request ID, risk score, risk tier, reason codes, routing path, agent-facing message, suggested safer actions, and an optional `confirmation_id`.
+Exact detail text and model path can vary with local configuration. `status` is `ok` only when model, policy, and audit health are all ready.
 
-## Sandboxed Execution
+### `POST /evaluate`
 
-`POST /execute` accepts the same request body as `/evaluate`. It evaluates first, and only runs the command if the final verdict is `allow` (including confirmation-token approvals). `warn`, `confirm_required`, and `block` verdicts return `execution: null` and never touch the sandbox.
+Contract-aware requests have this shape:
 
-Build the sandbox image once, then start the API on the host (the host needs Docker access to spawn sandbox containers):
+```json
+{
+  "contract_id": "contract-uuid",
+  "version": 3,
+  "session_id": "session-uuid",
+  "agent_id": "caller-claimed-agent",
+  "user_id": "caller-claimed-user",
+  "attempt_id": null,
+  "action": {
+    "family": "shell",
+    "raw_command": "git status --short",
+    "cwd": "/workspace"
+  },
+  "approval_token": null,
+  "recent_actions": []
+}
+```
+
+The server treats `agent_id` and `user_id` as untrusted labels. It ignores caller-provided `recent_actions`, resolves the active contract and recent history from server state, fixes the environment from server configuration, and derives operation, targets, and effects from `raw_command`. Unknown authority-shaped fields are rejected.
+
+`POST /evaluate` never executes. It returns `request_id`, `verdict`, `risk_score`, `risk_tier`, `reasons`, `routing_path`, `agent_message`, `suggested_safe_actions`, optional `approval_id`, and `execution: null`.
+
+The retained legacy `context`/`command` request is compatibility-only. It cannot carry authority, and it cannot authorize execution.
+
+### `POST /execute`
+
+`POST /execute` accepts the same contract request but requires a non-empty `attempt_id`. Execution is admitted only when all of these are true:
+
+- the referenced version is the server-resolved active contract for the session;
+- the server-canonicalized action matches that contract and deterministic policy returns `allow`, or a protected exact approval matches;
+- the action is a safe read-only shell operation in the configured workspace;
+- durable required audit evidence and session attempt state can be committed;
+- the Docker executor configuration passes admission checks.
+
+An approval token is bound to the exact contract version, authority epoch, session, environment, and canonical action, and is consumed once. There is no HTTP route that issues approval tokens.
+
+An `attempt_id` is at-most-once. A completed or failed attempt returns its stored response; a reused ID with different bindings is rejected; reserved, running, or unknown attempts return `409` and are never automatically retried.
+
+## Docker roles
+
+Build the executor image and run the API on the host when testing execution:
 
 ```bash
 docker compose --profile executor build executor
-PYTHONPATH=src uvicorn sentinel.api.main:app --reload
+SENTINEL_STATE_DB=.local/sentinel.sqlite3 \
+  PYTHONPATH=src uvicorn sentinel.api.main:app --reload
 ```
 
-Execute a safe command:
+The host API can launch one ephemeral executor container per admitted action. The executor runs non-root with no network, a read-only root filesystem, dropped capabilities, resource limits, a timeout, and a read-only workspace mount.
 
-```bash
-curl -X POST http://127.0.0.1:8000/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "context": "List repository files.",
-    "command": "ls -la",
-    "recent_actions": [],
-    "environment": "sandbox",
-    "shell_type": "bash",
-    "session_id": "local-session",
-    "agent_id": "local-agent",
-    "user_id": "local-user"
-  }'
-```
-
-Allowed commands run in an ephemeral `docker run --rm` container with no network, CPU/memory/pids limits, a read-only root filesystem, dropped capabilities, `no-new-privileges`, a strict timeout, and a single bind mount scoped to the configured workspace. The response includes an `execution` object with `stdout`, `stderr`, `exit_code`, `timed_out`, `duration_ms`, and truncation flags.
-
-Executor settings can be tuned with environment variables before starting the API:
-
-- `SENTINEL_EXECUTOR_IMAGE` — sandbox image (default `sentinel-executor:local`)
-- `SENTINEL_EXECUTOR_WORKSPACE` — host directory mounted at `/workspace` (default: API process working directory)
-- `SENTINEL_EXECUTOR_TIMEOUT_SECONDS` — per-command timeout (default 10; malformed or non-positive values fall back to the default)
-- `SENTINEL_EXECUTOR_READONLY_WORKSPACE` — set to `true` to make the workspace mount read-only
-- `SENTINEL_MAX_CONCURRENT_EXECUTIONS` — cap on simultaneous sandbox runs (default 8; excess requests get HTTP 429)
-
-If Docker is unavailable, the image is missing, or the sandbox cannot start, Sentinel fails closed: the response reports a structured `execution.error` and the command is never run on the host.
-
-## Docker Usage
-
-Build and run the local API container with Docker Compose:
+The Compose `api` service is diagnostic and non-executing:
 
 ```bash
 docker compose up --build api
 ```
 
-Then check the containerized service:
+It binds to localhost and has no Docker socket, so it cannot launch executor containers. This is an intentional boundary, not a deployment bug.
+
+Docker reduces local blast radius but shares the host kernel; it is not production-grade isolation.
+
+## Verification
 
 ```bash
-curl http://127.0.0.1:8000/health
-```
-
-The API container mounts `policies/` and `models/` read-only. If `models/sentinel-distilbert-onnx/model.onnx` is present, `/health` should report `status: "ok"` with `model_loaded: true`. If the ONNX artifact is absent, `/health` reports `status: "degraded"`; deterministic rules and policy still run, and gray-area requests require confirmation rather than being allowed by default.
-
-If port `8000` is busy, choose a different host port:
-
-```bash
-SENTINEL_API_PORT=8010 docker compose up --build api
-```
-
-The executor image is the sandbox that `POST /execute` uses for approved commands. It is not started by default and never runs as a long-lived service; the API spawns one ephemeral container per command. Build it explicitly:
-
-```bash
-docker compose --profile executor build executor
-```
-
-Note that the containerized API cannot reach the Docker daemon (no socket mount, by design), so `POST /execute` fails closed inside Compose. For local sandboxed execution, run the API on the host as shown above.
-
-For a full local container smoke check, run:
-
-```bash
+python3 -m pytest
+git diff --check
+python3 scripts/evaluate_contracts.py \
+  data/evaluation/contract_combined_reviewed.jsonl \
+  --minimum-rows-per-category 1 \
+  --manifest /tmp/sentinel-known-regression.json
 python3 scripts/docker_smoke_check.py
 ```
 
-That script validates Compose config, builds both images, runs one command directly through the Docker executor to verify the sandbox works and stays non-root, starts only the API service, checks `/health`, sends one safe `/evaluate` request, verifies `/execute` blocks destructive commands, verifies the containerized API fails closed instead of executing on the host, and tears the Compose project down.
+The minimum is intentionally `1` because some reviewed categories are sparse.
+That makes this a regression-only check; sparse categories remain a blocker
+for blind promotion and release claims.
 
-## Policy Profiles
+The Docker smoke requires Docker Desktop, builds both images, validates the non-root executor and API socket isolation, and exercises the trusted contract-to-audit path. See [scripts/README.md](./scripts/README.md) for the complete command index.
 
-Sentinel loads the default local policy profile from `policies/default.json`. The profile controls environment-specific escalation after deterministic rules run:
+## Known limitations
 
-- `sandbox` and `dev` are less strict for low-risk and warning-level model outcomes.
-- `staging` and `production` escalate warned or unmatched ambiguous actions more aggressively.
-- Rule-based `block` decisions are final. Policy can escalate a non-block decision to `confirm_required`, but it cannot downgrade a block.
+- No usable human approval, contract-authoring, lifecycle, or audit-control UI exists yet.
+- No runtime lifecycle or approval route exists; authority mutation remains internal/test-only.
+- Week 10 execution supports read-only workspace actions only.
+- Slack's basic internal-channel metadata path passed once. Slack Connect, guests, private channels, scheduled sends, Google Workspace, and provider enforcement remain unproven.
+- Fixture-backed contextual regression checks do not prove live evidence producers or atomic provider-side limits.
+- Current integrations are advisory and may be bypassed by their hosts.
+- The API has no authenticated multi-user identity boundary. Keep it on one trusted local machine.
 
-The response `routing_path` explains which layer made the decisive call:
+## Documentation
 
-- `rules`: deterministic rules decided the result.
-- `policy`: the active policy profile escalated or finalized the result.
-- `model`: the ONNX model decided a gray-area request.
-- `combined`: rules and model both contributed.
-- `confirmation`: a valid one-use confirmation token approved the exact request.
-
-## Local Confirmation Flow
-
-When Sentinel returns `verdict: "confirm_required"`, confirmable requests include a `confirmation_id`. A human or local tool can approve that pending request through `POST /confirm`, which returns a one-use `confirmation_token`.
-
-Request confirmation:
-
-```bash
-curl -X POST http://127.0.0.1:8000/confirm \
-  -H "Content-Type: application/json" \
-  -d '{
-    "confirmation_id": "paste-confirmation-id-here"
-  }'
-```
-
-Then retry the same `POST /evaluate` request with the returned token:
-
-```json
-{
-  "context": "Run an unfamiliar project helper.",
-  "command": "python scripts/custom_cleanup.py",
-  "recent_actions": [],
-  "environment": "dev",
-  "shell_type": "python",
-  "session_id": "local-session",
-  "agent_id": "local-agent",
-  "user_id": "local-user",
-  "confirmation_token": "paste-confirmation-token-here"
-}
-```
-
-The token is checked against a SHA-256 fingerprint of the exact request fields: `context`, `command`, `environment`, `shell_type`, `recent_actions`, `session_id`, `agent_id`, and `user_id`. If any field changes, the token is rejected and Sentinel returns `confirm_required` again. Tokens are one-use, and `user_confirmed: true` is not trusted unless a valid token is also supplied.
-
-`block` verdicts are not confirmable. Sentinel does not create confirmation IDs for critical blocks such as root deletion, credential theft, exfiltration, broad production deletion, or defense evasion.
-
-## Local-Only Limitations
-
-The Week 9 local runtime is intentionally limited:
-
-- Pending confirmations and tokens disappear when the API process restarts.
-- Tokens are random local secrets, not signed JWTs.
-- There is no Slack, email, browser approval queue, or CLI approval workflow yet.
-- There is no audit persistence for confirmations or executions yet (SQLite audit logging is Week 10 scope).
-- Docker reduces local blast radius for development, but it shares the host kernel and is not a production-grade sandbox. A hostile workload could attempt kernel-level escapes that VMs would contain.
-- The sandbox workspace mount is read-write by default, so approved commands can modify files inside that directory (and nothing outside it). Set `SENTINEL_EXECUTOR_READONLY_WORKSPACE=true` when write access is not needed.
-- Command output is fully buffered in API memory before the 64KB cap is applied, so a command that floods stdout within the timeout can spike API memory. Concurrency is capped, and incremental capped streaming is a planned hardening step.
-- The execution timeout covers the whole `docker run` lifetime, including container startup. Commands finishing right at the deadline may be reported as timed out even though their side effects completed.
-- `warn` verdicts do not execute. This is a deliberate fail-safe default that may become configurable later.
-
-### Isolation migration path (post-summer)
-
-The `CommandExecutor` protocol keeps the sandbox swappable. The intended hardening sequence, in increasing isolation strength, is:
-
-1. Current: ephemeral `docker run` with no network, dropped capabilities, resource limits, and a scoped mount.
-2. Add gVisor (`runsc`) or a seccomp/AppArmor profile for syscall filtering on the same Docker flow.
-3. Move to microVMs (Firecracker or Kata Containers) or managed per-job isolation (e.g. cloud-run jobs) so each execution gets its own kernel.
-
-Run the focused API and decision checks:
-
-```bash
-PYTHONPATH=src python3 -m unittest tests.test_confirmation tests.test_policy tests.test_decision_engine tests.test_api_service tests.test_executor
-```
+- [Product Architecture](./docs/Product%20Architecture.md) — current Week 10 boundary and Week 11 targets
+- [Roadmap](./docs/Roadmap.md) — sequencing and release gates
+- [Data strategy](./docs/data_strategy.md) — dataset evidence and promotion rules
+- [Evaluation data](./data/evaluation/README.md) — reviewed artifacts and regression history
+- [Threat model](./docs/week1_threat_model.md) — initial risks and policy categories

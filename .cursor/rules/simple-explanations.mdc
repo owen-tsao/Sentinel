@@ -1,0 +1,33 @@
+---
+description: Explain work in simple, high-level language that helps Owen learn
+alwaysApply: true
+---
+
+# Simple Explanations
+
+- When explaining code, bugs, tests, architecture, or setup steps, use simple language and avoid unnecessary jargon.
+- Start with the high-level idea first: what is happening, why it matters, and what the user should do next.
+- Explain technical details as teachable context, not as a dense dump. Prefer short examples or analogies when they make the concept easier to understand.
+- If a system has multiple moving parts, separate them clearly, for example: local web app, local backend, sandbox database, third-party service.
+- When giving instructions, include the reason behind each important step so the user can learn the workflow over time.
+- Keep explanations concise by default, but add enough context that the user can understand the "why," not just copy commands.
+
+## Explanation style (follow this shape for substantive answers)
+
+- Lead with a short, direct answer ("Short answer: yes, but...") before the detail, then structure the rest with a few scannable `##` headings that mirror the user's actual questions.
+- Use one extended real-world analogy for the core mechanism (e.g. a slow query pattern = photocopying every file in a filing cabinet across town to display 50), then map each part of the fix back to that same analogy instead of introducing new ones.
+- Ground abstract claims in the user's concrete situation: name the actual customer, table, hook, or number involved ("Aside's 20,000 tickets"), not a generic hypothetical.
+- When explaining a fix, teach the underlying transferable concept alongside it (pagination, indexes, cache staleness, prefetching), phrased as knowledge the user can reuse on future problems — a numbered "concepts worth knowing" list works well.
+- Contrast "what it does today" vs "what we're changing it to" explicitly when describing a change.
+- Be honest about limits and trade-offs in-line: call out caveats, what is deliberately out of scope, and what would trigger revisiting the decision ("if X is still slow after this, we escalate with data in hand").
+- Quantify improvements with rough but concrete framing (e.g. "from proportional to total tickets to proportional to one screen", "100x+ less data") rather than vague words like "much faster".
+- End long explanations with a one-line takeaway that compresses the whole answer into a single reusable principle.
+
+## Defining terms (what made explanations click vs confuse)
+
+- Define every domain term the moment it appears by mapping it to something universally familiar, in one line: "title = the Gmail subject line, preview = the snippet of the latest message". Never assume a field name explains itself.
+- Lead with the concept, not the internal name: say "the issue's name tag" first, then attach the column/field name once ("that's the `title` column). Do not structure an explanation as a field-by-field schema walkthrough.
+- Anchor every reference to something the user can literally see: name the exact UI surface and quote the exact text from their screen or screenshot ("the card you screenshotted displayed the title — 'Test edit'"), not abstract phrases like "the list view renders the stale field".
+- When two concepts happen to look identical in the user's concrete example (e.g. a single-message issue where "first message" and "latest message" are the same message), say so explicitly and explain why the example makes them hard to tell apart — that overlap is usually the root of the confusion.
+- In before/after explanations, mark per concept what was always correct vs what was broken (✓/✗), so the user can see exactly which part the fix targets.
+- If the user says they are confused or asks the same question again, do not re-send the same structure with more words: drop to a shorter explanation with a stronger everyday analogy and fewer moving parts, and rebuild from there.
