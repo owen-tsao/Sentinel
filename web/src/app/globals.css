@@ -1,0 +1,120 @@
+@import "tailwindcss";
+
+:root {
+  --paper: #ffffff;
+  --canvas: #ffffff;
+  --hover: rgba(136, 170, 238, 0.08);
+  --line: #eaeaea;
+  --line-strong: #d6d6d6;
+  --subtext: #666666;
+  --faint: #6f6f78;
+  --ink: #171717;
+  --main: #88aaee;
+  --main-soft: rgba(136, 170, 238, 0.16);
+  --main-faint: rgba(136, 170, 238, 0.08);
+  --primary: #88aaee;
+  --primary-hover: #7b9edc;
+  --primary-soft: rgba(136, 170, 238, 0.16);
+  --primary-ink: #000000;
+  --success: #15803d;
+  --warning: #8a550b;
+  --danger: #b4232f;
+  --muted-signal: #a1a1aa;
+  --shadow-card: 0 0 0 1px rgba(0, 0, 0, 0.025),
+    0 2px 4px rgba(0, 0, 0, 0.035);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--paper);
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  font-size: 14px;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+::selection {
+  background: var(--main);
+  color: #000000;
+}
+
+button:not(:disabled),
+[role="button"]:not(:disabled) {
+  cursor: pointer;
+}
+
+.link-draw {
+  position: relative;
+  display: inline-flex;
+  width: fit-content;
+  text-decoration: none;
+}
+
+.link-draw::after {
+  position: absolute;
+  right: 0;
+  bottom: -2px;
+  left: 0;
+  height: 2px;
+  background: var(--main);
+  content: "";
+  transform: scaleX(0);
+  transform-origin: right;
+  transition: transform 180ms ease;
+}
+
+.link-draw:hover::after,
+.link-draw:focus-visible::after {
+  transform: scaleX(1);
+  transform-origin: left;
+}
+
+@keyframes contract-receipt-enter {
+  from {
+    opacity: 0;
+    transform: perspective(1100px) translateY(24px) rotateX(6deg) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: perspective(1100px) translateY(0) rotateX(1deg) scale(1);
+  }
+}
+
+.contract-receipt {
+  animation: contract-receipt-enter 260ms ease-out both;
+  transform: perspective(1100px) rotateX(1deg);
+  transform-origin: center bottom;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .contract-receipt {
+    animation: none;
+    transform: none;
+  }
+
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 390 420">
+  <title>Sentinel</title>
+  <g
+    fill="none"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    stroke-width="60"
+  >
+    <path
+      d="M32 45h98c55 0 75 21 95 69 14 33 35 44 73 44h58"
+      stroke="#111111"
+    />
+    <path
+      d="M142 158v15c0 24 9 38 30 54l86 66"
+      stroke="#111111"
+    />
+    <path
+      d="M32 299h41c33 0 48 10 72 36l33 34c23 24 51 34 79 31 56-6 98-52 98-109v-32"
+      stroke="#88AAEE"
+    />
+  </g>
+</svg>

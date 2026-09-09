@@ -1,0 +1,687 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sentinel — Premium app mockup</title>
+    <style>
+      :root {
+        --main: #88aaee;
+        --main-soft: rgba(136, 170, 238, 0.16);
+        --main-faint: rgba(136, 170, 238, 0.08);
+        --paper: #fff;
+        --ink: #171717;
+        --muted: #666;
+        --faint: #858585;
+        --line: #eaeaea;
+        --border: #000;
+        --shadow: 4px 4px 0 0 var(--border);
+        --rail-width: 220px;
+      }
+
+      * { box-sizing: border-box; }
+      html, body { margin: 0; min-height: 100%; background: var(--paper); }
+      body {
+        color: var(--ink);
+        font: 13px/1.5 Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      button, input, select, textarea { font: inherit; }
+      button { cursor: pointer; }
+      button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+        outline: 2px solid #000;
+        outline-offset: 3px;
+      }
+
+      .app {
+        display: grid;
+        grid-template-columns: var(--rail-width) minmax(0, 1fr);
+        min-height: 100vh;
+        transition: grid-template-columns 180ms ease;
+      }
+      .app.collapsed { --rail-width: 72px; }
+
+      .rail {
+        position: sticky;
+        top: 0;
+        height: 100vh;
+        overflow: hidden;
+        border-right: 1px solid var(--line);
+        background: var(--paper);
+      }
+      .brand {
+        height: 64px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 18px;
+        border-bottom: 1px solid var(--line);
+        white-space: nowrap;
+      }
+      .brand-mark {
+        width: 30px;
+        height: 30px;
+        flex: 0 0 30px;
+        display: grid;
+        place-items: center;
+        border: 2px solid var(--border);
+        border-radius: 5px;
+        background: var(--main);
+      }
+      .brand-mark svg { width: 15px; height: 15px; }
+      .brand-copy strong { display: block; font-size: 13px; font-weight: 650; }
+      .brand-copy span { display: block; margin-top: 1px; color: var(--muted); font-size: 10px; }
+
+      .nav { display: flex; flex-direction: column; gap: 3px; padding: 16px 11px; }
+      .nav-button {
+        position: relative;
+        width: 100%;
+        height: 39px;
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 0 12px;
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--muted);
+        text-align: left;
+        white-space: nowrap;
+      }
+      .nav-button:hover { color: var(--ink); background: var(--main-faint); }
+      .nav-button.active { color: var(--ink); background: var(--main-soft); font-weight: 620; }
+      .nav-button.active::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        width: 3px;
+        height: 20px;
+        border-radius: 2px;
+        background: var(--main);
+      }
+      .nav-button svg { width: 15px; height: 15px; flex: 0 0 15px; stroke-width: 1.8; }
+      .rail-footer { position: absolute; right: 0; bottom: 0; left: 0; padding: 11px; border-top: 1px solid var(--line); }
+      .collapse-button {
+        width: 100%;
+        height: 36px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .collapse-button:hover { color: var(--ink); background: var(--main-faint); }
+      .collapse-button svg { width: 14px; transition: transform 180ms ease; }
+      .collapsed .collapse-button svg { transform: rotate(180deg); }
+      .collapsed .brand-copy, .collapsed .nav-label, .collapsed .collapse-label { display: none; }
+      .collapsed .nav-button { justify-content: center; padding: 0; }
+
+      .workspace { min-width: 0; }
+      .topbar {
+        height: 64px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        padding: 0 48px;
+        border-bottom: 1px solid var(--line);
+      }
+      .topbar strong { font-size: 12px; font-weight: 620; }
+      .topbar span { color: var(--muted); font-size: 11px; }
+      .topbar-side { display: flex; align-items: center; gap: 18px; }
+      .text-button { padding: 0; border: 0; background: transparent; color: var(--muted); font-size: 11px; }
+      .text-button:hover { color: var(--ink); }
+
+      .control-note {
+        min-height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        padding: 8px 48px;
+        border-bottom: 1px solid rgba(136, 170, 238, 0.42);
+        background: var(--main-soft);
+        font-size: 11px;
+      }
+      .control-note strong { font-weight: 650; }
+
+      .content { width: 100%; max-width: 1220px; margin: 0 auto; padding: 44px 48px 80px; }
+      .page { display: none; }
+      .page.active { display: block; }
+      .eyebrow { color: #4f6fAD; font-size: 10px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
+      h1 { margin: 7px 0 0; font-size: 30px; line-height: 1.15; font-weight: 620; letter-spacing: -0.045em; }
+      .lead { max-width: 620px; margin: 10px 0 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+      .page-heading {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 28px;
+        margin-bottom: 38px;
+      }
+
+      /* Exact neobrutalism button behavior and tokens from the component library. */
+      .hard-button {
+        min-height: 40px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 8px 16px;
+        border: 2px solid var(--border);
+        border-radius: 5px;
+        box-shadow: var(--shadow);
+        background: var(--main);
+        color: #000;
+        font-weight: 500;
+        white-space: nowrap;
+        transition: all 150ms ease;
+      }
+      .hard-button:hover { transform: translate(4px, 4px); box-shadow: none; }
+      .hard-button.neutral { background: #fff; }
+      .hard-button.small { min-height: 36px; padding: 6px 13px; font-size: 11px; }
+      .hard-button:disabled { pointer-events: none; opacity: 0.5; }
+      .quiet-button {
+        min-height: 36px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        padding: 7px 13px;
+        border: 1px solid #d6d6d6;
+        border-radius: 5px;
+        background: #fff;
+        color: var(--ink);
+        font-size: 11px;
+        font-weight: 550;
+        white-space: nowrap;
+      }
+      .quiet-button:hover { border-color: var(--main); background: var(--main-faint); }
+
+      .section { padding: 23px 0 30px; border-top: 1px solid var(--line); }
+      .section-title { margin: 0 0 15px; font-size: 11px; font-weight: 650; letter-spacing: 0.02em; }
+      .section-copy { color: var(--muted); font-size: 12px; }
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        min-height: 52px;
+        border-top: 1px solid var(--line);
+      }
+      .row:first-child { border-top: 0; }
+      .row strong { display: block; font-size: 12px; font-weight: 590; }
+      .row small { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; }
+      .row-value { flex: 0 0 auto; color: var(--muted); font-size: 11px; text-align: right; }
+
+      .overview-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(270px, 0.65fr); gap: 52px; }
+      .task-summary {
+        padding: 24px 0;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+      }
+      .task-summary h2 { max-width: 620px; margin: 0; font-size: 22px; font-weight: 580; letter-spacing: -0.025em; }
+      .task-summary p { margin: 8px 0 0; color: var(--muted); }
+      .task-actions { display: flex; gap: 12px; margin-top: 20px; }
+      .attention {
+        padding: 20px;
+        border: 2px solid var(--border);
+        border-radius: 5px;
+        box-shadow: var(--shadow);
+        background: var(--main-soft);
+      }
+      .attention small { color: #4f6fad; font-size: 9px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
+      .attention h2 { margin: 9px 0 5px; font-size: 16px; font-weight: 620; }
+      .attention p { margin: 0 0 17px; color: var(--muted); font-size: 11px; }
+
+      .activity-item { display: grid; grid-template-columns: 1fr auto; gap: 20px; padding: 14px 0; border-top: 1px solid var(--line); }
+      .activity-item strong { font-size: 12px; font-weight: 570; }
+      .activity-item p { margin: 3px 0 0; color: var(--muted); font-size: 10px; }
+      .activity-item time { color: var(--faint); font-size: 10px; }
+
+      /* Exact neobrutalism accordion structure from the component library. */
+      .accordion-list { display: grid; gap: 14px; }
+      .accordion-item {
+        overflow: hidden;
+        border: 2px solid var(--border);
+        border-bottom-width: 1px;
+        border-radius: 5px;
+        box-shadow: var(--shadow);
+        background: #fff;
+      }
+      .accordion-trigger {
+        width: 100%;
+        min-height: 52px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 16px;
+        border: 0;
+        background: var(--main);
+        color: #000;
+        font-weight: 700;
+        text-align: left;
+        transition: all 150ms ease;
+      }
+      .accordion-trigger[aria-expanded="true"] { border-bottom: 2px solid var(--border); }
+      .accordion-trigger svg { width: 18px; height: 18px; flex: 0 0 18px; transition: transform 200ms ease; }
+      .accordion-trigger[aria-expanded="true"] svg { transform: rotate(180deg); }
+      .accordion-content { padding: 16px; background: #fff; font-weight: 500; }
+      .accordion-content[hidden] { display: none; }
+
+      .steps { display: grid; grid-template-columns: repeat(3, 1fr); margin-bottom: 32px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+      .step { padding: 13px 16px; border-left: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+      .step:first-child { padding-left: 0; border-left: 0; }
+      .step.current { background: var(--main-soft); color: var(--ink); font-weight: 600; }
+      .step span { margin-right: 8px; color: #4f6fad; font-size: 9px; }
+      .task-layout { display: grid; grid-template-columns: minmax(280px, 0.72fr) minmax(0, 1.28fr); border-top: 1px solid var(--line); }
+      .task-intent { padding: 25px 34px 0 0; }
+      .task-settings { padding: 25px 0 0 36px; border-left: 1px solid var(--line); }
+      label { display: block; margin-bottom: 8px; font-size: 11px; font-weight: 600; }
+      textarea, input, select {
+        width: 100%;
+        border: 1px solid #d6d6d6;
+        border-radius: 5px;
+        background: #fff;
+        color: var(--ink);
+      }
+      textarea { min-height: 112px; padding: 12px; resize: vertical; }
+      input, select { height: 40px; padding: 0 11px; }
+      .form-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 24px; }
+      .choice-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+      .choice { padding: 13px; border: 1px solid var(--line); border-radius: 5px; }
+      .choice small { display: block; color: var(--muted); font-size: 10px; }
+      .task-options { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+      .task-option { padding: 14px 0; border-top: 1px solid var(--line); }
+      .task-option.full { grid-column: 1 / -1; }
+      .task-option p { margin: 6px 0 0; color: var(--muted); font-size: 10px; }
+      .advanced-wrap { margin-top: 22px; }
+
+      .approval { max-width: 780px; margin: 0 auto; }
+      .approval-action {
+        padding: 26px 0;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+      }
+      .approval-action h2 { margin: 0; font-size: 22px; font-weight: 590; letter-spacing: -0.025em; }
+      .approval-action p { margin: 8px 0 0; color: var(--muted); }
+      .plain-list { margin: 0; padding: 0; list-style: none; }
+      .plain-list li { display: flex; gap: 11px; padding: 13px 0; border-top: 1px solid var(--line); }
+      .plain-list li::before {
+        content: "✓";
+        width: 20px;
+        height: 20px;
+        flex: 0 0 20px;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--main);
+        border-radius: 50%;
+        background: var(--main-soft);
+        color: #294d91;
+        font-size: 10px;
+        font-weight: 700;
+      }
+      .plain-list strong { display: block; font-size: 12px; font-weight: 590; }
+      .plain-list span { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; }
+      .approval-actions { display: flex; justify-content: flex-end; gap: 13px; padding-top: 26px; }
+      .decision-message { display: none; margin-top: 22px; padding: 16px; border: 2px solid var(--border); border-radius: 5px; background: var(--main-soft); font-weight: 550; }
+      .decision-message.visible { display: block; }
+
+      .filter-bar { display: grid; grid-template-columns: 1fr 1fr auto; gap: 14px; align-items: end; padding-bottom: 26px; border-bottom: 1px solid var(--line); }
+      .day { padding-top: 28px; }
+      .day-title { margin: 0 0 6px; color: var(--faint); font-size: 10px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; }
+      .history-item {
+        display: grid;
+        grid-template-columns: 44px minmax(0, 1fr) auto;
+        gap: 16px;
+        align-items: center;
+        padding: 15px 0;
+        border-top: 1px solid var(--line);
+      }
+      .history-icon {
+        width: 34px;
+        height: 34px;
+        display: grid;
+        place-items: center;
+        border-radius: 5px;
+        background: var(--main-soft);
+        color: #294d91;
+      }
+      .history-icon svg { width: 15px; height: 15px; }
+      .history-item strong { display: block; font-size: 12px; font-weight: 580; }
+      .history-item p { margin: 3px 0 0; color: var(--muted); font-size: 10px; }
+      .history-item time { color: var(--faint); font-size: 10px; }
+
+      .settings-layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 44px; border-top: 1px solid var(--line); padding-top: 26px; }
+      .settings-menu { display: flex; flex-direction: column; gap: 3px; }
+      .settings-menu button {
+        height: 38px;
+        padding: 0 11px;
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 11px;
+        text-align: left;
+      }
+      .settings-menu button:hover { color: var(--ink); background: var(--main-faint); }
+      .settings-menu button.active { color: var(--ink); background: var(--main-soft); font-weight: 620; }
+      .settings-main { min-width: 0; }
+      .settings-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
+      .settings-head h2 { margin: 0; font-size: 18px; font-weight: 610; letter-spacing: -0.02em; }
+      .settings-head p { margin: 5px 0 0; color: var(--muted); font-size: 11px; }
+      .search-wrap { position: relative; margin-bottom: 30px; }
+      .search-wrap svg { position: absolute; top: 12px; left: 13px; width: 16px; height: 16px; color: var(--faint); pointer-events: none; }
+      .search-wrap input { padding-left: 39px; }
+      .connection-group { margin-top: 28px; }
+      .connection-group.hidden-by-search { display: none; }
+      .connection-group-title { margin: 0 0 6px; color: var(--faint); font-size: 10px; font-weight: 620; letter-spacing: 0.07em; text-transform: uppercase; }
+      .connection-row {
+        display: grid;
+        grid-template-columns: 42px minmax(0, 1fr) auto;
+        gap: 14px;
+        align-items: center;
+        min-height: 68px;
+        border-top: 1px solid var(--line);
+      }
+      .connection-row.hidden-by-search { display: none; }
+      .connection-mark {
+        width: 34px;
+        height: 34px;
+        display: grid;
+        place-items: center;
+        border: 1px solid rgba(136, 170, 238, 0.55);
+        border-radius: 5px;
+        background: var(--main-soft);
+        color: #294d91;
+        font-size: 11px;
+        font-weight: 700;
+      }
+      .connection-row strong { display: block; font-size: 12px; font-weight: 590; }
+      .connection-row p { margin: 2px 0 0; color: var(--muted); font-size: 10px; }
+      .connection-actions { display: flex; align-items: center; gap: 14px; }
+      .connection-status { color: #4f6fad; font-size: 10px; font-weight: 600; }
+      .connection-empty { display: none; padding: 28px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+      .connection-empty.visible { display: block; }
+      .oauth-note { margin-top: 30px; padding: 14px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; line-height: 1.6; }
+
+      @media (max-width: 1000px) {
+        :root { --rail-width: 72px; }
+        .brand-copy, .nav-label, .collapse-label { display: none; }
+        .nav-button { justify-content: center; padding: 0; }
+        .overview-layout { grid-template-columns: 1fr; }
+        .settings-layout { grid-template-columns: 1fr; gap: 28px; }
+        .settings-menu { flex-direction: row; border-bottom: 1px solid var(--line); padding-bottom: 12px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app" id="app">
+      <aside class="rail">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3 5.5 6v5.3c0 4.3 2.6 7.8 6.5 9.7 3.9-1.9 6.5-5.4 6.5-9.7V6L12 3Z"/><path d="m9 12 2 2 4-5"/></svg>
+          </div>
+          <div class="brand-copy"><strong>Sentinel</strong><span>Control center</span></div>
+        </div>
+        <nav class="nav" aria-label="Primary navigation">
+          <button class="nav-button active" data-page="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span class="nav-label">Overview</span></button>
+          <button class="nav-button" data-page="tasks"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M9 6h11M9 12h11M9 18h11"/><path d="m3.5 6 1 1 2-2M3.5 12l1 1 2-2M3.5 18l1 1 2-2"/></svg><span class="nav-label">Tasks</span></button>
+          <button class="nav-button" data-page="approvals"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4.5V3h6v1.5M8.5 12l2 2 5-5"/></svg><span class="nav-label">Approvals</span></button>
+          <button class="nav-button" data-page="audit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg><span class="nav-label">Activity</span></button>
+          <button class="nav-button" data-page="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H3v-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6V3h4v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg><span class="nav-label">Settings</span></button>
+        </nav>
+        <div class="rail-footer"><button class="collapse-button" id="collapse" aria-label="Collapse navigation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m15 18-6-6 6-6"/></svg><span class="collapse-label">Collapse rail</span></button></div>
+      </aside>
+
+      <div class="workspace">
+        <header class="topbar">
+          <div><strong>Personal workspace</strong><span>&nbsp;&nbsp;Protected by Sentinel</span></div>
+        </header>
+        <div class="control-note"><span><strong>Approval mode is on.</strong>&nbsp; Sentinel will ask before making important changes.</span><button class="text-button">Manage</button></div>
+
+        <main class="content">
+          <section class="page active" id="overview">
+            <div class="page-heading">
+              <div><div class="eyebrow">Overview</div><h1>Your workspace</h1><p class="lead">See what your agent can do, review anything that needs attention, and adjust your preferences.</p></div>
+              <button class="quiet-button" data-jump="tasks">Create a task</button>
+            </div>
+
+            <div class="overview-layout">
+              <div>
+                <section class="task-summary">
+                  <div class="eyebrow">Current task</div>
+                  <h2>Create a result file in the build folder</h2>
+                  <p>The agent can create one file. Every important change still needs your approval.</p>
+                  <div class="task-actions"><button class="quiet-button" data-jump="tasks">Edit task</button><button class="text-button">Pause agent</button></div>
+                </section>
+
+                <section class="section">
+                  <h2 class="section-title">Workspace setup</h2>
+                  <div class="row"><div><strong>Approval preference</strong><small>Ask before creating, editing, or deleting files</small></div><span class="row-value">Always ask</span></div>
+                  <div class="row"><div><strong>Workspace access</strong><small>Changes stay inside the selected project</small></div><span class="row-value">This project only</span></div>
+                  <div class="row"><div><strong>Connected agent</strong><small>Your coding agent receives guidance from Sentinel</small></div><span class="row-value">Connected</span></div>
+                </section>
+
+                <section class="section">
+                  <h2 class="section-title">Recent activity</h2>
+                  <div class="activity-item"><div><strong>File creation approved</strong><p>The requested change completed successfully.</p></div><time>4:26 PM</time></div>
+                  <div class="activity-item"><div><strong>Earlier request denied</strong><p>No change was made.</p></div><time>4:24 PM</time></div>
+                  <div class="activity-item"><div><strong>Task settings updated</strong><p>Your latest preferences are now active.</p></div><time>4:22 PM</time></div>
+                </section>
+              </div>
+
+              <aside>
+                <div class="attention">
+                  <small>Needs your attention</small>
+                  <h2>One change is waiting</h2>
+                  <p>Review what the agent wants to do before anything happens.</p>
+                  <button class="hard-button small" data-jump="approvals">Review change</button>
+                </div>
+                <section class="section" style="margin-top:32px">
+                  <h2 class="section-title">Manage</h2>
+                  <div class="row"><div><strong>Connections</strong><small>Manage agents and accounts</small></div><button class="text-button" data-jump="settings">Open</button></div>
+                  <div class="row"><div><strong>Preferences</strong><small>Choose when Sentinel should ask</small></div><button class="text-button" data-jump="settings">Open</button></div>
+                </section>
+              </aside>
+            </div>
+          </section>
+
+          <section class="page" id="tasks">
+            <div class="page-heading">
+              <div><div class="eyebrow">Tasks</div><h1>Customize your task</h1><p class="lead">Tell Sentinel the outcome you want, then choose the boundaries that feel right.</p></div>
+            </div>
+            <div class="steps"><div class="step"><span>01</span>Describe</div><div class="step current"><span>02</span>Customize</div><div class="step"><span>03</span>Review</div></div>
+
+            <div class="task-layout">
+              <div class="task-intent">
+                <h2 class="section-title">What should the agent do?</h2>
+                <label for="task-goal">Task goal</label>
+                <textarea id="task-goal">Create a result file in the build folder.</textarea>
+                <p class="section-copy">Use everyday language. Sentinel turns it into clear settings for you to review.</p>
+              </div>
+              <div class="task-settings">
+                <h2 class="section-title">Task settings</h2>
+                <div class="task-options">
+                  <div class="task-option"><label for="task-action">Action</label><select id="task-action"><option>Create a file</option></select><p>Choose the kind of change the agent may make.</p></div>
+                  <div class="task-option"><label for="task-location">Location</label><select id="task-location"><option>Build folder</option></select><p>Keep the task inside one clear area.</p></div>
+                  <div class="task-option full"><label for="approval-choice">Approval preference</label><select id="approval-choice"><option>Ask before every change</option></select><p>You remain in control of anything that changes the project.</p></div>
+                </div>
+                <div class="advanced-wrap">
+                  <div class="accordion-list">
+                  <div class="accordion-item">
+                    <button class="accordion-trigger" aria-expanded="false"><span>Advanced settings</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m6 9 6 6 6-6"/></svg></button>
+                    <div class="accordion-content" hidden>If something fails, stop and explain what happened before trying again. Do not work outside this project.</div>
+                  </div>
+                </div>
+                </div>
+                <div class="form-actions"><button class="quiet-button">Save draft</button><button class="hard-button">Review task</button></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="page approval" id="approvals">
+            <div class="page-heading">
+              <div><div class="eyebrow">Approvals · 1 waiting</div><h1>Review this change</h1><p class="lead">Sentinel explains the outcome in plain language before anything happens.</p></div>
+            </div>
+            <div class="approval-action"><h2>Create one file in the build folder</h2><p>This supports your current task and stays inside the project you selected.</p></div>
+            <section class="section">
+              <h2 class="section-title">What will happen</h2>
+              <ul class="plain-list">
+                <li><div><strong>One new file will be created</strong><span>No existing files will be replaced.</span></div></li>
+                <li><div><strong>The change stays inside your build folder</strong><span>The agent cannot access another project.</span></div></li>
+                <li><div><strong>This approval works once</strong><span>A new change will require a new review.</span></div></li>
+              </ul>
+            </section>
+            <p class="section-copy">Sentinel is asking because you chose to review every file change.</p>
+            <div class="approval-actions"><button class="quiet-button" id="deny">Deny</button><button class="hard-button" id="approve">Approve change</button></div>
+            <div class="decision-message" id="decision-message"></div>
+          </section>
+
+          <section class="page" id="audit">
+            <div class="page-heading">
+              <div><div class="eyebrow">Activity</div><h1>What happened</h1><p class="lead">A simple history of decisions and changes across your workspace.</p></div>
+              <button class="quiet-button">Download history</button>
+            </div>
+            <div class="filter-bar">
+              <div><label for="activity-type">Show</label><select id="activity-type"><option>All activity</option><option>Approvals</option><option>Task changes</option></select></div>
+              <div><label for="activity-time">Time</label><select id="activity-time"><option>Last 7 days</option><option>Today</option><option>Last 30 days</option></select></div>
+              <button class="hard-button small">Apply</button>
+            </div>
+            <section class="day">
+              <h2 class="day-title">Today</h2>
+              <div class="history-item"><div class="history-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m5 12 4 4L19 6"/></svg></div><div><strong>File creation completed</strong><p>The approved change finished successfully.</p></div><time>4:26 PM</time></div>
+              <div class="history-item"><div class="history-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m5 12 4 4L19 6"/></svg></div><div><strong>You approved a change</strong><p>One file was allowed inside the build folder.</p></div><time>4:26 PM</time></div>
+              <div class="history-item"><div class="history-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M6 6l12 12M18 6 6 18"/></svg></div><div><strong>You denied a change</strong><p>Nothing was changed.</p></div><time>4:24 PM</time></div>
+              <div class="history-item"><div class="history-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M6 4h12v16H6zM9 9h6M9 13h6"/></svg></div><div><strong>Task settings updated</strong><p>The agent received your new boundaries.</p></div><time>4:22 PM</time></div>
+            </section>
+            <section class="day">
+              <h2 class="day-title">Yesterday</h2>
+              <div class="history-item"><div class="history-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 3 5.5 6v5.3c0 4.3 2.6 7.8 6.5 9.7 3.9-1.9 6.5-5.4 6.5-9.7V6L12 3Z"/></svg></div><div><strong>Workspace connected</strong><p>Sentinel began protecting this project.</p></div><time>3:18 PM</time></div>
+            </section>
+          </section>
+
+          <section class="page" id="settings">
+            <div class="page-heading">
+              <div><div class="eyebrow">Settings</div><h1>Make Sentinel yours</h1><p class="lead">Manage connections, workspace access, and approval preferences in one place.</p></div>
+              <button class="hard-button">Add connection</button>
+            </div>
+            <div class="settings-layout">
+              <nav class="settings-menu" aria-label="Settings sections">
+                <button>General</button>
+                <button class="active">Connections</button>
+                <button>Approval preferences</button>
+                <button>Workspace access</button>
+              </nav>
+              <div class="settings-main">
+                <div class="settings-head"><div><h2>Connections</h2><p>Connect the tools and agents you want Sentinel to supervise.</p></div></div>
+                <div class="search-wrap">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+                  <label for="connection-search" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">Search connections</label>
+                  <input id="connection-search" type="search" placeholder="Search connections" autocomplete="off">
+                </div>
+
+                <section class="connection-group">
+                  <h2 class="connection-group-title">Connected</h2>
+                  <div class="connection-row" data-connection="coding agent cursor">
+                    <div class="connection-mark">CA</div>
+                    <div><strong>Coding agent</strong><p>Receives task guidance from Sentinel</p></div>
+                    <div class="connection-actions"><span class="connection-status">Connected</span><button class="quiet-button">Manage</button></div>
+                  </div>
+                </section>
+
+                <section class="connection-group">
+                  <h2 class="connection-group-title">Available</h2>
+                  <div class="connection-row" data-connection="github code repository oauth">
+                    <div class="connection-mark">GH</div>
+                    <div><strong>GitHub</strong><p>Connect repositories and review activity</p></div>
+                    <button class="quiet-button">Connect</button>
+                  </div>
+                  <div class="connection-row" data-connection="slack messages communication oauth">
+                    <div class="connection-mark">SL</div>
+                    <div><strong>Slack</strong><p>Review communication actions before they are sent</p></div>
+                    <button class="quiet-button">Connect</button>
+                  </div>
+                  <div class="connection-row" data-connection="linear issues project management oauth">
+                    <div class="connection-mark">LI</div>
+                    <div><strong>Linear</strong><p>Supervise issue and project updates</p></div>
+                    <button class="quiet-button">Connect</button>
+                  </div>
+                </section>
+                <div class="connection-empty" id="connection-empty">No connections match your search.</div>
+                <p class="oauth-note">Connections use the provider’s secure sign-in flow. Connecting an account does not give an agent permission to act; your Sentinel task and approval settings remain in control.</p>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <script>
+      const app = document.getElementById("app");
+      const pageButtons = [...document.querySelectorAll("[data-page]")];
+      const pages = [...document.querySelectorAll(".page")];
+
+      function showPage(name) {
+        pages.forEach((page) => page.classList.toggle("active", page.id === name));
+        pageButtons.forEach((button) => button.classList.toggle("active", button.dataset.page === name));
+        history.replaceState(null, "", `#${name}`);
+        window.scrollTo({ top: 0, behavior: "instant" });
+      }
+
+      pageButtons.forEach((button) => button.addEventListener("click", () => showPage(button.dataset.page)));
+      document.querySelectorAll("[data-jump]").forEach((button) => button.addEventListener("click", () => showPage(button.dataset.jump)));
+
+      const collapse = document.getElementById("collapse");
+      collapse.addEventListener("click", () => {
+        const isCollapsed = app.classList.toggle("collapsed");
+        collapse.setAttribute("aria-label", isCollapsed ? "Expand navigation" : "Collapse navigation");
+      });
+
+      document.querySelectorAll(".accordion-trigger").forEach((trigger) => {
+        trigger.addEventListener("click", () => {
+          const expanded = trigger.getAttribute("aria-expanded") === "true";
+          trigger.setAttribute("aria-expanded", String(!expanded));
+          trigger.nextElementSibling.hidden = expanded;
+        });
+      });
+
+      function decide(approved) {
+        const message = document.getElementById("decision-message");
+        message.textContent = approved
+          ? "Approved. Sentinel will allow this change once and let you know when it finishes."
+          : "Denied. Nothing was changed.";
+        message.classList.add("visible");
+        document.getElementById("approve").disabled = true;
+        document.getElementById("deny").disabled = true;
+      }
+      document.getElementById("approve").addEventListener("click", () => decide(true));
+      document.getElementById("deny").addEventListener("click", () => decide(false));
+
+      const connectionSearch = document.getElementById("connection-search");
+      connectionSearch.addEventListener("input", () => {
+        const query = connectionSearch.value.trim().toLowerCase();
+        const connections = [...document.querySelectorAll("[data-connection]")];
+        let visible = 0;
+        connections.forEach((connection) => {
+          const match = connection.dataset.connection.includes(query);
+          connection.classList.toggle("hidden-by-search", !match);
+          if (match) visible += 1;
+        });
+        document.querySelectorAll(".connection-group").forEach((group) => {
+          const hasVisibleConnection = [...group.querySelectorAll("[data-connection]")]
+            .some((connection) => !connection.classList.contains("hidden-by-search"));
+          group.classList.toggle("hidden-by-search", !hasVisibleConnection);
+        });
+        document.getElementById("connection-empty").classList.toggle("visible", visible === 0);
+      });
+
+      const initial = location.hash.slice(1);
+      if (["overview", "tasks", "approvals", "audit", "settings"].includes(initial)) showPage(initial);
+    </script>
+  </body>
+</html>
