@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import stat
 import subprocess
 import threading
 import posixpath
@@ -9,11 +11,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
-from typing import Any, BinaryIO
+from typing import TYPE_CHECKING, Any, BinaryIO
 from uuid import uuid4
 
 from sentinel.contracts import ActionOperation
 from sentinel.execution.result import ExecutionResult
+
+if TYPE_CHECKING:
+    from sentinel.actions import CanonicalAction
 
 Runner = Callable[..., subprocess.CompletedProcess[Any]]
 ContainerNameFactory = Callable[[], str]
@@ -71,9 +76,25 @@ class DockerExecutor:
     output_limit_bytes: int = 64 * 1024
     tmpfs_size: str = "64m"
     read_only_workspace: bool = True
+    writable_subdirectory: str | None = None
     container_user: str = "65532:65532"
     runner: Runner = subprocess.run
     container_name_factory: ContainerNameFactory | None = None
+
+    def runtime_ready(self) -> bool:
+        """Return whether the configured Docker daemon accepts local commands."""
+
+        try:
+            self.validate_configuration()
+            completed = self.runner(
+                [self.docker_binary, "info", "--format", "{{.ServerVersion}}"],
+                capture_output=True,
+                text=True,
+                timeout=min(self.timeout_seconds, 3),
+            )
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return False
+        return completed.returncode == 0
 
     def run(self, *, command: str, shell_type: str) -> ExecutionResult:
         """Execute a command with fail-closed Docker sandbox behavior."""
@@ -165,6 +186,18 @@ class DockerExecutor:
         mount = (
             f"type=bind,source={workspace},target={container_workspace},readonly"
         )
+        mounts = ["--mount", mount]
+        writable_directory = self._resolved_writable_directory(workspace)
+        if writable_directory is not None:
+            writable_mount = (
+                f"type=bind,source={writable_directory},"
+                f"target={self._writable_container_root(container_workspace)}"
+            )
+            _validate_mount_value(
+                str(writable_directory),
+                name="writable executor directory",
+            )
+            mounts.extend(["--mount", writable_mount])
 
         return [
             self.docker_binary,
@@ -193,8 +226,7 @@ class DockerExecutor:
             container_workspace,
             "--env",
             f"SENTINEL_SHELL_TYPE={shell_type}",
-            "--mount",
-            mount,
+            *mounts,
             self.image,
             "sh",
             "-lc",
@@ -213,11 +245,23 @@ class DockerExecutor:
                 "Writable repository execution is unsupported; "
                 "read_only_workspace must remain enabled."
             )
+        self._resolved_writable_directory(workspace)
 
     def validate_operation(self, operation: ActionOperation) -> None:
         """Reject canonical mutations that the configured sandbox cannot perform."""
 
-        if self.read_only_workspace and operation in {"write", "delete"}:
+        if (
+            self.writable_subdirectory is not None
+            and operation not in {"read", "write"}
+        ):
+            raise ValueError(
+                "Scoped writable executor supports only canonical read and write operations."
+            )
+        if (
+            self.read_only_workspace
+            and operation in {"write", "delete"}
+            and self.writable_subdirectory is None
+        ):
             raise ValueError(
                 f"Read-only executor cannot perform canonical {operation} operations."
             )
@@ -245,6 +289,28 @@ class DockerExecutor:
                 raise ValueError(f"Target resolves outside the mounted workspace: {target}")
             if resolved.exists() and resolved.is_file() and resolved.stat().st_nlink > 1:
                 raise ValueError(f"Target is a multiply-linked file: {target}")
+
+    def validate_action(self, action: CanonicalAction) -> None:
+        """Confine mutations to descendants of the explicit writable subtree."""
+
+        if action.operation not in {"write", "delete"}:
+            return
+        workspace = self._resolved_workspace()
+        writable_directory = self._resolved_writable_directory(workspace)
+        if writable_directory is None:
+            raise ValueError(
+                f"Read-only executor cannot perform canonical {action.operation} operations."
+            )
+        writable_root = self._writable_container_root(
+            self._validated_container_workspace()
+        )
+        prefix = writable_root.rstrip("/") + "/"
+        for target in action.targets:
+            normalized = posixpath.normpath(target)
+            if not normalized.startswith(prefix):
+                raise ValueError(
+                    f"Mutation target is outside the writable subtree: {target}"
+                )
 
     def _resolved_workspace(self) -> Path:
         try:
@@ -276,6 +342,65 @@ class DockerExecutor:
         normalized = posixpath.normpath(self.container_workspace)
         _validate_mount_value(normalized, name="container_workspace")
         return normalized
+
+    def _resolved_writable_directory(self, workspace: Path) -> Path | None:
+        raw = self.writable_subdirectory
+        if raw is None:
+            return None
+        relative = Path(raw)
+        if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+            raise ValueError(
+                "writable_subdirectory must be a confined relative path"
+            )
+        current = workspace
+        for part in relative.parts:
+            if part in {"", "."}:
+                continue
+            current = current / part
+            if current.is_symlink():
+                raise ValueError(
+                    "Writable executor directory cannot traverse symbolic links."
+                )
+        try:
+            resolved = current.resolve(strict=True)
+        except OSError as exc:
+            raise ValueError(
+                f"Invalid writable executor directory {current}: {exc}"
+            ) from exc
+        if (
+            not resolved.is_dir()
+            or resolved == workspace
+            or not resolved.is_relative_to(workspace)
+        ):
+            raise ValueError(
+                "Writable executor directory must be a strict workspace descendant."
+            )
+        metadata = resolved.stat()
+        if hasattr(os, "getuid"):
+            owner_uid = os.getuid()
+            owner_gid = os.getgid()
+            if owner_uid == 0:
+                raise ValueError(
+                    "Scoped writable execution cannot run as the root host user."
+                )
+            if self.container_user != f"{owner_uid}:{owner_gid}":
+                raise ValueError(
+                    "Scoped writable executor must use the Sentinel process UID and GID."
+                )
+            _validate_private_directory(resolved, metadata, owner_uid)
+            _validate_writable_tree(resolved, owner_uid=owner_uid)
+        else:
+            _validate_writable_tree(resolved, owner_uid=None)
+        return resolved
+
+    def _writable_container_root(self, container_workspace: str) -> str:
+        raw = self.writable_subdirectory
+        if raw is None:
+            raise ValueError("writable_subdirectory is not configured")
+        relative = Path(raw)
+        return posixpath.normpath(
+            posixpath.join(container_workspace, *relative.parts)
+        )
 
     def _new_container_name(self) -> str:
         factory = self.container_name_factory
@@ -430,6 +555,64 @@ def _validate_mount_value(value: str, *, name: str) -> None:
     if "," in value:
         raise ValueError(
             f"{name} contains a comma that Docker --mount cannot represent safely."
+        )
+
+
+def _validate_writable_tree(root: Path, *, owner_uid: int | None) -> None:
+    """Reject aliases and special files that could mutate outside the subtree."""
+
+    try:
+        entries = list(os.scandir(root))
+    except OSError as exc:
+        raise ValueError(
+            f"Writable executor directory cannot be inspected: {exc}"
+        ) from exc
+    for entry in entries:
+        if entry.is_symlink():
+            raise ValueError(
+                f"Writable executor directory contains a symbolic link: {entry.name}"
+            )
+        try:
+            metadata = entry.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError(
+                f"Writable executor entry cannot be inspected: {entry.name}"
+            ) from exc
+        if stat.S_ISDIR(metadata.st_mode):
+            if owner_uid is not None:
+                _validate_private_directory(
+                    Path(entry.path),
+                    metadata,
+                    owner_uid,
+                )
+            _validate_writable_tree(Path(entry.path), owner_uid=owner_uid)
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(
+                f"Writable executor directory contains a special file: {entry.name}"
+            )
+        if metadata.st_nlink != 1:
+            raise ValueError(
+                f"Writable executor directory contains a hard-linked file: {entry.name}"
+            )
+        if owner_uid is not None and metadata.st_uid != owner_uid:
+            raise ValueError(
+                f"Writable executor file has an unexpected owner: {entry.name}"
+            )
+
+
+def _validate_private_directory(
+    path: Path,
+    metadata: os.stat_result,
+    owner_uid: int,
+) -> None:
+    if metadata.st_uid != owner_uid:
+        raise ValueError(
+            f"Writable executor directory has an unexpected owner: {path}"
+        )
+    if stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise ValueError(
+            f"Writable executor directory cannot be group/world writable: {path}"
         )
 
 

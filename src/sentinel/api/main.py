@@ -5,14 +5,18 @@ from __future__ import annotations
 import os
 import posixpath
 import hashlib
+import subprocess
 import threading
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from sentinel import __version__
@@ -29,7 +33,28 @@ from sentinel.api.schemas import (
     EvaluateResponse,
     HealthResponse,
 )
-from sentinel.approval import ApprovalBinding, InMemoryApprovalService
+from sentinel.api.control_routes import (
+    build_control_router,
+    validate_control_transport,
+)
+from sentinel.api.control_schemas import (
+    AcceptedContractDraft,
+    ActiveAuthorityResponse,
+    AuditListResponse,
+    ContractActivationRequest,
+    ContractActivationResponse,
+    ContractDraftRequest,
+    ContractDraftResponse,
+    ControlCheckResponse,
+    ControlRuntimeStatus,
+    DraftQuestionResponse,
+    DraftSuggestionResponse,
+)
+from sentinel.approval import (
+    ApprovalBinding,
+    InMemoryApprovalService,
+    PendingApproval,
+)
 from sentinel.authority import ContractAuthorityService
 from sentinel.audit import (
     AuditEvent,
@@ -42,11 +67,28 @@ from sentinel.audit import (
 )
 from sentinel.audit.redaction import redact
 from sentinel.contracts import (
+    ActionContract,
     ContractEnvironment,
     ContractRecord,
     ContractStoreError,
     InMemoryContractStore,
+    InMemoryTrustedEventConsumer,
     SQLiteContractStore,
+    TrustedEventError,
+    TrustedPromptEnvelope,
+)
+from sentinel.control import (
+    ApprovalCoordinatorError,
+    ApprovalExecutionEnvelope,
+    ControlConfig,
+    DraftCompilationError,
+    InMemoryApprovalCoordinator,
+    PairingService,
+    SQLiteWorkspaceBindingStore,
+    WorkspaceBindingError,
+    WorkspaceBindingStore,
+    compile_task_prompt,
+    review_workspace,
 )
 from sentinel.decision.contract_policy import (
     ContractMatchResult,
@@ -87,9 +129,13 @@ class _ResolvedContractRequest:
     canonicalization_error: str | None
     task_id: str | None
 
-    @property
-    def approval_binding(self) -> ApprovalBinding | None:
-        if self.record is None or self.match is None or not self.match.matches:
+    def approval_binding(self, attempt_id: str | None) -> ApprovalBinding | None:
+        if (
+            self.record is None
+            or self.match is None
+            or not self.match.matches
+            or self.task_id is None
+        ):
             return None
         return ApprovalBinding(
             contract_id=self.record.contract_id,
@@ -98,6 +144,8 @@ class _ResolvedContractRequest:
             action_fingerprint=self.match.action_fingerprint,
             environment=self.environment,
             session_id=self.record.session_id,
+            task_id=self.task_id,
+            attempt_id=attempt_id,
         )
 
 
@@ -140,7 +188,15 @@ class _InMemoryAuditStore:
         selected = filters or AuditQuery(**filter_values)
         with self._lock:
             events = list(self._events)
-        for field in ("event_type", "verdict", "environment", "agent_id", "contract_id"):
+        for field in (
+            "event_type",
+            "verdict",
+            "environment",
+            "agent_id",
+            "session_id",
+            "task_id",
+            "contract_id",
+        ):
             value = getattr(selected, field)
             if value is not None:
                 events = [event for event in events if getattr(event, field) == value]
@@ -210,10 +266,15 @@ def create_app(
     execution_environment_context: dict[str, str] | None = None,
     execution_cwd: str | None = None,
     confirmation_store: object | None = None,
+    control_config: ControlConfig | None = None,
+    control_binding_store: WorkspaceBindingStore | None = None,
+    pairing_service: PairingService | None = None,
 ) -> FastAPI:
     """Build an app with injectable stores and fail-closed empty defaults."""
 
     del confirmation_store  # Legacy injection is accepted but cannot authorize.
+    if control_config is not None and (model is not None or load_model):
+        raise ValueError("control mode requires ML loading to remain disabled")
     owned_stores: list[object] = []
 
     @asynccontextmanager
@@ -232,6 +293,26 @@ def create_app(
         description="Local contract-aware enforcement API for AI-agent shell actions.",
         lifespan=lifespan,
     )
+
+    @app.exception_handler(RequestValidationError)
+    async def redact_request_validation(
+        _: Request,
+        exc: RequestValidationError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": [
+                    {
+                        "type": error.get("type", "validation_error"),
+                        "loc": list(error.get("loc", ())),
+                        "msg": "Invalid request field.",
+                    }
+                    for error in exc.errors()
+                ]
+            },
+        )
+
     app.state.risk_model = model
     app.state.model_load_error = (
         None
@@ -303,6 +384,129 @@ def create_app(
         _max_concurrent_executions()
     )
     app.state.session_locks = _SessionLockPool()
+    app.state.control_enabled = control_config is not None
+    app.state.approval_coordinator = None
+    if control_config is not None:
+        reviewed_workspace = review_workspace(control_config.workspace)
+        executor_workspace = getattr(app.state.executor, "workspace", None)
+        if executor_workspace is not None:
+            try:
+                resolved_executor_workspace = Path(executor_workspace).expanduser().resolve(
+                    strict=True
+                )
+            except OSError as exc:
+                raise WorkspaceBindingError(
+                    "control:executor_workspace_unavailable"
+                ) from exc
+            if resolved_executor_workspace != reviewed_workspace.path:
+                raise WorkspaceBindingError(
+                    "control:executor_workspace_mismatch"
+                )
+        app.state.control_docker_ready = _control_executor_ready(
+            app.state.executor
+        )
+        selected_binding_store = control_binding_store
+        if selected_binding_store is None:
+            if not state_database:
+                raise WorkspaceBindingError(
+                    "control:durable_state_database_required"
+                )
+            selected_binding_store = SQLiteWorkspaceBindingStore(state_database)
+            owned_stores.append(selected_binding_store)
+        supervision_binding = selected_binding_store.bind(reviewed_workspace)
+        control_event_consumer = app.state.contract_store.set_trusted_event_consumer(
+            InMemoryTrustedEventConsumer(
+                host_id=f"sentinel-control:{reviewed_workspace.identity_sha256}",
+                session_id=supervision_binding.session_id,
+                channel="protected_local_ui",
+            )
+        )
+        selected_pairing_service = pairing_service or PairingService(
+            control_config.pairing_capability
+        )
+        approval_coordinator = InMemoryApprovalCoordinator(
+            app.state.approval_service
+        )
+        app.state.control_binding_store = selected_binding_store
+        app.state.supervision_binding = supervision_binding
+        app.state.pairing_service = selected_pairing_service
+        app.state.approval_coordinator = approval_coordinator
+        app.state.control_event_consumer = control_event_consumer
+        app.state.authority_service.set_authority_change_observer(
+            lambda record: _invalidate_control_approvals_for_authority(
+                app,
+                record.session_id,
+            )
+        )
+
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=[control_config.ui_origin],
+            allow_credentials=True,
+            allow_methods=["GET", "POST"],
+            allow_headers=["Content-Type"],
+        )
+
+        @app.middleware("http")
+        async def protect_control_transport(
+            request: Request,
+            call_next: Any,
+        ) -> Any:
+            if request.url.path == "/control" or request.url.path.startswith(
+                "/control/"
+            ):
+                try:
+                    validate_control_transport(request, control_config)
+                except HTTPException as exc:
+                    return JSONResponse(
+                        status_code=exc.status_code,
+                        content={"detail": exc.detail},
+                    )
+            response = await call_next(request)
+            if request.url.path == "/control" or request.url.path.startswith(
+                "/control/"
+            ):
+                response.headers["Cache-Control"] = "no-store"
+            return response
+
+        app.include_router(
+            build_control_router(
+                config=control_config,
+                pairing=selected_pairing_service,
+                binding=supervision_binding,
+                approvals=approval_coordinator,
+                retry_approval=lambda envelope, token: _retry_control_approval(
+                    app,
+                    envelope,
+                    token,
+                ),
+                denial_observer=lambda pending: _write_approval_denial_audit(
+                    app,
+                    pending,
+                ),
+                draft_contract=lambda payload: _draft_control_contract(
+                    app,
+                    payload,
+                ),
+                activate_contract=lambda payload: _activate_control_contract(
+                    app,
+                    payload,
+                ),
+                active_authority=lambda: _control_active_authority(app),
+                approval_is_current=lambda envelope: _control_approval_is_current(
+                    app,
+                    envelope,
+                ),
+                query_audit=lambda **filters: _query_control_audit(
+                    app,
+                    **filters,
+                ),
+                runtime_status=lambda: _control_runtime_status(
+                    app,
+                    control_config,
+                ),
+            )
+        )
 
     if app.state.risk_model is None and load_model:
         try:
@@ -436,16 +640,18 @@ def _handle_contract(
         request_id_factory=lambda: request_id,
     )
 
-    binding = resolved.approval_binding
-    approval_candidate = False
-    if decision.verdict == "confirm_required" and binding is not None:
-        if not approval_candidate:
-            pending = _request_approval(app, binding)
-            decision = _replace_decision(
-                decision,
-                reasons=[*decision.reasons, "approval:pending"],
-                approval_id=pending.approval_id,
-            )
+    binding = resolved.approval_binding(payload.attempt_id)
+    if (
+        decision.verdict == "confirm_required"
+        and binding is not None
+        and not app.state.control_enabled
+    ):
+        pending = _request_approval(app, binding)
+        decision = _replace_decision(
+            decision,
+            reasons=[*decision.reasons, "approval:pending"],
+            approval_id=pending.approval_id,
+        )
 
     _write_decision_audit(
         app,
@@ -491,7 +697,7 @@ def _handle_contract_execution(
             policy_available=app.state.policy_profile is not None,
             request_id_factory=lambda: request_id,
         )
-        binding = resolved.approval_binding
+        binding = resolved.approval_binding(payload.attempt_id)
         approval_candidate = (
             decision.verdict == "confirm_required"
             and binding is not None
@@ -504,6 +710,13 @@ def _handle_contract_execution(
                     decision,
                     reasons=[*decision.reasons, "approval:pending"],
                     approval_id=pending.approval_id,
+                )
+                _record_control_approval(
+                    app,
+                    pending,
+                    payload,
+                    resolved,
+                    decision,
                 )
         _write_optional_execution_telemetry(
             _write_decision_audit,
@@ -605,7 +818,7 @@ def _admit_run_and_persist(
                 if approval_candidate:
                     assert payload.approval_token is not None
                     approved = _approved_decision(decision)
-                    binding = resolved.approval_binding
+                    binding = resolved.approval_binding(payload.attempt_id)
                     assert binding is not None
                     consumed = app.state.approval_service.consume(
                         payload.approval_token,
@@ -878,7 +1091,12 @@ def _resolve_contract_request(
     payload: ContractEvaluateRequest,
     app: FastAPI,
 ) -> _ResolvedContractRequest:
-    record = app.state.contract_store.get_active(payload.session_id)
+    authority_available = app.state.authority_service.authority_available
+    record = (
+        app.state.contract_store.get_active(payload.session_id)
+        if authority_available
+        else None
+    )
     environment = app.state.execution_environment
     context = record.contract.objective if record else "No active contract."
     recent = [
@@ -886,20 +1104,25 @@ def _resolve_contract_request(
         for action in app.state.session_store.get_recent_actions(payload.session_id)
     ]
     action: CanonicalAction | None = None
-    canonicalization_error: str | None = None
+    canonicalization_error: str | None = (
+        None
+        if authority_available
+        else "authority:audit_compensation_unverified"
+    )
     requested_cwd = posixpath.normpath(payload.action.cwd)
-    if requested_cwd != app.state.execution_cwd:
-        canonicalization_error = "action:untrusted_working_directory"
-    else:
-        try:
-            action = canonicalize_shell_action(
-                payload.action.raw_command,
-                environment=environment,
-                cwd=app.state.execution_cwd,
-                environment_context=app.state.execution_environment_context,
-            )
-        except ShellCanonicalizationError as exc:
-            canonicalization_error = exc.reason_code
+    if authority_available:
+        if requested_cwd != app.state.execution_cwd:
+            canonicalization_error = "action:untrusted_working_directory"
+        else:
+            try:
+                action = canonicalize_shell_action(
+                    payload.action.raw_command,
+                    environment=environment,
+                    cwd=app.state.execution_cwd,
+                    environment_context=app.state.execution_environment_context,
+                )
+            except ShellCanonicalizationError as exc:
+                canonicalization_error = exc.reason_code
 
     match: ContractMatchResult | None = None
     if record is not None and action is not None:
@@ -1007,6 +1230,9 @@ def _validate_execution_action(app: FastAPI, action: CanonicalAction) -> None:
     except ValueError as exc:
         raise _ExecutorCapabilityError(str(exc)) from exc
     validators["validate_targets"](action.targets)
+    action_validator = getattr(app.state.executor, "validate_action", None)
+    if callable(action_validator):
+        action_validator(action)
 
 
 def _request_approval(
@@ -1020,6 +1246,378 @@ def _request_approval(
             status_code=503,
             detail="Approval queue is unavailable; request failed closed.",
         ) from exc
+
+
+def _record_control_approval(
+    app: FastAPI,
+    pending: PendingApproval,
+    payload: ContractEvaluateRequest,
+    resolved: _ResolvedContractRequest,
+    decision: DecisionResult,
+) -> None:
+    coordinator = app.state.approval_coordinator
+    supervision = getattr(app.state, "supervision_binding", None)
+    if (
+        coordinator is None
+        or supervision is None
+        or payload.session_id != supervision.session_id
+        or payload.attempt_id is None
+        or resolved.action is None
+    ):
+        return
+    try:
+        coordinator.record(
+            pending,
+            attempt_id=payload.attempt_id,
+            agent_id=payload.agent_id,
+            user_id=payload.user_id,
+            raw_command=payload.action.raw_command,
+            cwd=payload.action.cwd,
+            recent_actions=[
+                _model_to_dict(action)
+                for action in payload.recent_actions
+            ],
+            action=resolved.action,
+            workspace=str(supervision.workspace.path),
+            reasons=decision.reasons,
+        )
+    except ApprovalCoordinatorError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Approval request could not be retained; request failed closed.",
+        ) from exc
+
+
+def _retry_control_approval(
+    app: FastAPI,
+    envelope: ApprovalExecutionEnvelope,
+    approval_token: str,
+) -> EvaluateResponse:
+    supervision = app.state.supervision_binding
+    if envelope.binding.session_id != supervision.session_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Approval session no longer matches the supervised workspace.",
+        )
+    payload = ContractEvaluateRequest(
+        contract_id=envelope.binding.contract_id,
+        version=envelope.binding.contract_version,
+        attempt_id=envelope.attempt_id,
+        session_id=envelope.binding.session_id,
+        agent_id=envelope.agent_id,
+        user_id=envelope.user_id,
+        action={
+            "family": "shell",
+            "raw_command": envelope.raw_command,
+            "cwd": envelope.cwd,
+        },
+        approval_token=approval_token,
+        recent_actions=envelope.recent_actions(),
+    )
+    return _handle_contract_execution(payload, app)
+
+
+def _control_approval_is_current(
+    app: FastAPI,
+    envelope: ApprovalExecutionEnvelope,
+) -> bool:
+    if not app.state.authority_service.authority_available:
+        return False
+    binding = envelope.binding
+    active = app.state.contract_store.get_active(binding.session_id)
+    return _approval_binding_matches_active(binding, active)
+
+
+def _approval_binding_matches_active(
+    binding: ApprovalBinding,
+    active: ContractRecord | None,
+) -> bool:
+    return bool(
+        active is not None
+        and active.task_id == binding.task_id
+        and active.contract_id == binding.contract_id
+        and active.version == binding.contract_version
+        and active.authority_epoch == binding.authority_epoch
+        and active.contract.environment == binding.environment
+    )
+
+
+def _invalidate_control_approvals_for_authority(
+    app: FastAPI,
+    session_id: str,
+) -> None:
+    coordinator = app.state.approval_coordinator
+    if coordinator is None:
+        return
+    active = (
+        app.state.contract_store.get_active(session_id)
+        if app.state.authority_service.authority_available
+        else None
+    )
+    coordinator.invalidate_where(
+        lambda binding: binding.session_id == session_id
+        and not _approval_binding_matches_active(binding, active)
+    )
+
+
+def _draft_control_contract(
+    app: FastAPI,
+    payload: ContractDraftRequest,
+) -> ContractDraftResponse:
+    try:
+        preview = compile_task_prompt(payload.raw_prompt)
+    except DraftCompilationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Task prompt could not be compiled.",
+        ) from exc
+    proposed = None
+    if payload.accepted_contract is not None:
+        contract = _accepted_control_contract(
+            app,
+            payload.accepted_contract,
+            prompt_sha256=preview.prompt_sha256,
+        )
+        try:
+            proposed = app.state.authority_service.create_proposed(
+                contract,
+                session_id=app.state.supervision_binding.session_id,
+                authorization_source="protected_local_ui",
+                created_at=datetime.now(timezone.utc),
+                preflight_status="complete",
+            )
+        except (ContractStoreError, AuditStoreError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Proposed contract could not be created.",
+            ) from exc
+    return ContractDraftResponse(
+        prompt_sha256=preview.prompt_sha256,
+        suggestions=[
+            DraftSuggestionResponse(
+                field=suggestion.field,
+                value=suggestion.value,
+                source=suggestion.source,
+            )
+            for suggestion in preview.suggestions
+        ],
+        questions=[
+            DraftQuestionResponse(
+                question_id=question.question_id,
+                field=question.field,
+                prompt=question.prompt,
+            )
+            for question in (
+                ()
+                if payload.accepted_contract is not None
+                else preview.questions
+            )
+        ],
+        proposed_contract=proposed,
+    )
+
+
+def _accepted_control_contract(
+    app: FastAPI,
+    accepted: AcceptedContractDraft,
+    *,
+    prompt_sha256: str,
+) -> ActionContract:
+    if accepted.environment != app.state.execution_environment:
+        raise HTTPException(
+            status_code=409,
+            detail="Contract environment must match the fixed server environment.",
+        )
+    targets: list[str] = []
+    for target in accepted.exact_targets:
+        normalized = posixpath.normpath(target)
+        if (
+            not target.startswith("/")
+            or normalized != target
+            or (
+                normalized != app.state.execution_cwd
+                and not normalized.startswith(app.state.execution_cwd.rstrip("/") + "/")
+            )
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Every target must be an exact path in the fixed workspace.",
+            )
+        targets.append(normalized)
+    if accepted.operation not in accepted.allowed_effects:
+        raise HTTPException(
+            status_code=422,
+            detail="Allowed effects must include the selected operation.",
+        )
+    if accepted.operation in accepted.forbidden_operations:
+        raise HTTPException(
+            status_code=422,
+            detail="The selected operation cannot also be forbidden.",
+        )
+    target_summary = ", ".join(targets)
+    objective = f"{accepted.operation.capitalize()} exactly {target_summary}."
+    return ActionContract(
+        objective=objective[:2_000],
+        allowed_operations={accepted.operation},
+        allowed_tools={"shell"},
+        exact_targets=targets,
+        environment=accepted.environment,
+        maximum_scope="exact",
+        expected_side_effects=accepted.expected_side_effects,
+        allowed_effects=accepted.allowed_effects,
+        forbidden_operations=accepted.forbidden_operations,
+        forbidden_effects=accepted.forbidden_effects,
+        forbidden_effect_codes=accepted.forbidden_effect_codes,
+        rollback_plan=accepted.rollback_plan,
+        dry_run_required=accepted.dry_run_required,
+        rollback_required=accepted.rollback_required,
+        transaction_required=accepted.transaction_required,
+        backup_required=accepted.backup_required,
+        source_prompt_sha256=prompt_sha256,
+        authorization_reference=f"control-draft:{uuid4()}",
+        expires_at=(
+            datetime.now(timezone.utc)
+            + timedelta(minutes=accepted.expires_in_minutes)
+        ),
+    )
+
+
+def _activate_control_contract(
+    app: FastAPI,
+    payload: ContractActivationRequest,
+) -> ContractActivationResponse:
+    session_id = app.state.supervision_binding.session_id
+    record = app.state.contract_store.get(
+        payload.contract_id,
+        payload.expected_version,
+    )
+    if record is None or record.session_id != session_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Proposed contract was not found.",
+        )
+    now = datetime.now(timezone.utc)
+    event = TrustedPromptEnvelope(
+        event_id=f"control-activation:{uuid4()}",
+        nonce=uuid4().hex,
+        host_id=app.state.control_event_consumer.binding[0],
+        session_id=session_id,
+        channel="protected_local_ui",
+        prompt=(
+            f"Activate reviewed contract {record.contract_id} "
+            f"version {record.version}."
+        ),
+        purpose="task_transition",
+        contract_id=record.contract_id,
+        contract_version=record.version,
+        decision="approve",
+        issued_at=now,
+        expires_at=now + timedelta(minutes=2),
+        authenticated=True,
+    )
+    try:
+        receipt = app.state.control_event_consumer.consume(event, now=now)
+        active = app.state.authority_service.activate_proposed(
+            record.contract_id,
+            expected_version=payload.expected_version,
+            expected_active_task_id=payload.expected_active_task_id,
+            trusted_event=receipt,
+            activated_at=now,
+        )
+    except (ContractStoreError, TrustedEventError, AuditStoreError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Contract activation failed because authority changed.",
+        ) from exc
+    return ContractActivationResponse(active_contract=active)
+
+
+def _control_active_authority(app: FastAPI) -> ActiveAuthorityResponse:
+    active = (
+        app.state.contract_store.get_active(
+            app.state.supervision_binding.session_id
+        )
+        if app.state.authority_service.authority_available
+        else None
+    )
+    return ActiveAuthorityResponse(active_contract=active)
+
+
+def _control_executor_ready(executor: object) -> bool:
+    if (
+        isinstance(executor, DockerExecutor)
+        and executor.runner is not subprocess.run
+    ):
+        try:
+            executor.validate_configuration()
+        except Exception:
+            return False
+        return True
+    runtime_ready = getattr(executor, "runtime_ready", None)
+    if callable(runtime_ready):
+        try:
+            return bool(runtime_ready())
+        except Exception:
+            return False
+    validate = getattr(executor, "validate_configuration", None)
+    if not callable(validate):
+        return False
+    try:
+        validate()
+    except Exception:
+        return False
+    return True
+
+
+def _control_runtime_status(
+    app: FastAPI,
+    config: ControlConfig,
+) -> ControlRuntimeStatus:
+    docker_ready = bool(app.state.control_docker_ready)
+    audit_ready = _audit_health(app.state.audit_store).status == "ok"
+    policy_ready = app.state.policy_profile is not None
+    authority_ready = app.state.authority_service.authority_available
+    rules_ready = policy_ready and audit_ready and authority_ready
+    workspace_path = str(app.state.supervision_binding.workspace.path)
+    return ControlRuntimeStatus(
+        backend=ControlCheckResponse(
+            status="ready",
+            detail="Protected FastAPI control routes are responding.",
+        ),
+        workspace=ControlCheckResponse(
+            status="ready",
+            detail="Workspace identity was reviewed and fixed at startup.",
+        ),
+        docker=ControlCheckResponse(
+            status="ready" if docker_ready else "unavailable",
+            detail=(
+                "Docker executor and daemon passed the process startup check."
+                if docker_ready
+                else "Docker executor or daemon failed the process startup check."
+            ),
+        ),
+        rules=ControlCheckResponse(
+            status="ready" if rules_ready else "unavailable",
+            detail=(
+                "Rules-only enforcement and required audit storage are ready."
+                if rules_ready
+                else "Policy, authority, or required audit storage is unavailable."
+            ),
+        ),
+        demo_mode=config.demo_mode,
+        sample_repository=workspace_path if config.demo_mode else None,
+    )
+
+
+def _query_control_audit(
+    app: FastAPI,
+    **filters: object,
+) -> AuditListResponse:
+    query = AuditQuery(
+        session_id=app.state.supervision_binding.session_id,
+        **filters,
+    )
+    return AuditListResponse(events=app.state.audit_store.query(query))
 
 
 def _write_pre_decision_audit(
@@ -1054,12 +1652,13 @@ def _write_pre_decision_audit(
 
 def _write_approval_issue_audit(app: FastAPI, token: Any) -> None:
     binding = token.binding
-    _audit_write(
+    _audit_write_required(
         app,
         AuditEvent(
             event_type="exact_action_approved",
             user_id=token.approver_id,
             session_id=binding.session_id,
+            task_id=binding.task_id,
             contract_id=binding.contract_id,
             contract_version=binding.contract_version,
             environment=binding.environment,
@@ -1068,6 +1667,32 @@ def _write_approval_issue_audit(app: FastAPI, token: Any) -> None:
                 "approval_id": token.approval_id,
                 "approver_channel": token.approver_channel,
                 "action_fingerprint": binding.action_fingerprint,
+            },
+        ),
+    )
+
+
+def _write_approval_denial_audit(
+    app: FastAPI,
+    pending: PendingApproval,
+) -> None:
+    binding = pending.binding
+    _audit_write_required(
+        app,
+        AuditEvent(
+            event_type="exact_action_denied",
+            user_id="local-human",
+            session_id=binding.session_id,
+            task_id=binding.task_id,
+            contract_id=binding.contract_id,
+            contract_version=binding.contract_version,
+            environment=binding.environment,  # type: ignore[arg-type]
+            reason_codes=["approval:denied_by_protected_channel"],
+            details={
+                "approval_id": pending.approval_id,
+                "approver_channel": "protected_local_ui",
+                "action_fingerprint": binding.action_fingerprint,
+                "authority_epoch": binding.authority_epoch,
             },
         ),
     )

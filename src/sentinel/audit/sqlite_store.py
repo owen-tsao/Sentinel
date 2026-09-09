@@ -300,15 +300,20 @@ class SQLiteAuditStore:
             clauses.append("timestamp <= ?")
             parameters.append(_timestamp_text(filters.end_time))
 
-        statement = "SELECT event_json FROM audit_events"
+        statement = "SELECT sequence_id, event_json FROM audit_events"
         if clauses:
             statement += " WHERE " + " AND ".join(clauses)
         statement += " ORDER BY sequence_id ASC"
-        if filters.limit is not None:
-            statement += " LIMIT ?"
-            parameters.append(filters.limit)
         rows = self._connection.execute(statement, parameters).fetchall()
-        return [AuditEvent(**json.loads(row["event_json"])) for row in rows]
+        events = []
+        for row in rows:
+            payload = json.loads(row["event_json"])
+            payload["sequence_id"] = row["sequence_id"]
+            events.append(AuditEvent(**payload))
+        matching = [event for event in events if _matches(event, filters)]
+        if filters.limit is not None:
+            return matching[-filters.limit :]
+        return matching
 
     def _require_connection(self) -> sqlite3.Connection:
         if self._connection is None:
@@ -317,7 +322,9 @@ class SQLiteAuditStore:
 
 
 def _redacted_event(event: AuditEvent) -> AuditEvent:
-    return AuditEvent(**redact(_event_json_dict(event)))
+    payload = redact(_event_json_dict(event))
+    payload["sequence_id"] = None
+    return AuditEvent(**payload)
 
 
 def _event_json_dict(event: AuditEvent) -> dict[str, Any]:
@@ -347,7 +354,7 @@ def _timestamp_text(value: datetime) -> str:
 
 
 def _matches(event: AuditEvent, filters: AuditQuery) -> bool:
-    for field in _FILTER_COLUMNS:
+    for field in (*_FILTER_COLUMNS, "session_id", "task_id"):
         expected = getattr(filters, field)
         if expected is not None and getattr(event, field) != expected:
             return False

@@ -8,6 +8,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -17,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from sentinel.contracts import (  # noqa: E402
     ActionContract,
+    AuthorityQuarantine,
     ContractObligations,
     ContractConflictError,
     InMemoryAcceptedContractStore,
@@ -1113,6 +1115,94 @@ class SQLiteContractStoreTests(unittest.TestCase):
                     self.assertFalse(future.done())
                 suspended = future.result(timeout=1)
             self.assertEqual(suspended.status, "suspended")
+        finally:
+            first.close()
+            second.close()
+
+    def test_durable_store_requires_cross_process_locking(self) -> None:
+        with patch("sentinel.contracts.fcntl", None):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "requires cross-process file locking",
+            ):
+                SQLiteContractStore(self.database)
+
+    def test_execution_guard_persists_detected_expiry(self) -> None:
+        store = SQLiteContractStore(self.database)
+        record = create_authorized(
+            store,
+            make_contract(expires_at=NOW + timedelta(seconds=1)),
+            session_id="session-1",
+            authorization_source="trusted_user",
+            created_at=NOW,
+        )
+        try:
+            with self.assertRaisesRegex(
+                InvalidContractTransition,
+                "contract:expired",
+            ):
+                with store.execution_guard(
+                    record.contract_id,
+                    expected_version=record.version,
+                    expected_authority_epoch=record.authority_epoch,
+                    session_id=record.session_id,
+                    now=NOW + timedelta(seconds=2),
+                ):
+                    self.fail("expired authority reached execution admission")
+
+            expired = store.get(record.contract_id, record.version)
+            assert expired is not None
+            self.assertEqual(expired.status, "expired")
+        finally:
+            store.close()
+
+    def test_execution_guard_rejects_persisted_authority_quarantine(self) -> None:
+        first = SQLiteContractStore(self.database)
+        record = create_authorized(
+            first,
+            make_contract(),
+            session_id="session-1",
+            authorization_source="trusted_user",
+            created_at=NOW,
+        )
+        second = SQLiteContractStore(self.database)
+        started = threading.Event()
+        quarantine = AuthorityQuarantine(
+            quarantine_id="quarantine-1",
+            reason="authority_transition_completion_unverified",
+            transition="active",
+            session_id=record.session_id,
+            task_id=record.task_id,
+            contract_id=record.contract_id,
+            contract_version=record.version,
+            previous_contract_id=None,
+            previous_contract_version=None,
+            previous_authority_epoch=None,
+            created_at=NOW,
+        )
+
+        def admit() -> None:
+            started.set()
+            with first.execution_guard(
+                record.contract_id,
+                expected_version=record.version,
+                expected_authority_epoch=record.authority_epoch,
+                session_id=record.session_id,
+                now=NOW,
+            ):
+                self.fail("quarantined authority reached execution admission")
+
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                with second.authority_quarantine_guard(quarantine):
+                    future = pool.submit(admit)
+                    self.assertTrue(started.wait(timeout=1))
+                    self.assertFalse(future.done())
+                with self.assertRaisesRegex(
+                    ContractConflictError,
+                    "authority:quarantined",
+                ):
+                    future.result(timeout=1)
         finally:
             first.close()
             second.close()

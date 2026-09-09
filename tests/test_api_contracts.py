@@ -129,6 +129,9 @@ class GloballyGuardedContractStore:
     def get_active(self, session_id: str, **kwargs: object):
         return self._stores[session_id].get_active(session_id, **kwargs)
 
+    def get_authority_quarantine(self):
+        return None
+
     @contextmanager
     def execution_guard(
         self,

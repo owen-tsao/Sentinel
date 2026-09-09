@@ -19,6 +19,8 @@ def binding(**overrides: object) -> ApprovalBinding:
         "action_fingerprint": "fingerprint-1",
         "environment": "sandbox",
         "session_id": "session-1",
+        "task_id": "task-1",
+        "attempt_id": "attempt-1",
     }
     values.update(overrides)
     return ApprovalBinding(**values)  # type: ignore[arg-type]
@@ -48,6 +50,12 @@ class ApprovalServiceTests(unittest.TestCase):
             service.consume(
                 issued.token,
                 binding(action_fingerprint="different"),
+            )
+        )
+        self.assertFalse(
+            service.consume(
+                issued.token,
+                binding(attempt_id="different"),
             )
         )
         self.assertTrue(service.has_token(issued.token))
@@ -159,6 +167,76 @@ class ApprovalServiceTests(unittest.TestCase):
         current = service.request(binding(authority_epoch=3))
 
         self.assertEqual(current.approval_id, "approval-3")
+
+    def test_pending_requests_can_be_listed_and_denied_without_issuing(self) -> None:
+        service = InMemoryApprovalService(
+            approval_id_factory=lambda: "approval-1",
+        )
+        pending = service.request(binding())
+
+        self.assertEqual(service.get_pending("approval-1"), pending)
+        self.assertEqual(service.list_pending(), [pending])
+        denied = service.deny("approval-1")
+
+        self.assertEqual(denied, pending)
+        self.assertEqual(service.list_pending(), [])
+        self.assertIsNone(
+            service.issue(
+                "approval-1",
+                approver_id="reviewer-1",
+                approver_channel="isolated-test-harness",
+            )
+        )
+
+    def test_pending_request_can_be_invalidated_without_granting_authority(self) -> None:
+        service = InMemoryApprovalService(
+            approval_id_factory=lambda: "approval-1",
+        )
+        pending = service.request(binding())
+
+        self.assertTrue(service.invalidate(pending.approval_id))
+        self.assertFalse(service.invalidate(pending.approval_id))
+        self.assertEqual(service.list_pending(), [])
+        self.assertIsNone(
+            service.issue(
+                pending.approval_id,
+                approver_id="reviewer-1",
+                approver_channel="protected-local-ui",
+            )
+        )
+
+    def test_failed_denial_audit_retains_pending_request(self) -> None:
+        service = InMemoryApprovalService(
+            approval_id_factory=lambda: "approval-1",
+        )
+        pending = service.request(binding())
+
+        with self.assertRaisesRegex(RuntimeError, "audit unavailable"):
+            service.deny(
+                pending.approval_id,
+                denial_observer=lambda _: (_ for _ in ()).throw(
+                    RuntimeError("audit unavailable")
+                ),
+            )
+
+        self.assertEqual(service.get_pending(pending.approval_id), pending)
+
+    def test_unconsumed_internal_token_can_be_discarded(self) -> None:
+        service = InMemoryApprovalService(
+            approval_id_factory=lambda: "approval-1",
+            token_factory=lambda: "token-1",
+        )
+        pending = service.request(binding())
+        token = service.issue(
+            pending.approval_id,
+            approver_id="reviewer-1",
+            approver_channel="protected-local-ui",
+        )
+        assert token is not None
+
+        self.assertTrue(service.discard_token(token.token))
+        self.assertFalse(service.has_token(token.token))
+        self.assertFalse(service.discard_token(token.token))
 
 
 if __name__ == "__main__":

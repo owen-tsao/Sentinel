@@ -30,6 +30,7 @@ class AuditEvent(StrictModel):
     """One append-only security or lifecycle event."""
 
     event_id: str = Field(default_factory=lambda: str(uuid4()), min_length=1)
+    sequence_id: Optional[int] = Field(default=None, ge=1)
     event_type: str = Field(..., min_length=1)
     timestamp: datetime = Field(default_factory=_utc_now)
     request_id: Optional[str] = None
@@ -52,6 +53,8 @@ class AuditQuery(StrictModel):
     verdict: Optional[AuditVerdict] = None
     environment: Optional[AuditEnvironment] = None
     agent_id: Optional[str] = None
+    session_id: Optional[str] = None
+    task_id: Optional[str] = None
     contract_id: Optional[str] = None
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None

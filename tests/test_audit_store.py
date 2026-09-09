@@ -47,6 +47,7 @@ class AuditStoreTests(unittest.TestCase):
             first.write(
                 AuditEvent(
                     event_id="event-1",
+                    sequence_id=99,
                     event_type="decision",
                     contract_id="contract-1",
                     agent_id="agent-1",
@@ -74,9 +75,15 @@ class AuditStoreTests(unittest.TestCase):
                 agent_id="agent-2",
                 contract_id="contract-2",
             )
+            all_events = reopened.query()
             reopened.close()
 
             self.assertEqual([event.event_id for event in blocked], ["event-2"])
+            self.assertEqual(blocked[0].sequence_id, 2)
+            self.assertEqual(
+                [event.sequence_id for event in all_events],
+                [1, 2],
+            )
 
             with sqlite3.connect(database) as connection:
                 indexes = {
@@ -106,6 +113,53 @@ class AuditStoreTests(unittest.TestCase):
             store.close()
 
             self.assertEqual([event.event_id for event in selected], ["event-1"])
+
+    def test_query_supports_server_owned_session_and_task_filters(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = SQLiteAuditStore(Path(directory) / "audit.db")
+            for event_id, session_id, task_id in (
+                ("event-1", "session-1", "task-1"),
+                ("event-2", "session-1", "task-2"),
+                ("event-3", "session-2", "task-1"),
+            ):
+                store.write(
+                    AuditEvent(
+                        event_id=event_id,
+                        event_type="decision",
+                        session_id=session_id,
+                        task_id=task_id,
+                    )
+                )
+
+            selected = store.query(
+                session_id="session-1",
+                task_id="task-1",
+            )
+            store.close()
+
+        self.assertEqual(
+            [event.event_id for event in selected],
+            ["event-1"],
+        )
+
+    def test_query_limit_keeps_the_newest_matching_events_in_order(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = SQLiteAuditStore(Path(directory) / "audit.db")
+            for index in range(205):
+                store.write(
+                    AuditEvent(
+                        event_id=f"event-{index + 1}",
+                        event_type="decision",
+                        session_id="session-1",
+                    )
+                )
+
+            selected = store.query(session_id="session-1", limit=200)
+            store.close()
+
+        self.assertEqual(len(selected), 200)
+        self.assertEqual(selected[0].event_id, "event-6")
+        self.assertEqual(selected[-1].event_id, "event-205")
 
     def test_redacts_secrets_env_content_and_private_keys_before_persistence(self) -> None:
         with TemporaryDirectory() as directory:

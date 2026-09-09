@@ -6,7 +6,7 @@ import hmac
 import secrets
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Callable, Optional, TypeVar
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -15,6 +15,9 @@ Clock = Callable[[], datetime]
 IdFactory = Callable[[], str]
 IssueObserver = Callable[["ApprovalToken"], None]
 ConsumeObserver = Callable[["ApprovalToken"], None]
+DenialObserver = Callable[["PendingApproval"], None]
+BindingPredicate = Callable[["ApprovalBinding"], bool]
+ModelT = TypeVar("ModelT")
 
 
 class ApprovalCapacityError(RuntimeError):
@@ -41,6 +44,8 @@ class ApprovalBinding(_FrozenStrictModel):
     action_fingerprint: str = Field(..., min_length=1, max_length=500)
     environment: str = Field(..., min_length=1, max_length=500)
     session_id: str = Field(..., min_length=1, max_length=500)
+    task_id: str = Field(..., min_length=1, max_length=500)
+    attempt_id: Optional[str] = Field(default=None, min_length=1, max_length=500)
 
 
 class PendingApproval(_FrozenStrictModel):
@@ -139,6 +144,73 @@ class InMemoryApprovalService:
             self._tokens[token.token] = token
             return token
 
+    def list_pending(self) -> list[PendingApproval]:
+        """Return unexpired requests for a protected control surface."""
+
+        with self._lock:
+            self._purge(self._now())
+            return [_copy_model(value) for value in self._pending.values()]
+
+    def get_pending(self, approval_id: str) -> PendingApproval | None:
+        """Return one unexpired request without granting authority."""
+
+        with self._lock:
+            self._purge(self._now())
+            pending = self._pending.get(approval_id)
+            return _copy_model(pending) if pending is not None else None
+
+    def deny(
+        self,
+        approval_id: str,
+        *,
+        denial_observer: DenialObserver | None = None,
+    ) -> PendingApproval | None:
+        """Remove a pending request only after durable denial evidence succeeds."""
+
+        with self._lock:
+            self._purge(self._now())
+            pending = self._pending.get(approval_id)
+            if pending is None:
+                return None
+            if denial_observer is not None:
+                denial_observer(pending)
+            del self._pending[approval_id]
+            return _copy_model(pending)
+
+    def invalidate(self, approval_id: str) -> bool:
+        """Remove stale non-authority without recording a human denial."""
+
+        with self._lock:
+            self._purge(self._now())
+            removed = self._pending.pop(approval_id, None) is not None
+            for token_value, token in list(self._tokens.items()):
+                if token.approval_id == approval_id:
+                    del self._tokens[token_value]
+                    removed = True
+            return removed
+
+    def invalidate_where(self, predicate: BindingPredicate) -> int:
+        """Discard all pending requests and tokens selected by server state."""
+
+        with self._lock:
+            self._purge(self._now())
+            approval_ids = {
+                approval_id
+                for approval_id, pending in self._pending.items()
+                if predicate(pending.binding)
+            }
+            approval_ids.update(
+                token.approval_id
+                for token in self._tokens.values()
+                if predicate(token.binding)
+            )
+            for approval_id in approval_ids:
+                self._pending.pop(approval_id, None)
+            for token_value, token in list(self._tokens.items()):
+                if token.approval_id in approval_ids:
+                    del self._tokens[token_value]
+            return len(approval_ids)
+
     def set_issue_observer(self, observer: IssueObserver) -> None:
         """Attach the protected audit sink before any approval is issued."""
 
@@ -172,6 +244,13 @@ class InMemoryApprovalService:
         with self._lock:
             self._purge(self._now())
             return token_value in self._tokens
+
+    def discard_token(self, token_value: str) -> bool:
+        """Invalidate unconsumed authority after a server-owned retry stops."""
+
+        with self._lock:
+            self._purge(self._now())
+            return self._tokens.pop(token_value, None) is not None
 
     def _now(self) -> datetime:
         now = self._clock()
@@ -219,6 +298,8 @@ def _bindings_match(first: ApprovalBinding, second: ApprovalBinding) -> bool:
             first.action_fingerprint,
             first.environment,
             first.session_id,
+            first.task_id,
+            first.attempt_id or "",
         )
     )
     right = "\x00".join(
@@ -229,6 +310,14 @@ def _bindings_match(first: ApprovalBinding, second: ApprovalBinding) -> bool:
             second.action_fingerprint,
             second.environment,
             second.session_id,
+            second.task_id,
+            second.attempt_id or "",
         )
     )
     return hmac.compare_digest(left, right)
+
+
+def _copy_model(value: ModelT) -> ModelT:
+    if hasattr(value, "model_copy"):
+        return value.model_copy(deep=True)
+    return value.copy(deep=True)

@@ -108,6 +108,15 @@ class ActionContract(_StrictModel):
         min_length=64,
         max_length=64,
     )
+    source_prompt_sha256: Optional[str] = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        description=(
+            "Non-authorizing provenance hash for a control prompt; "
+            "never an executable payload binding."
+        ),
+    )
     authorization_reference: str = Field(..., min_length=1, max_length=500)
     version: int = Field(default=1, ge=1)
     expires_at: datetime
@@ -116,13 +125,13 @@ class ActionContract(_StrictModel):
     def _normalize_expiry(cls, value: datetime) -> datetime:
         return _as_utc(value)
 
-    @validator("approved_payload_sha256")
+    @validator("approved_payload_sha256", "source_prompt_sha256")
     def _sha256_hex(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return None
         normalized = value.lower()
         if any(character not in "0123456789abcdef" for character in normalized):
-            raise ValueError("approved_payload_sha256 must be lowercase hexadecimal")
+            raise ValueError("SHA-256 values must be lowercase hexadecimal")
         return normalized
 
     @validator(
@@ -272,6 +281,10 @@ class InMemoryTrustedEventConsumer:
         self._nonces: set[str] = set()
         self._receipts: dict[str, ConsumedTrustedEvent] = {}
         self._lock = RLock()
+
+    @property
+    def binding(self) -> tuple[str | None, str | None, str | None]:
+        return (self._host_id, self._session_id, self._channel)
 
     def consume(
         self,
@@ -430,6 +443,23 @@ class TaskTemplate(_FrozenModel):
         return _as_utc(value)
 
 
+@dataclass(frozen=True)
+class AuthorityQuarantine:
+    """Durable marker for an authority transition with unverified completion."""
+
+    quarantine_id: str
+    reason: str
+    transition: str
+    session_id: str | None
+    task_id: str | None
+    contract_id: str | None
+    contract_version: int | None
+    previous_contract_id: str | None
+    previous_contract_version: int | None
+    previous_authority_epoch: int | None
+    created_at: datetime
+
+
 class ContractStoreError(ValueError):
     """Base error for deterministic lifecycle failures."""
 
@@ -457,8 +487,69 @@ class InMemoryContractStore:
         self._records: dict[str, dict[int, ContractRecord]] = {}
         self._task_contracts: dict[str, str] = {}
         self._active_tasks: dict[str, str] = {}
+        self._authority_quarantine: AuthorityQuarantine | None = None
         self._trusted_event_consumer = trusted_event_consumer
         self._lock = RLock()
+
+    @contextmanager
+    def authority_quarantine_guard(
+        self,
+        quarantine: AuthorityQuarantine,
+    ) -> Iterator[None]:
+        """Set a process-local transition marker before mutating authority."""
+
+        with self._lock:
+            if self._authority_quarantine is not None:
+                raise ContractConflictError("authority:quarantined")
+            self._authority_quarantine = quarantine
+            yield
+
+    @contextmanager
+    def authority_quarantine_recovery_guard(
+        self,
+        quarantine_id: str,
+    ) -> Iterator[None]:
+        """Serialize recovery against the matching process-local marker."""
+
+        with self._lock:
+            quarantine = self._authority_quarantine
+            if quarantine is None or quarantine.quarantine_id != quarantine_id:
+                raise ContractConflictError("authority:quarantine_changed")
+            yield
+
+    def get_authority_quarantine(self) -> AuthorityQuarantine | None:
+        with self._lock:
+            return self._authority_quarantine
+
+    def peek_active(self, session_id: str) -> ContractRecord | None:
+        """Read the active snapshot without applying expiry side effects."""
+
+        with self._lock:
+            record = self._active_record_locked(session_id)
+            return _copy_contract_record(record) if record is not None else None
+
+    def clear_authority_quarantine(self, quarantine_id: str) -> None:
+        with self._lock:
+            quarantine = self._authority_quarantine
+            if quarantine is None or quarantine.quarantine_id != quarantine_id:
+                raise ContractConflictError("authority:quarantine_changed")
+            self._authority_quarantine = None
+
+    def set_trusted_event_consumer(
+        self,
+        consumer: InMemoryTrustedEventConsumer,
+    ) -> InMemoryTrustedEventConsumer:
+        """Bind one protected event consumer without permitting replacement."""
+
+        with self._lock:
+            if self._trusted_event_consumer is not None:
+                if self._trusted_event_consumer.binding != consumer.binding:
+                    raise TrustedEventError(
+                        "trusted_event:consumer_already_configured"
+                    )
+                return self._trusted_event_consumer
+            self._trusted_event_consumer = consumer
+            return consumer
 
     def create(
         self,
@@ -489,9 +580,15 @@ class InMemoryContractStore:
         with self._lock:
             if new_task_id in self._task_contracts or new_contract_id in self._records:
                 raise ContractConflictError("contract:identifier_conflict")
-            active_task = self._active_tasks.get(session_id)
-            if status == "active" and active_task != expected_active_task_id:
-                raise ContractConflictError("contract:stale_active_task")
+            active_task = (
+                self._expire_active_task_if_needed_locked(
+                    session_id,
+                    expected_active_task_id=expected_active_task_id,
+                    now=current,
+                )
+                if status == "active"
+                else self._active_tasks.get(session_id)
+            )
             if status == "active":
                 if contract_id is None:
                     raise TrustedEventError("trusted_event:contract_id_required")
@@ -603,9 +700,11 @@ class InMemoryContractStore:
             if record.expires_at <= current:
                 self._replace_status_locked(record, "expired", updated_at=current)
                 raise InvalidContractTransition("contract:expired")
-            active_task = self._active_tasks.get(record.session_id)
-            if active_task != expected_active_task_id:
-                raise ContractConflictError("contract:stale_active_task")
+            active_task = self._expire_active_task_if_needed_locked(
+                record.session_id,
+                expected_active_task_id=expected_active_task_id,
+                now=current,
+            )
             consumer = self._require_event_consumer_locked()
             consumer.claim(
                 trusted_event,
@@ -933,9 +1032,11 @@ class InMemoryContractStore:
                     advance_authority_epoch=True,
                 )
                 raise InvalidContractTransition("contract:expired")
-            active_task = self._active_tasks.get(record.session_id)
-            if active_task != expected_active_task_id:
-                raise ContractConflictError("contract:stale_active_task")
+            active_task = self._expire_active_task_if_needed_locked(
+                record.session_id,
+                expected_active_task_id=expected_active_task_id,
+                now=current,
+            )
             consumer = self._require_event_consumer_locked()
             consumer.claim(
                 trusted_event,
@@ -1004,6 +1105,28 @@ class InMemoryContractStore:
             if record.status == "active"
         ]
         return max(active, key=lambda item: item.version) if active else None
+
+    def _expire_active_task_if_needed_locked(
+        self,
+        session_id: str,
+        *,
+        expected_active_task_id: str | None,
+        now: datetime,
+    ) -> str | None:
+        active_task = self._active_tasks.get(session_id)
+        if active_task != expected_active_task_id:
+            raise ContractConflictError("contract:stale_active_task")
+        active = self._active_record_locked(session_id)
+        if active is not None and active.expires_at <= now:
+            self._replace_status_locked(
+                active,
+                "expired",
+                updated_at=now,
+                advance_authority_epoch=True,
+            )
+            self._active_tasks.pop(session_id, None)
+            return None
+        return active_task
 
     def _require_versions_locked(self, contract_id: str) -> dict[int, ContractRecord]:
         versions = self._records.get(contract_id)
@@ -1097,7 +1220,11 @@ class SQLiteContractStore:
         self._lock = RLock()
         self._authority_lock_state = local()
         self._authority_lock_file = None
-        if self._database != ":memory:" and fcntl is not None:
+        if self._database != ":memory:" and fcntl is None:
+            raise RuntimeError(
+                "durable authority requires cross-process file locking"
+            )
+        if self._database != ":memory:":
             lock_path = Path(f"{self._database}.authority.lock")
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             self._authority_lock_file = lock_path.open("a+b")
@@ -1112,6 +1239,116 @@ class SQLiteContractStore:
         self._connection.execute("PRAGMA synchronous=FULL")
         self._connection.execute(f"PRAGMA busy_timeout={int(timeout_seconds * 1_000)}")
         self._create_schema()
+
+    @contextmanager
+    def authority_quarantine_guard(
+        self,
+        quarantine: AuthorityQuarantine,
+    ) -> Iterator[None]:
+        """Persist a marker and serialize its authority transition."""
+
+        with self._process_authority_guard(), self._lock:
+            connection = self._require_connection()
+            try:
+                with connection:
+                    connection.execute(
+                        """
+                        INSERT INTO authority_quarantine (
+                            singleton_id, quarantine_id, reason, transition,
+                            session_id, task_id, contract_id, contract_version,
+                            previous_contract_id, previous_contract_version,
+                            previous_authority_epoch, created_at
+                        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            quarantine.quarantine_id,
+                            quarantine.reason,
+                            quarantine.transition,
+                            quarantine.session_id,
+                            quarantine.task_id,
+                            quarantine.contract_id,
+                            quarantine.contract_version,
+                            quarantine.previous_contract_id,
+                            quarantine.previous_contract_version,
+                            quarantine.previous_authority_epoch,
+                            _timestamp_text(quarantine.created_at),
+                        ),
+                    )
+            except sqlite3.IntegrityError as exc:
+                raise ContractConflictError("authority:quarantined") from exc
+            previous = getattr(
+                self._authority_lock_state,
+                "quarantine_id",
+                None,
+            )
+            self._authority_lock_state.quarantine_id = quarantine.quarantine_id
+            try:
+                yield
+            finally:
+                self._authority_lock_state.quarantine_id = previous
+
+    @contextmanager
+    def authority_quarantine_recovery_guard(
+        self,
+        quarantine_id: str,
+    ) -> Iterator[None]:
+        """Permit only recovery writes while a durable marker exists."""
+
+        with self._process_authority_guard(), self._lock:
+            quarantine = self._get_authority_quarantine_locked()
+            if quarantine is None or quarantine.quarantine_id != quarantine_id:
+                raise ContractConflictError("authority:quarantine_changed")
+            previous = getattr(
+                self._authority_lock_state,
+                "quarantine_id",
+                None,
+            )
+            self._authority_lock_state.quarantine_id = quarantine_id
+            try:
+                yield
+            finally:
+                self._authority_lock_state.quarantine_id = previous
+
+    def get_authority_quarantine(self) -> AuthorityQuarantine | None:
+        with self._process_authority_guard(), self._lock:
+            return self._get_authority_quarantine_locked()
+
+    def peek_active(self, session_id: str) -> ContractRecord | None:
+        """Read the active snapshot without applying expiry side effects."""
+
+        with self._process_authority_guard(), self._lock:
+            snapshot = self._load_snapshot_locked()
+            return snapshot.peek_active(session_id)
+
+    def clear_authority_quarantine(self, quarantine_id: str) -> None:
+        with self._process_authority_guard(), self._lock:
+            connection = self._require_connection()
+            with connection:
+                cursor = connection.execute(
+                    """
+                    DELETE FROM authority_quarantine
+                    WHERE singleton_id = 1 AND quarantine_id = ?
+                    """,
+                    (quarantine_id,),
+                )
+            if cursor.rowcount != 1:
+                raise ContractConflictError("authority:quarantine_changed")
+
+    def set_trusted_event_consumer(
+        self,
+        consumer: InMemoryTrustedEventConsumer,
+    ) -> InMemoryTrustedEventConsumer:
+        """Bind one protected event consumer without permitting replacement."""
+
+        with self._lock:
+            if self._trusted_event_consumer is not None:
+                if self._trusted_event_consumer.binding != consumer.binding:
+                    raise TrustedEventError(
+                        "trusted_event:consumer_already_configured"
+                    )
+                return self._trusted_event_consumer
+            self._trusted_event_consumer = consumer
+            return consumer
 
     def create(
         self,
@@ -1158,9 +1395,13 @@ class SQLiteContractStore:
     ) -> Iterator[ContractRecord]:
         """Serialize local lifecycle writes with one admitted execution."""
 
-        self.get_active(session_id, now=now)
         with self._process_authority_guard(), self._lock:
+            self._require_authority_quarantine_access_locked()
+            self.get_active(session_id, now=now)
             snapshot = self._load_snapshot_locked()
+            selected = snapshot.get(contract_id, expected_version)
+            if selected is not None and selected.status == "expired":
+                raise InvalidContractTransition("contract:expired")
             with snapshot.execution_guard(
                 contract_id,
                 expected_version=expected_version,
@@ -1351,6 +1592,7 @@ class SQLiteContractStore:
         )
         with self._process_authority_guard(), self._lock, receipt_lock:
             connection = self._require_connection()
+            self._require_authority_quarantine_access_locked()
             receipt_was_available = (
                 trusted_event is not None
                 and self._trusted_event_consumer is not None
@@ -1417,6 +1659,41 @@ class SQLiteContractStore:
             self._authority_lock_state.depth = remaining
             if remaining == 0:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _get_authority_quarantine_locked(self) -> AuthorityQuarantine | None:
+        row = self._require_connection().execute(
+            """
+            SELECT
+                quarantine_id, reason, transition, session_id, task_id,
+                contract_id, contract_version, previous_contract_id,
+                previous_contract_version, previous_authority_epoch, created_at
+            FROM authority_quarantine
+            WHERE singleton_id = 1
+            """
+        ).fetchone()
+        if row is None:
+            return None
+        return AuthorityQuarantine(
+            quarantine_id=row["quarantine_id"],
+            reason=row["reason"],
+            transition=row["transition"],
+            session_id=row["session_id"],
+            task_id=row["task_id"],
+            contract_id=row["contract_id"],
+            contract_version=row["contract_version"],
+            previous_contract_id=row["previous_contract_id"],
+            previous_contract_version=row["previous_contract_version"],
+            previous_authority_epoch=row["previous_authority_epoch"],
+            created_at=_as_utc(datetime.fromisoformat(row["created_at"])),
+        )
+
+    def _require_authority_quarantine_access_locked(self) -> None:
+        quarantine = self._get_authority_quarantine_locked()
+        if quarantine is None:
+            return
+        allowed_id = getattr(self._authority_lock_state, "quarantine_id", None)
+        if allowed_id != quarantine.quarantine_id:
+            raise ContractConflictError("authority:quarantined")
 
     def _trusted_event_was_persisted_locked(
         self,
@@ -1680,6 +1957,21 @@ class SQLiteContractStore:
                     contract_version INTEGER,
                     decision TEXT,
                     consumed_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS authority_quarantine (
+                    singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                    quarantine_id TEXT NOT NULL UNIQUE,
+                    reason TEXT NOT NULL,
+                    transition TEXT NOT NULL,
+                    session_id TEXT,
+                    task_id TEXT,
+                    contract_id TEXT,
+                    contract_version INTEGER,
+                    previous_contract_id TEXT,
+                    previous_contract_version INTEGER,
+                    previous_authority_epoch INTEGER,
+                    created_at TEXT NOT NULL
                 );
 
                 CREATE TRIGGER IF NOT EXISTS protect_contract_record_snapshot

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 import sys
 import tempfile
@@ -12,8 +13,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from sentinel.actions import canonicalize_shell_action  # noqa: E402
 from sentinel.execution import DockerExecutor  # noqa: E402
 from sentinel.execution.docker_executor import _run_subprocess_bounded  # noqa: E402
+
+HOST_CONTAINER_USER = f"{os.getuid()}:{os.getgid()}"
 
 
 class RecordingRunner:
@@ -51,6 +55,27 @@ class TrackingBytesIO(io.BytesIO):
 
 
 class DockerExecutorTests(unittest.TestCase):
+    def test_runtime_ready_checks_the_configured_docker_daemon(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            ready_runner = RecordingRunner(stdout="27.3.1", returncode=0)
+            unavailable_runner = RecordingRunner(returncode=1)
+
+            ready = DockerExecutor(
+                workspace=Path(workspace),
+                runner=ready_runner,
+            ).runtime_ready()
+            unavailable = DockerExecutor(
+                workspace=Path(workspace),
+                runner=unavailable_runner,
+            ).runtime_ready()
+
+        self.assertTrue(ready)
+        self.assertFalse(unavailable)
+        self.assertEqual(
+            ready_runner.calls,
+            [["docker", "info", "--format", "{{.ServerVersion}}"]],
+        )
+
     def test_build_command_uses_restricted_docker_flags(self) -> None:
         with tempfile.TemporaryDirectory() as workspace:
             executor = DockerExecutor(workspace=Path(workspace), image="sentinel-executor:test")
@@ -110,6 +135,138 @@ class DockerExecutorTests(unittest.TestCase):
                 "Read-only executor",
             ):
                 executor.validate_operation(operation)  # type: ignore[arg-type]
+
+    def test_nested_writable_subdirectory_keeps_parent_mount_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            (root / "build").mkdir()
+            executor = DockerExecutor(
+                workspace=root,
+                writable_subdirectory="build",
+                container_user=HOST_CONTAINER_USER,
+            )
+
+            command = executor.build_command(
+                command="touch /workspace/build/marker.txt",
+                shell_type="bash",
+                container_name="sentinel-test",
+            )
+
+        mounts = [
+            command[index + 1]
+            for index, value in enumerate(command)
+            if value == "--mount"
+        ]
+        self.assertEqual(len(mounts), 2)
+        self.assertEqual(
+            mounts[0],
+            f"type=bind,source={root.resolve()},target=/workspace,readonly",
+        )
+        self.assertIn("target=/workspace/build", mounts[1])
+        self.assertFalse(mounts[1].endswith(",readonly"))
+
+    def test_nested_writable_subdirectory_allows_only_descendant_mutations(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            (root / "build").mkdir()
+            executor = DockerExecutor(
+                workspace=root,
+                writable_subdirectory="build",
+                container_user=HOST_CONTAINER_USER,
+            )
+            inside = canonicalize_shell_action(
+                "touch /workspace/build/marker.txt",
+                environment="sandbox",
+                cwd="/workspace",
+            )
+            outside = canonicalize_shell_action(
+                "touch /workspace/outside.txt",
+                environment="sandbox",
+                cwd="/workspace",
+            )
+            read = canonicalize_shell_action(
+                "cat /workspace/README.md",
+                environment="sandbox",
+                cwd="/workspace",
+            )
+
+            executor.validate_operation(inside.operation)
+            executor.validate_operation(read.operation)
+            executor.validate_targets(inside.targets)
+            executor.validate_action(inside)
+            executor.validate_action(read)
+            for operation in ("delete", "execute", "network"):
+                with self.subTest(operation=operation), self.assertRaisesRegex(
+                    ValueError,
+                    "only canonical read and write",
+                ):
+                    executor.validate_operation(operation)  # type: ignore[arg-type]
+            with self.assertRaisesRegex(ValueError, "outside the writable subtree"):
+                executor.validate_action(outside)
+
+    def test_writable_subdirectory_rejects_symlinks_and_hardlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            build = root / "build"
+            build.mkdir()
+            outside = root / "outside.txt"
+            outside.write_text("original", encoding="utf-8")
+            executor = DockerExecutor(
+                workspace=root,
+                writable_subdirectory="build",
+                container_user=HOST_CONTAINER_USER,
+            )
+
+            (build / "alias.txt").symlink_to(outside)
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                executor.validate_configuration()
+            (build / "alias.txt").unlink()
+
+            os.link(outside, build / "hardlink.txt")
+            with self.assertRaisesRegex(ValueError, "hard-linked"):
+                executor.validate_configuration()
+
+    def test_writable_subdirectory_must_be_a_real_workspace_descendant(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            outside = root.parent / f"{root.name}-outside"
+            outside.mkdir()
+            try:
+                (root / "alias").symlink_to(outside)
+                for value in ("../outside", "/tmp", "alias"):
+                    with self.subTest(value=value), self.assertRaises(ValueError):
+                        DockerExecutor(
+                            workspace=root,
+                            writable_subdirectory=value,
+                            container_user=HOST_CONTAINER_USER,
+                        ).validate_configuration()
+            finally:
+                outside.rmdir()
+
+    def test_writable_subdirectory_rejects_shared_permissions_or_wrong_uid(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            build = root / "build"
+            build.mkdir()
+            build.chmod(0o777)
+
+            with self.assertRaisesRegex(ValueError, "group/world writable"):
+                DockerExecutor(
+                    workspace=root,
+                    writable_subdirectory="build",
+                    container_user=HOST_CONTAINER_USER,
+                ).validate_configuration()
+            build.chmod(0o700)
+            with self.assertRaisesRegex(ValueError, "process UID and GID"):
+                DockerExecutor(
+                    workspace=root,
+                    writable_subdirectory="build",
+                    container_user=f"{os.getuid() + 1}:{os.getgid() + 1}",
+                ).validate_configuration()
 
     def test_run_returns_exit_code_and_truncates_output(self) -> None:
         runner = RecordingRunner(stdout="abcdef", stderr="xyz", returncode=7)
