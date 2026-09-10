@@ -1,13 +1,24 @@
 # Week 12 Handover
 
-Status: implemented and verified in the working tree on September 9, 2026.
-The work is not yet committed. Independent correctness and security reviews
-were run against the full Week 12 change and every confirmed finding was
-fixed; see "Review findings".
+Status: implemented, independently reviewed, and merged to `main` on
+September 9, 2026 (merge commit `23add54`, change commit `4cf4f3d`, branch
+`feature/week-12-mcp-mediation`). Every confirmed review finding was fixed
+before the merge; see "Review findings".
 
 This handover is the factual starting point for Week 13. The plan it closes
 is [Week 12 Plan](./Week%2012%20Plan.md); the spike that de-risked it is
-[Week 12 Phase 0 Spike](./Week%2012%20Phase%200%20Spike.md).
+[Week 12 Phase 0 Spike](./Week%2012%20Phase%200%20Spike.md); the next plan is
+[Week 13 Plan](./Week%2013%20Plan.md).
+
+## Read this first if you are new
+
+1. "What Sentinel is now" and "Verified live Cursor run" below: what exists
+   and what it was proved to do.
+2. "Accepted limits that must remain honest": the sentences the product must
+   not overstate.
+3. "How to run the live path": reproduce the proof on your own machine in
+   about ten minutes.
+4. `docs/Week 13 Plan.md`: what comes next and why.
 
 ## What Sentinel is now
 
@@ -213,6 +224,78 @@ produced five findings; all were fixed the same day.
   status flip to unavailable), admission audit failure (block, operation
   stays `prepared`, later retry succeeds), and the stuck-`applying` path.
 
+## How the pieces fit
+
+Think of Sentinel as a customs desk between the agent and anything it wants
+to change.
+
+```text
+Cursor agent
+  -> MCP tool call (sentinel_issue_read / sentinel_issue_add_note)
+  -> stdio shim  src/sentinel/mcp/server.py        (forwards; fails closed)
+  -> POST /integration/mcp/call                     (adapter bearer required)
+  -> McpMediator  src/sentinel/mcp/gateway.py
+       1. authenticate adapter session              (hashed bearer, constant time)
+       2. startup ceiling                            (SupervisionPolicy, immutable)
+       3. canonicalize arguments                     (exact key set, no extras)
+       4. intersect with the active contract         (existing matcher)
+       5. audit the decision
+       6. prepare the fixture operation under attempt_id
+       7. allow -> durable admission -> apply once
+          confirm_required -> pending approval in the browser
+          block -> agent-facing reason + guidance, nothing performed
+  -> browser approves in the Week 11 control center
+  -> server performs the approved write itself; the agent's retry only observes
+```
+
+Two facts make the path mandatory rather than advisory: Cursor's sandbox
+keeps the agent's shell from writing Sentinel state or Cursor config, and the
+fixture lives inside Sentinel so there is no second door to it. Two facts keep
+it honest: the adapter bearer is not secret from a same-user agent (so it is
+identity for binding, not authority), and only this one tool family is
+covered.
+
+## How to run the live path
+
+Requirements: Python 3.11+, Node, Cursor with the agent sandbox enabled, and
+the Sentinel hooks installed in the repo (`policies/cursor/` copied to
+`.cursor/hooks.json` and `.cursor/hooks/`).
+
+1. From your own terminal (not an agent shell), in `web/`:
+   `npx next dev -p 3100`. The launcher expects the control center on port
+   3100 (override with `SENTINEL_UI_ORIGIN`); the Origin must match exactly
+   or the API rejects the browser.
+2. From your own terminal, at the repo root:
+   `python3 scripts/week12_control_demo.py`. It creates a disposable
+   workspace, fixture, and adapter capability under `~/.sentinel/week12-demo/`,
+   starts the API on 8000, opens the pairing link, and prints an `mcpServers`
+   block. Why your terminal: the private state directory must be created by
+   the trusted launcher, not by the agent it will supervise.
+3. Paste the printed block into `.cursor/mcp.json` (the file is gitignored
+   because the capability path changes every run). In Cursor → Settings →
+   MCP, confirm the `sentinel` server shows two tools.
+4. In the paired browser: Tasks → describe the task → Build settings →
+   Operation `write`, Target kind "Fixture issues (Cursor MCP)", target
+   `SPIKE-1`, Environment `sandbox` → tick the five review boxes → Save →
+   Activate. Safeguard and dry-run options are hidden for fixture tasks
+   because the fixture cannot honor them.
+5. In a Cursor chat, ask the agent to read `SPIKE-1` and then add a note.
+   Reads pass; the note waits in Approvals. Deny one, approve another.
+6. Stop Sentinel with Ctrl-C and run
+   `python3 scripts/week12_control_demo.py state <printed run directory>`.
+   Expect exactly the notes you approved.
+
+Expect Cursor's own auto-review to pause the agent's write before Sentinel
+sees it; that is Cursor's per-chat gate, separate from Sentinel's.
+
+## Working with the hooks as an agent
+
+The installed hooks fail closed on any agent read or shell command that
+mentions Sentinel's private state directory or `.cursor/` configuration. This
+is intended and was exercised during the live run: the agent could not list
+the run directory or grep the MCP config. When an agent needs facts from
+those locations, the human runs the command and pastes the result.
+
 ## Current HTTP boundary
 
 Agent-facing routes are unchanged: `GET /health`, `POST /evaluate`,
@@ -330,15 +413,28 @@ Configuration and proof:
 
 ## Start Week 13
 
-1. Review and commit Week 12 only when explicitly requested, after the review
-   findings section is filled in.
-2. Merge through the normal protected-branch process.
-3. Read the Week 13 section of `docs/Roadmap.md` (automatic task preparation)
-   and confirm direction before writing a plan.
-4. Riskiest assumption to spike first: whether a Cursor prompt event can
-   prepare a complete, correct fixture-task draft that the human confirms in
-   one compact step, without the prompt being treated as authority.
-5. Keep every non-fixture action family labeled advisory.
+Week 12 is merged. Do not build Week 13 on an unreviewed working tree.
+
+1. Read this handover, then [Week 13 Plan](./Week%2013%20Plan.md), then the
+   Week 13 and Week 16 sections of `docs/Roadmap.md`.
+2. Confirm the Week 13 plan explicitly before implementation; it approves no
+   new dependency.
+3. Create `feature/week-13-task-preparation` from `main`.
+4. Run the plan's Phase 0 spike first. Its single load-bearing question is
+   whether the agent can hand Sentinel a complete, correct fixture-task
+   proposal that the human confirms in one protected click, with no manual
+   field entry and with the proposal never acting as authority.
+5. Keep every non-fixture action family labeled advisory, and keep the
+   per-workspace session limit visible until Week 16 changes it.
+
+Suggested new-chat prompt:
+
+> Read `docs/Week 12 Handover.md`, `docs/Week 13 Plan.md`, and the Week 13
+> section of `docs/Roadmap.md`. Confirm the plan is approved, run its Phase 0
+> spike before any other implementation, and do not add dependencies without
+> approval. Keep FastAPI authoritative, the browser as the only source of
+> task authority, ML disabled, and unsupported agent actions explicitly
+> advisory.
 
 ## Baseline verification commands
 
@@ -359,10 +455,8 @@ npm run build
 npx playwright test -c playwright.mocked.config.ts
 ```
 
-For the live run, see the docstring at the top of
-`scripts/week12_control_demo.py`. Start Sentinel from your own terminal (not
-from the agent), keep Cursor's sandbox on, and paste the printed block into
-`.cursor/mcp.json`. When creating the fixture task, set "Test first" to No.
-After stopping Sentinel, run
-`python3 scripts/week12_control_demo.py state <run directory>` and expect
-exactly the notes you approved.
+The mocked Playwright config serves the UI on port 3100 to avoid colliding
+with other local Next.js servers. The Week 11 real-flow Playwright test and
+the Docker smoke were not re-run for Week 12 because the executor did not
+change; run them before any change that touches `src/sentinel/execution/`.
+For the live path, follow "How to run the live path" above.

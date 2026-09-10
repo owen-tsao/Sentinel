@@ -543,6 +543,10 @@ sandbox behavior and subagent hook behavior remain unverified. Details in
 **Goal:** Remove manual contract entry from the Week 12 MCP workflow without
 pretending an advisory Cursor prompt is trusted authority.
 
+The proposed implementation checklist is
+[Week 13 Plan](./Week%2013%20Plan.md). It becomes implementation authority only
+after explicit approval.
+
 **Riskiest assumption:** A strict deterministic compiler and compact protected
 confirmation reduce user work enough to improve the workflow without guessing
 authority-bearing facts.
