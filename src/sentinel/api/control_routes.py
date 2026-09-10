@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Callable, Literal, Optional
 
@@ -20,6 +21,7 @@ from sentinel.api.control_schemas import (
     ControlRuntimeStatus,
     ControlStatusResponse,
     ControlWorkspaceResponse,
+    IntegrationStatusResponse,
     LogoutResponse,
     PairExchangeRequest,
     PairExchangeResponse,
@@ -54,6 +56,7 @@ def build_control_router(
     approval_is_current: Callable[[ApprovalExecutionEnvelope], bool],
     query_audit: Callable[..., AuditListResponse],
     runtime_status: Callable[[], ControlRuntimeStatus],
+    integration_status: Callable[[], Optional[IntegrationStatusResponse]] = lambda: None,
 ) -> APIRouter:
     router = APIRouter(prefix="/control", tags=["control"])
 
@@ -87,6 +90,8 @@ def build_control_router(
     def status(request: Request, response: Response) -> ControlStatusResponse:
         session = _authenticate(request, config, pairing)
         response.headers["Cache-Control"] = "no-store"
+        integration = integration_status()
+        connected = integration is not None and integration.agent.status == "connected"
         return ControlStatusResponse(
             supervision_session_id=binding.session_id,
             session_absolute_expires_at=session.absolute_expires_at,
@@ -96,6 +101,9 @@ def build_control_router(
                 identity_sha256=binding.workspace.identity_sha256,
             ),
             runtime=runtime_status(),
+            mandatory_agent_connected=connected,
+            connection_message=_connection_message(integration),
+            integration=integration,
         )
 
     @router.post("/contracts/draft", response_model=ContractDraftResponse)
@@ -316,6 +324,17 @@ def _authenticate(
         ) from exc
 
 
+def _connection_message(integration: Optional[IntegrationStatusResponse]) -> str:
+    if integration is None:
+        return "No mandatory agent connected."
+    agent = integration.agent
+    if agent.status == "connected":
+        return "Cursor MCP shim connected. Only the fixture tool family is mandatory."
+    if agent.status == "disconnected":
+        return "Cursor MCP shim capability was revoked or rotated; reconnect."
+    return "Sentinel MCP shim is configured but has not called yet."
+
+
 def _pending_approval_response(
     envelope: ApprovalExecutionEnvelope,
 ) -> PendingApprovalResponse:
@@ -334,4 +353,7 @@ def _pending_approval_response(
         environment=envelope.binding.environment,
         reasons=list(envelope.reasons),
         expires_at=envelope.expires_at,
+        family=envelope.family,
+        tool=envelope.tool,
+        arguments=json.loads(envelope.arguments_json),
     )

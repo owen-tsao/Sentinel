@@ -53,6 +53,48 @@ class ControlRuntimeStatus(StrictControlModel):
     sample_repository: Optional[str] = None
 
 
+class AgentConnectionResponse(StrictControlModel):
+    """Observed adapter connection, derived only from authenticated calls."""
+
+    host: str
+    status: Literal["never_connected", "connected", "disconnected"]
+    last_seen_at: Optional[datetime] = None
+    last_tool: Optional[str] = None
+    last_verdict: Optional[str] = None
+    mediated_calls: int = 0
+    rejected_calls: int = 0
+    adapter_session_expires_at: Optional[datetime] = None
+
+
+class FamilyCoverageResponse(StrictControlModel):
+    """Per-family coverage; never summarised as a single protected state."""
+
+    family: str
+    status: Literal["mandatory", "advisory", "unsupported", "unavailable"]
+    basis: str
+    conditions: list[str] = Field(default_factory=list)
+    known_bypasses: list[str] = Field(default_factory=list)
+
+
+class CeilingStatusResponse(StrictControlModel):
+    adapter_kind: str
+    tool_family: str
+    policy_sha256: str
+    expires_at: datetime
+    expired: bool
+
+
+class IntegrationStatusResponse(StrictControlModel):
+    """Everything the control center may show about the mandatory MCP path."""
+
+    gateway: ControlCheckResponse
+    hooks: ControlCheckResponse
+    sandbox: ControlCheckResponse
+    ceiling: CeilingStatusResponse
+    agent: AgentConnectionResponse
+    coverage: list[FamilyCoverageResponse]
+
+
 class ControlStatusResponse(StrictControlModel):
     paired: Literal[True] = True
     supervision_session_id: str
@@ -60,10 +102,9 @@ class ControlStatusResponse(StrictControlModel):
     workspace: ControlWorkspaceResponse
     runtime: ControlRuntimeStatus
     ml_status: Literal["disabled"] = "disabled"
-    mandatory_agent_connected: Literal[False] = False
-    connection_message: Literal["No mandatory agent connected."] = (
-        "No mandatory agent connected."
-    )
+    mandatory_agent_connected: bool = False
+    connection_message: str = "No mandatory agent connected."
+    integration: Optional[IntegrationStatusResponse] = None
 
 
 class LogoutResponse(StrictControlModel):
@@ -85,6 +126,9 @@ class PendingApprovalResponse(StrictControlModel):
     environment: str
     reasons: list[str]
     expires_at: datetime
+    family: str = "shell"
+    tool: Optional[str] = None
+    arguments: dict[str, Any] = Field(default_factory=dict)
 
 
 class ApprovalListResponse(StrictControlModel):
@@ -120,6 +164,7 @@ class AcceptedContractDraft(StrictControlModel):
     transaction_required: bool = False
     backup_required: bool = False
     expires_in_minutes: int = Field(default=60, ge=1, le=1_440)
+    tool_family: Literal["shell", "sentinel_issue_fixture"] = "shell"
 
 
 class ContractDraftRequest(StrictControlModel):

@@ -1,8 +1,9 @@
 # Week 12 Plan: First Mandatory MCP Tool Path
 
-Status: the direction is reflected in `docs/Roadmap.md` and
-`docs/Product Architecture.md` as of September 8, 2026. Implementation still
-requires explicit approval, and no new dependency is approved by this plan.
+Status: approved and implemented. The verified result, measurements, and
+accepted limits are recorded in [Week 12 Handover](./Week%2012%20Handover.md)
+(September 9, 2026). No new dependency was added. This document is kept as the
+plan of record; the handover is the source of truth for what shipped.
 
 This plan starts from [Week 11 Handover](./Week%2011%20Handover.md). Week 12 is
 an enforcement milestone, not the full automatic-supervision redesign.
@@ -82,8 +83,20 @@ It may not claim:
   may authorize.
 - **The MCP shim uses session-scoped bearer authentication.** It does not
   receive an approval token or reusable authority.
-- **Same-session bearer theft is indistinguishable from the real shim.** If the
-  guarded agent can obtain the capability, the mediation claim fails.
+- **Amended after Phase 0 (approved September 9, 2026): the adapter bearer
+  identifies the adapter kind and binds calls to the one supervision session;
+  it is not proof of provenance.** On a single-user desktop no file,
+  environment variable, or config value is secret from the agent, so policy,
+  approval, admission, and audit apply identically to any holder. Coverage
+  wording says "every effect passed through Sentinel", never "every call came
+  from Cursor". See [Week 12 Phase 0 Spike](./Week%2012%20Phase%200%20Spike.md).
+- **Amended after Phase 0 (approved September 9, 2026): the standard-customer
+  configuration is Cursor's agent sandbox plus a shipped fail-closed hooks
+  profile.** No container or second OS user is required. Phase 2 ships a
+  `.cursor/hooks.json` profile (`beforeReadFile`, `preToolUse`,
+  `beforeMCPExecution`, all `failClosed: true`) and the UI shows sandbox and
+  hook status truthfully, including that approving an out-of-sandbox
+  escalation defeats the write boundary.
 - **The fixture remains local and disposable.** It performs no network call,
   uses no provider credential, and never modifies the user's repository.
 - **Fixture state is outside guarded workspace mounts and normal agent-readable

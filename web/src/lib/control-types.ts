@@ -16,6 +16,7 @@ export type AcceptedContractDraft = {
   transaction_required?: boolean;
   backup_required?: boolean;
   expires_in_minutes?: number;
+  tool_family?: "shell" | "sentinel_issue_fixture";
 };
 
 export type ActionContract = {
@@ -46,6 +47,17 @@ export type ActionContract = {
   expires_at: string;
 };
 
+export type AgentConnectionResponse = {
+  host: string;
+  status: "never_connected" | "connected" | "disconnected";
+  last_seen_at?: string | null;
+  last_tool?: string | null;
+  last_verdict?: string | null;
+  mediated_calls?: number;
+  rejected_calls?: number;
+  adapter_session_expires_at?: string | null;
+};
+
 export type AudiencePolicy = {
   allow_external?: boolean;
   allow_guests?: boolean;
@@ -73,6 +85,14 @@ export type AuditEvent = {
   verdict?: "allow" | "warn" | "confirm_required" | "block" | null;
   reason_codes?: Array<string>;
   details?: Record<string, unknown>;
+};
+
+export type CeilingStatusResponse = {
+  adapter_kind: string;
+  tool_family: string;
+  policy_sha256: string;
+  expires_at: string;
+  expired: boolean;
 };
 
 export type ContractObligations = {
@@ -161,6 +181,23 @@ export type ExecutionResult = {
   stderr_truncated?: boolean;
 };
 
+export type FamilyCoverageResponse = {
+  family: string;
+  status: "mandatory" | "advisory" | "unsupported" | "unavailable";
+  basis: string;
+  conditions?: Array<string>;
+  known_bypasses?: Array<string>;
+};
+
+export type IntegrationStatusResponse = {
+  gateway: ControlCheckResponse;
+  hooks: ControlCheckResponse;
+  sandbox: ControlCheckResponse;
+  ceiling: CeilingStatusResponse;
+  agent: AgentConnectionResponse;
+  coverage: Array<FamilyCoverageResponse>;
+};
+
 export type PendingApprovalResponse = {
   approval_id: string;
   attempt_id: string;
@@ -176,6 +213,9 @@ export type PendingApprovalResponse = {
   environment: string;
   reasons: Array<string>;
   expires_at: string;
+  family?: string;
+  tool?: string | null;
+  arguments?: Record<string, unknown>;
 };
 
 export type ProviderScope = {
@@ -194,8 +234,9 @@ export type ControlStatusResponse = {
   workspace: ControlWorkspaceResponse;
   runtime: ControlRuntimeStatus;
   ml_status?: "disabled";
-  mandatory_agent_connected?: false;
-  connection_message?: "No mandatory agent connected.";
+  mandatory_agent_connected?: boolean;
+  connection_message?: string;
+  integration?: IntegrationStatusResponse | null;
 };
 
 export type ActiveAuthorityResponse = {

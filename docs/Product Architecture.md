@@ -63,8 +63,11 @@ result is still not a production-ready product:
   root remains read-only; traversal, link, ownership, and permission escapes
   fail closed.
 - The Compose API has no Docker socket and is diagnostic/non-executing; a host-run API can launch executor containers.
-- Cursor and legacy OpenClaw integrations remain advisory. No mandatory
-  external-agent integration is connected.
+- Cursor's MCP tools for the local issue fixture are the one mandatory
+  external-agent path, and only under the tested configuration (agent sandbox
+  on, Sentinel hooks installed, Sentinel launched by the user). Cursor shell,
+  file, browser, and subagent actions and the legacy OpenClaw integration
+  remain advisory. See [Week 12 Handover](./Week%2012%20Handover.md).
 - ML is disabled until an independent calibration and promotion path exists; export and serving fail closed.
 - Protected lifecycle transitions persist a quarantine marker before mutation.
   If completion audit and compensation cannot be verified, authority remains

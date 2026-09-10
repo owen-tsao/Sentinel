@@ -238,10 +238,12 @@ test("task review keeps proposal and activation as separate actions", async ({
     .fill("Remove the exact created file.");
   await chooseOption(
     page,
-    "Test first",
-    "Yes — test before changing anything",
+    "Run a dry run first",
+    "Yes — the agent must preview shell changes before applying them",
   );
-  await page.getByText("Advanced settings").click();
+  // Only the five authority-granting fields carry a review checkbox now;
+  // advanced settings are accepted unless changed.
+  await expect(page.getByLabel("Reviewed")).toHaveCount(5);
   for (const checkbox of await page.getByLabel("Reviewed").all()) {
     await checkbox.check();
   }

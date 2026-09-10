@@ -87,7 +87,9 @@ test("pairs from the fragment, clears it, and renders server authority", async (
 
   await page.goto(`/#pair=${testCapability}`);
 
-  await expect(page).toHaveURL("http://127.0.0.1:3000/");
+  // The pairing fragment must be stripped from the URL regardless of which
+  // port the Playwright config serves the UI on.
+  await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:\d+\/$/);
   await expect(
     page.getByText(
       "Agent enforcement is advisory · No mandatory agent connected.",

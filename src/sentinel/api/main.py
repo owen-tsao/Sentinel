@@ -40,7 +40,9 @@ from sentinel.api.control_routes import (
 from sentinel.api.control_schemas import (
     AcceptedContractDraft,
     ActiveAuthorityResponse,
+    AgentConnectionResponse,
     AuditListResponse,
+    CeilingStatusResponse,
     ContractActivationRequest,
     ContractActivationResponse,
     ContractDraftRequest,
@@ -49,6 +51,8 @@ from sentinel.api.control_schemas import (
     ControlRuntimeStatus,
     DraftQuestionResponse,
     DraftSuggestionResponse,
+    FamilyCoverageResponse,
+    IntegrationStatusResponse,
 )
 from sentinel.approval import (
     ApprovalBinding,
@@ -105,6 +109,18 @@ from sentinel.decision.engine import (
 from sentinel.decision.policy import PolicyProfile, load_policy_profile
 from sentinel.execution import CommandExecutor, DockerExecutor, ExecutionResult
 from sentinel.ml.inference import DEFAULT_ONNX_PATH, OnnxRiskModel
+from sentinel.api.integration_routes import build_integration_router
+from sentinel.api.integration_schemas import McpCallRequest, McpCallResponse
+from sentinel.integrations import AdapterSessionError, AdapterSessionRegistry
+from sentinel.integrations.hooks import inspect_hooks_profile
+from sentinel.mcp import SQLiteIssueFixture
+from sentinel.mcp.gateway import McpMediator
+from sentinel.supervision import (
+    SQLiteSupervisionPolicyStore,
+    SupervisionPolicy,
+    SupervisionPolicyError,
+    SupervisionPolicyStore,
+)
 from sentinel.session import (
     ExecutionAttempt,
     ExecutionAttemptBinding,
@@ -269,6 +285,10 @@ def create_app(
     control_config: ControlConfig | None = None,
     control_binding_store: WorkspaceBindingStore | None = None,
     pairing_service: PairingService | None = None,
+    supervision_policy: SupervisionPolicy | None = None,
+    supervision_policy_store: SupervisionPolicyStore | None = None,
+    mcp_fixture: SQLiteIssueFixture | None = None,
+    adapter_registry: AdapterSessionRegistry | None = None,
 ) -> FastAPI:
     """Build an app with injectable stores and fail-closed empty defaults."""
 
@@ -386,6 +406,11 @@ def create_app(
     app.state.session_locks = _SessionLockPool()
     app.state.control_enabled = control_config is not None
     app.state.approval_coordinator = None
+    app.state.supervision_policy_binding = None
+    if control_config is None and (
+        supervision_policy is not None or supervision_policy_store is not None
+    ):
+        raise SupervisionPolicyError("supervision:control_config_required")
     if control_config is not None:
         reviewed_workspace = review_workspace(control_config.workspace)
         executor_workspace = getattr(app.state.executor, "workspace", None)
@@ -414,6 +439,25 @@ def create_app(
             selected_binding_store = SQLiteWorkspaceBindingStore(state_database)
             owned_stores.append(selected_binding_store)
         supervision_binding = selected_binding_store.bind(reviewed_workspace)
+        # The ceiling is bound beside the session so a restart with a weaker
+        # ceiling against the same state database refuses to start.
+        supervision_policy_binding = None
+        if supervision_policy is not None:
+            selected_policy_store = supervision_policy_store
+            if selected_policy_store is None:
+                if not state_database:
+                    raise SupervisionPolicyError(
+                        "supervision:durable_state_database_required"
+                    )
+                selected_policy_store = SQLiteSupervisionPolicyStore(state_database)
+                owned_stores.append(selected_policy_store)
+            supervision_policy_binding = selected_policy_store.bind(
+                supervision_policy,
+                supervision_binding,
+            )
+        elif supervision_policy_store is not None:
+            raise SupervisionPolicyError("supervision:policy_required_for_store")
+        app.state.supervision_policy_binding = supervision_policy_binding
         control_event_consumer = app.state.contract_store.set_trusted_event_consumer(
             InMemoryTrustedEventConsumer(
                 host_id=f"sentinel-control:{reviewed_workspace.identity_sha256}",
@@ -438,6 +482,49 @@ def create_app(
                 record.session_id,
             )
         )
+        app.state.mcp_mediator = None
+        app.state.adapter_registry = None
+        app.state.mcp_fixture = None
+        if supervision_policy_binding is not None:
+            selected_fixture = mcp_fixture
+            if selected_fixture is None:
+                if not state_database:
+                    raise SupervisionPolicyError(
+                        "supervision:durable_state_database_required"
+                    )
+                selected_fixture = SQLiteIssueFixture(
+                    Path(state_database).with_name("mcp_fixture.sqlite3")
+                )
+                owned_stores.append(selected_fixture)
+            selected_registry = adapter_registry or AdapterSessionRegistry(
+                supervision_session_id=supervision_binding.session_id,
+            )
+            mediator = McpMediator(
+                registry=selected_registry,
+                fixture=selected_fixture,
+                policy_binding=supervision_policy_binding,
+                supervision=supervision_binding,
+                contract_store=app.state.contract_store,
+                authority_service=app.state.authority_service,
+                approval_service=app.state.approval_service,
+                approval_coordinator=approval_coordinator,
+                audit_store=app.state.audit_store,
+                environment=app.state.execution_environment,
+                lock=app.state.session_locks.hold,
+            )
+            app.state.mcp_mediator = mediator
+            app.state.adapter_registry = selected_registry
+            app.state.mcp_fixture = selected_fixture
+            app.include_router(
+                build_integration_router(
+                    config=control_config,
+                    mediate=lambda bearer, payload: _mediate_mcp_call(
+                        app,
+                        bearer,
+                        payload,
+                    ),
+                )
+            )
 
         app.add_middleware(
             CORSMiddleware,
@@ -480,7 +567,7 @@ def create_app(
                     envelope,
                     token,
                 ),
-                denial_observer=lambda pending: _write_approval_denial_audit(
+                denial_observer=lambda pending: _observe_control_denial(
                     app,
                     pending,
                 ),
@@ -505,6 +592,7 @@ def create_app(
                     app,
                     control_config,
                 ),
+                integration_status=lambda: _control_integration_status(app),
             )
         )
 
@@ -1299,6 +1387,14 @@ def _retry_control_approval(
             status_code=409,
             detail="Approval session no longer matches the supervised workspace.",
         )
+    if envelope.family == "mcp":
+        mediator = app.state.mcp_mediator
+        if mediator is None:
+            raise HTTPException(
+                status_code=409,
+                detail="MCP mediation is not available in this process.",
+            )
+        return mediator.retry_approved(envelope, approval_token)
     payload = ContractEvaluateRequest(
         contract_id=envelope.binding.contract_id,
         version=envelope.binding.contract_version,
@@ -1315,6 +1411,29 @@ def _retry_control_approval(
         recent_actions=envelope.recent_actions(),
     )
     return _handle_contract_execution(payload, app)
+
+
+def _mediate_mcp_call(
+    app: FastAPI,
+    bearer: str | None,
+    payload: McpCallRequest,
+) -> McpCallResponse:
+    try:
+        return app.state.mcp_mediator.mediate(bearer, payload)
+    except AdapterSessionError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail={"reason_code": exc.reason_code, "verdict": "block"},
+        ) from exc
+
+
+def _observe_control_denial(app: FastAPI, pending: PendingApproval) -> None:
+    """Record the denial durably first; only then close any MCP fixture attempt."""
+
+    _write_approval_denial_audit(app, pending)
+    mediator = app.state.mcp_mediator
+    if mediator is not None:
+        mediator.abandon_denied(pending.binding.attempt_id)
 
 
 def _control_approval_is_current(
@@ -1428,6 +1547,8 @@ def _accepted_control_contract(
             status_code=409,
             detail="Contract environment must match the fixed server environment.",
         )
+    if accepted.tool_family == "sentinel_issue_fixture":
+        return _accepted_fixture_contract(app, accepted, prompt_sha256=prompt_sha256)
     targets: list[str] = []
     for target in accepted.exact_targets:
         normalized = posixpath.normpath(target)
@@ -1465,6 +1586,102 @@ def _accepted_control_contract(
         maximum_scope="exact",
         expected_side_effects=accepted.expected_side_effects,
         allowed_effects=accepted.allowed_effects,
+        forbidden_operations=accepted.forbidden_operations,
+        forbidden_effects=accepted.forbidden_effects,
+        forbidden_effect_codes=accepted.forbidden_effect_codes,
+        rollback_plan=accepted.rollback_plan,
+        dry_run_required=accepted.dry_run_required,
+        rollback_required=accepted.rollback_required,
+        transaction_required=accepted.transaction_required,
+        backup_required=accepted.backup_required,
+        source_prompt_sha256=prompt_sha256,
+        authorization_reference=f"control-draft:{uuid4()}",
+        expires_at=(
+            datetime.now(timezone.utc)
+            + timedelta(minutes=accepted.expires_in_minutes)
+        ),
+    )
+
+
+def _accepted_fixture_contract(
+    app: FastAPI,
+    accepted: AcceptedContractDraft,
+    *,
+    prompt_sha256: str,
+) -> ActionContract:
+    """A task over the MCP issue fixture. Targets are issue IDs the ceiling permits.
+
+    The ceiling stays the outer bound: a task can only name issues that match
+    the startup policy pattern, and only the read/write operations the fixture
+    tools express. Reads are always included because a note-writing task is
+    useless without them and reads are ordinary under the ceiling.
+    """
+
+    policy_binding = app.state.supervision_policy_binding
+    if policy_binding is None:
+        raise HTTPException(
+            status_code=409,
+            detail="No fixture ceiling is bound in this Sentinel process.",
+        )
+    if accepted.operation not in {"read", "write"}:
+        raise HTTPException(
+            status_code=422,
+            detail="Fixture tasks support only read or write.",
+        )
+    targets: list[str] = []
+    for target in accepted.exact_targets:
+        if not policy_binding.policy.issue_in_scope(target):
+            raise HTTPException(
+                status_code=422,
+                detail="Every target must be a fixture issue ID the startup ceiling permits.",
+            )
+        targets.append(target)
+    if accepted.operation in accepted.forbidden_operations:
+        raise HTTPException(
+            status_code=422,
+            detail="The selected operation cannot also be forbidden.",
+        )
+    if accepted.operation not in accepted.allowed_effects:
+        raise HTTPException(
+            status_code=422,
+            detail="Allowed effects must include the selected operation.",
+        )
+    operations: set[str] = {"read"} | {accepted.operation}
+    tools = {"sentinel_issue_read"}
+    if accepted.operation == "write":
+        tools.add("sentinel_issue_add_note")
+    unsatisfiable = [
+        label
+        for flag, label in (
+            (accepted.dry_run_required, "a dry run"),
+            (accepted.rollback_required, "automatic rollback"),
+            (accepted.transaction_required, "a transaction"),
+            (accepted.backup_required, "a backup"),
+        )
+        if flag
+    ]
+    if unsatisfiable:
+        # The fixture tools cannot satisfy these shell-style safeguard
+        # obligations. Accepting them would make every real call fail closed
+        # (found in the live run for dry_run_required; siblings caught in review).
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Fixture tasks cannot require {', '.join(unsatisfiable)}; "
+                "the fixture tools do not support these safeguards."
+            ),
+        )
+    verb = "Add notes to" if accepted.operation == "write" else "Read"
+    objective = f"{verb} fixture issues {', '.join(targets)} through the Sentinel MCP tools."
+    return ActionContract(
+        objective=objective[:2_000],
+        allowed_operations=operations,  # type: ignore[arg-type]
+        allowed_tools=tools,
+        exact_targets=targets,
+        environment=accepted.environment,
+        maximum_scope="exact",
+        expected_side_effects=accepted.expected_side_effects,
+        allowed_effects=set(accepted.allowed_effects) | {"read"},
         forbidden_operations=accepted.forbidden_operations,
         forbidden_effects=accepted.forbidden_effects,
         forbidden_effect_codes=accepted.forbidden_effect_codes,
@@ -1567,6 +1784,81 @@ def _control_executor_ready(executor: object) -> bool:
     except Exception:
         return False
     return True
+
+
+def _control_integration_status(
+    app: FastAPI,
+) -> IntegrationStatusResponse | None:
+    """Honest, per-family status of the mandatory MCP path; None when not wired."""
+
+    policy_binding = app.state.supervision_policy_binding
+    registry = app.state.adapter_registry
+    if policy_binding is None or registry is None or app.state.mcp_mediator is None:
+        return None
+    now = datetime.now(timezone.utc)
+    policy = policy_binding.policy
+    expired = policy_binding.is_expired(now)
+    audit_ready = _audit_health(app.state.audit_store).status == "ok"
+    gateway_ready = not expired and audit_ready
+    hooks = inspect_hooks_profile(app.state.supervision_binding.workspace.path)
+    connection = registry.connection
+    adapter = registry.current(policy.adapter_kind)
+    coverage = [
+        FamilyCoverageResponse(
+            family=entry.family,
+            status=entry.status,
+            basis=entry.basis,
+            conditions=list(entry.conditions),
+            known_bypasses=list(entry.known_bypasses),
+        )
+        for entry in registry.profile.families
+    ]
+    if not gateway_ready:
+        coverage = [
+            entry.model_copy(update={"status": "unavailable"})
+            if entry.status == "mandatory"
+            else entry
+            for entry in coverage
+        ]
+    return IntegrationStatusResponse(
+        gateway=ControlCheckResponse(
+            status="ready" if gateway_ready else "unavailable",
+            detail=(
+                "MCP gateway is bound to the startup ceiling and required audit storage."
+                if gateway_ready
+                else "Startup ceiling expired or required audit storage is unavailable; calls fail closed."
+            ),
+        ),
+        hooks=ControlCheckResponse(
+            status="ready" if hooks.status == "installed" else "unavailable",
+            detail=hooks.detail,
+        ),
+        sandbox=ControlCheckResponse(
+            status="unavailable",
+            detail=(
+                "Cursor's agent sandbox is a host setting Sentinel cannot read. "
+                "Mandatory coverage assumes it is enabled."
+            ),
+        ),
+        ceiling=CeilingStatusResponse(
+            adapter_kind=policy.adapter_kind,
+            tool_family=policy.tool_family,
+            policy_sha256=policy_binding.content_sha256,
+            expires_at=policy_binding.expires_at,
+            expired=expired,
+        ),
+        agent=AgentConnectionResponse(
+            host=connection.host,
+            status=connection.status,
+            last_seen_at=connection.last_seen_at,
+            last_tool=connection.last_tool,
+            last_verdict=connection.last_verdict,
+            mediated_calls=connection.mediated_calls,
+            rejected_calls=connection.rejected_calls,
+            adapter_session_expires_at=adapter.expires_at if adapter else None,
+        ),
+        coverage=coverage,
+    )
 
 
 def _control_runtime_status(

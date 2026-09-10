@@ -176,6 +176,7 @@ export default function ApprovalsPage() {
               (!needsTarget || typedTarget === exactTarget);
             const matches = matchesAuthority(approval, activeContract);
             const approvedResult = approvedOutcome(
+              approval,
               outcomes[approval.approval_id]?.response,
             );
 
@@ -206,7 +207,11 @@ export default function ApprovalsPage() {
                   <h3 className="text-[11px] font-semibold">What will happen</h3>
                   <ul className="mt-3">
                     <OutcomeRow
-                      title={operationSummary(approval.operation)}
+                      title={
+                        approval.family === "mcp"
+                          ? toolSummary(approval)
+                          : operationSummary(approval.operation)
+                      }
                       detail={effectSummary(approval)}
                     />
                     <OutcomeRow
@@ -231,15 +236,41 @@ export default function ApprovalsPage() {
                     Exact action
                   </h3>
                   <dl className="mt-4 grid gap-x-8 gap-y-5 sm:grid-cols-2">
-                    <ExactDetail
-                      label="Command"
-                      className="sm:col-span-2"
-                      value={
-                        <code className="break-all font-mono text-[11px]">
-                          {approval.raw_command}
-                        </code>
-                      }
-                    />
+                    {approval.family === "mcp" ? (
+                      <>
+                        <ExactDetail
+                          label="Tool"
+                          value={
+                            <code className="font-mono text-[11px]">
+                              {approval.tool ?? "unknown tool"}
+                            </code>
+                          }
+                        />
+                        <ExactDetail
+                          label="Route"
+                          value="Cursor MCP · mediated by Sentinel"
+                        />
+                        <ExactDetail
+                          label="Exact arguments"
+                          className="sm:col-span-2"
+                          value={
+                            <pre className="whitespace-pre-wrap break-all font-mono text-[11px]">
+                              {JSON.stringify(approval.arguments, null, 2)}
+                            </pre>
+                          }
+                        />
+                      </>
+                    ) : (
+                      <ExactDetail
+                        label="Command"
+                        className="sm:col-span-2"
+                        value={
+                          <code className="break-all font-mono text-[11px]">
+                            {approval.raw_command}
+                          </code>
+                        }
+                      />
+                    )}
                     <ExactDetail
                       label="Every target"
                       value={<ExactList values={approval.targets} />}
@@ -458,6 +489,10 @@ function matchesAuthority(
 
 function actionTitle(approval: PendingApprovalResponse) {
   const target = approval.targets.length === 1 ? shortTarget(approval.targets[0]) : null;
+  if (approval.family === "mcp") {
+    const noun = approval.tool === "sentinel_issue_add_note" ? "Add a note to" : "Use a tool on";
+    return target ? `${noun} issue ${target}` : `${noun} the requested issue`;
+  }
   const verb = {
     read: "Read",
     write: "Change",
@@ -468,6 +503,16 @@ function actionTitle(approval: PendingApprovalResponse) {
     credential_access: "Access",
   }[approval.operation] ?? "Perform";
   return target ? `${verb} ${target}` : `${verb} this requested action`;
+}
+
+function toolSummary(approval: PendingApprovalResponse) {
+  if (approval.tool === "sentinel_issue_add_note") {
+    return "One note will be added to the local fixture issue";
+  }
+  if (approval.tool === "sentinel_issue_read") {
+    return "The fixture issue will be read";
+  }
+  return "The requested tool call will be performed through Sentinel";
 }
 
 function operationSummary(operation: string) {
@@ -514,7 +559,10 @@ function confirmationExplanation(approval: PendingApprovalResponse) {
   return "Sentinel is asking because your preferences require a review before this kind of change.";
 }
 
-function approvedOutcome(response?: ApprovalActionResponse) {
+function approvedOutcome(
+  approval: PendingApprovalResponse,
+  response?: ApprovalActionResponse,
+) {
   const retry = response?.retry;
   if (!retry || retry.verdict !== "allow") {
     return {
@@ -522,6 +570,28 @@ function approvedOutcome(response?: ApprovalActionResponse) {
       title: "Approved; retry blocked",
       description:
         "Your approval was recorded, but Sentinel did not admit the retry. Review Activity before trying again.",
+    };
+  }
+  if (approval.family === "mcp") {
+    // MCP writes are applied by Sentinel itself, so there is no shell
+    // execution record; the fixture reports its own outcome in the reasons.
+    const applied = (retry.reasons ?? []).includes("mcp:approved_write_applied");
+    const fixtureFailed = (retry.reasons ?? []).some(
+      (reason) => reason.startsWith("fixture:") && reason !== "fixture:succeeded",
+    );
+    if (!applied || fixtureFailed) {
+      return {
+        kind: "failed" as const,
+        title: "Approved; write did not complete",
+        description:
+          "Sentinel admitted the exact action, but the tracker did not confirm the write. Review Activity before trying again.",
+      };
+    }
+    return {
+      kind: "success" as const,
+      title: "Approved and applied",
+      description:
+        "Sentinel used this approval once and applied the exact note to the issue.",
     };
   }
   if (

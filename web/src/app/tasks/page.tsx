@@ -42,6 +42,19 @@ import type {
   DraftSuggestionResponse,
 } from "@/lib/control-types";
 
+/**
+ * Suggested settings that decide what the agent is allowed to do. These must be
+ * explicitly confirmed. Every other suggestion either describes the task or
+ * only narrows it, so accepting it unchanged cannot widen the boundary.
+ */
+const AUTHORITY_FIELDS = new Set([
+  "operation",
+  "exact_targets",
+  "environment",
+  "allowed_effects",
+  "expires_in_minutes",
+]);
+
 type DraftForm = {
   operation: string;
   exactTargets: string;
@@ -57,6 +70,7 @@ type DraftForm = {
   transactionRequired: boolean;
   backupRequired: boolean;
   expiresInMinutes: string;
+  toolFamily: "shell" | "sentinel_issue_fixture";
 };
 
 const emptyForm: DraftForm = {
@@ -74,10 +88,12 @@ const emptyForm: DraftForm = {
   transactionRequired: false,
   backupRequired: false,
   expiresInMinutes: "60",
+  toolFamily: "shell",
 };
 
 export default function TasksPage() {
-  const { activeContract, refresh } = useControl();
+  const { activeContract, refresh, status } = useControl();
+  const integration = status?.integration ?? null;
   const [rawPrompt, setRawPrompt] = useState("");
   const [preview, setPreview] = useState<ContractDraftResponse | null>(null);
   const [form, setForm] = useState<DraftForm>(emptyForm);
@@ -106,7 +122,9 @@ export default function TasksPage() {
   );
   const accepted = useMemo(() => acceptedContract(form), [form]);
   const allSuggestedReviewed =
-    preview?.suggestions.every((item) => reviewed.has(item.field)) ?? false;
+    preview?.suggestions
+      .filter((item) => AUTHORITY_FIELDS.has(item.field))
+      .every((item) => reviewed.has(item.field)) ?? false;
   const canPropose =
     preview !== null &&
     accepted !== null &&
@@ -463,21 +481,78 @@ export default function TasksPage() {
                 </div>
 
                 <ReviewField
-                  label="Allowed locations"
+                  label={
+                    form.toolFamily === "sentinel_issue_fixture"
+                      ? "Allowed fixture issues"
+                      : "Allowed locations"
+                  }
                   field="exact_targets"
                   source={sources.get("exact_targets")}
                   reviewed={reviewed}
                   onReview={setReviewed}
                 >
+                  {integration ? (
+                    <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px]">
+                      <span className="text-[var(--subtext)]">Target kind</span>
+                      <Select
+                        value={form.toolFamily}
+                        onValueChange={(value) => {
+                          const toolFamily = value as DraftForm["toolFamily"];
+                          const fixture = toolFamily === "sentinel_issue_fixture";
+                          setForm({
+                            ...form,
+                            toolFamily,
+                            // Fixture tools have no dry-run, rollback, transaction,
+                            // or backup mode; leaving any of these on would make
+                            // every real call fail closed.
+                            dryRunRequired: fixture ? "no" : form.dryRunRequired,
+                            rollbackRequired: fixture ? false : form.rollbackRequired,
+                            transactionRequired: fixture
+                              ? false
+                              : form.transactionRequired,
+                            backupRequired: fixture ? false : form.backupRequired,
+                          });
+                        }}
+                      >
+                        <SelectTrigger
+                          id="contract-tool-family"
+                          aria-label="Target kind"
+                          className="h-8 w-auto min-w-[220px]"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectGroup>
+                            <SelectItem value="shell">
+                              Workspace files (shell)
+                            </SelectItem>
+                            <SelectItem value="sentinel_issue_fixture">
+                              Fixture issues (Cursor MCP)
+                            </SelectItem>
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  ) : null}
                   <Textarea
                     id="contract-exact-targets"
                     value={form.exactTargets}
                     onChange={(event) =>
                       setForm({ ...form, exactTargets: event.target.value })
                     }
-                    placeholder="Choose the exact file or folder"
+                    placeholder={
+                      form.toolFamily === "sentinel_issue_fixture"
+                        ? "One issue ID per line, for example SPIKE-1"
+                        : "Choose the exact file or folder"
+                    }
                     className="min-h-20 font-mono text-[12px]"
                   />
+                  {form.toolFamily === "sentinel_issue_fixture" ? (
+                    <p className="mt-1.5 text-[10px] leading-4 text-[var(--subtext)]">
+                      Reads are always included. Writes add one reviewed note per
+                      approval. The startup ceiling limits which issue IDs are valid.
+                    </p>
+                  ) : null}
                 </ReviewField>
 
                 <details
@@ -551,8 +626,9 @@ export default function TasksPage() {
                       />
                     </ReviewField>
 
+                    {form.toolFamily !== "sentinel_issue_fixture" ? (
                     <ReviewField
-                      label="Test first"
+                      label="Run a dry run first"
                       field="dry_run_required"
                       source={sources.get("dry_run_required")}
                       reviewed={reviewed}
@@ -573,15 +649,16 @@ export default function TasksPage() {
                         <SelectContent>
                           <SelectGroup>
                             <SelectItem value="yes">
-                              Yes — test before changing anything
+                              Yes — the agent must preview shell changes before applying them
                             </SelectItem>
                             <SelectItem value="no">
-                              No — continue after the other checks
+                              No — apply directly after the other checks
                             </SelectItem>
                           </SelectGroup>
                         </SelectContent>
                       </Select>
                     </ReviewField>
+                    ) : null}
 
                     <div className="grid gap-4 sm:grid-cols-2">
                   <ReviewField
@@ -703,6 +780,7 @@ export default function TasksPage() {
                         onReview={setReviewed}
                       />
                     </div>
+                    {form.toolFamily !== "sentinel_issue_fixture" ? (
                     <fieldset>
                       <legend className="text-[12px] font-medium">
                         Required safeguards
@@ -740,17 +818,11 @@ export default function TasksPage() {
                                 {suggestionSourceLabel(sources.get(field)!.source)}
                               </Badge>
                             ) : null}
-                            {sources.has(field) ? (
-                              <ReviewToggle
-                                field={field}
-                                reviewed={reviewed}
-                                onReview={setReviewed}
-                              />
-                            ) : null}
                           </div>
                         ))}
                       </div>
                     </fieldset>
+                    ) : null}
                     {preview.proposed_contract?.contract ?? accepted ? (
                       <details className="border-t border-[var(--line)] pt-4">
                         <summary className="w-fit cursor-pointer text-[11px] font-medium outline-none focus-visible:ring-2 focus-visible:ring-black">
@@ -771,7 +843,10 @@ export default function TasksPage() {
 
                 {!allSuggestedReviewed ? (
                   <p className="text-[12px] text-[var(--subtext)]">
-                    Review every suggested setting before saving.
+                    Confirm the settings that decide what the agent may do:
+                    operation, allowed locations, environment, allowed changes,
+                    and expiry. Other suggestions are accepted unless you change
+                    them.
                   </p>
                 ) : null}
                 {preview.proposed_contract && !proposedIsActive ? (
@@ -954,11 +1029,13 @@ function ReviewField({
             <Badge variant="secondary">
               {suggestionSourceLabel(source.source)}
             </Badge>
-            <ReviewToggle
-              field={field}
-              reviewed={reviewed}
-              onReview={onReview}
-            />
+            {AUTHORITY_FIELDS.has(field) ? (
+              <ReviewToggle
+                field={field}
+                reviewed={reviewed}
+                onReview={onReview}
+              />
+            ) : null}
           </>
         ) : (
           <Badge variant="outline">Your answer</Badge>
@@ -1016,7 +1093,7 @@ function BoundaryReview({
         <span className="text-[10px] uppercase tracking-[0.07em] text-[var(--faint)]">
           {label}
         </span>
-        {source ? (
+        {source && AUTHORITY_FIELDS.has(field) ? (
           <ReviewToggle
             field={field}
             reviewed={reviewed}
@@ -1053,6 +1130,7 @@ function formFromSuggestions(
     transactionRequired: values.get("transaction_required") === true,
     backupRequired: values.get("backup_required") === true,
     expiresInMinutes: stringValue(values.get("expires_in_minutes")) || "60",
+    toolFamily: "shell",
   };
 }
 
@@ -1094,6 +1172,7 @@ function acceptedContract(form: DraftForm): AcceptedContractDraft | null {
     transaction_required: form.transactionRequired,
     backup_required: form.backupRequired,
     expires_in_minutes: expiry,
+    tool_family: form.toolFamily,
   };
 }
 

@@ -3,10 +3,12 @@
 import { Bot, Search, ShieldCheck } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 
+import { AgentCoverage } from "@/components/agent-coverage";
 import { GitHubIcon, LinearIcon, SlackIcon } from "@/components/brand-icons";
 import { useControl } from "@/components/control-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import type { IntegrationStatusResponse } from "@/lib/control-types";
 import { cn } from "@/lib/utils";
 
 type SettingsSection =
@@ -108,6 +110,7 @@ export default function SettingsPage() {
               setQuery={setQuery}
               searchRef={searchRef}
               providers={filteredProviders}
+              integration={status?.integration ?? null}
             />
           ) : null}
           {section === "general" ? <GeneralSection /> : null}
@@ -129,12 +132,15 @@ function ConnectionsSection({
   setQuery,
   searchRef,
   providers: visibleProviders,
+  integration,
 }: {
   query: string;
   setQuery: (value: string) => void;
   searchRef: React.RefObject<HTMLInputElement | null>;
   providers: typeof providers;
+  integration: IntegrationStatusResponse | null;
 }) {
+  const agentConnected = integration?.agent.status === "connected";
   return (
     <section aria-labelledby="connections-heading">
       <h2
@@ -180,10 +186,24 @@ function ConnectionsSection({
           />
           <ConnectionRow
             icon={Bot}
-            name="Coding agent"
-            description="External agent integrations remain advisory."
-            status="Optional"
+            name="Cursor (MCP)"
+            description={
+              integration
+                ? agentConnected
+                  ? "Fixture issue tools are mediated by Sentinel; other actions stay advisory."
+                  : "Sentinel is ready for the MCP shim; it has not connected yet."
+                : "External agent integrations remain advisory."
+            }
+            status={
+              integration ? (agentConnected ? "Connected" : "Waiting") : "Optional"
+            }
           />
+        </div>
+      ) : null}
+
+      {!query.trim() ? (
+        <div className="mt-10 border-t border-[var(--line)] pt-6">
+          <AgentCoverage integration={integration} />
         </div>
       ) : null}
 
