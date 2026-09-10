@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeReadFile": [
+      {
+        "type": "command",
+        "command": "python3 .cursor/hooks/sentinel_hooks.py",
+        "timeout": 5,
+        "failClosed": true
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "command": "python3 .cursor/hooks/sentinel_hooks.py",
+        "matcher": "Write|Edit|StrReplace|Delete|ApplyPatch|MultiEdit",
+        "timeout": 5,
+        "failClosed": true
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "type": "command",
+        "command": "python3 .cursor/hooks/sentinel_hooks.py",
+        "timeout": 5,
+        "failClosed": true
+      }
+    ],
+    "beforeMCPExecution": [
+      {
+        "type": "command",
+        "command": "python3 .cursor/hooks/sentinel_hooks.py",
+        "timeout": 5,
+        "failClosed": true
+      }
+    ]
+  }
+}

@@ -122,7 +122,7 @@ export default function Home() {
             <div className="mt-3 divide-y divide-[var(--line)]">
               <ManageRow
                 label="Connections"
-                detail="Manage agents and connected accounts"
+                detail="Agents, enforcement coverage, and connected accounts"
                 href="/settings"
               />
               <ManageRow

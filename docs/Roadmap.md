@@ -525,6 +525,19 @@ documented spike.
 measured Cursor capability matrix. Automatic task preparation and UI redesign
 remain Week 13 work.
 
+**Result (September 9, 2026):** Delivered. A real Cursor run with the sandbox
+on completed three mediated reads, one denied write with zero effect, one
+approved write with exactly one effect, and rejection of replay and of a
+changed payload under the approved attempt; the fixture held exactly one note
+after Sentinel was stopped. The startup ceiling, hashed adapter session,
+durable fixture operation states, and truthful per-family coverage shipped as
+planned. Two live-run findings were fixed the same day: fixture tasks can no
+longer require a dry run they cannot perform, and the Approvals page no longer
+misreports a successful MCP write as a shell failure. The adapter capability is
+readable by a same-user agent by design and grants no authority; Linux/Windows
+sandbox behavior and subagent hook behavior remain unverified. Details in
+[Week 12 Handover](./Week%2012%20Handover.md).
+
 ### Week 13: Automatic Task Preparation
 
 **Goal:** Remove manual contract entry from the Week 12 MCP workflow without

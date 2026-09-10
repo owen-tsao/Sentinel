@@ -447,24 +447,45 @@ function eventLabel(eventType: string) {
 }
 
 function eventDescription(event: AuditEvent) {
+  const tool = mcpToolSummary(event);
   if (event.event_type === "exact_action_denied") return "Nothing was changed.";
   if (event.event_type === "exact_action_approved") {
     return "The approval can be used once.";
   }
   if (event.event_type === "post_execution") {
+    if (tool) {
+      return event.verdict === "allow"
+        ? `${tool} finished through Sentinel.`
+        : `${tool} did not complete; nothing was written.`;
+    }
     const exitCode = event.details?.exit_code;
     return exitCode === 0
       ? "The approved change finished successfully."
       : "The approved change finished with an issue.";
   }
   if (event.event_type === "execution_admitted") {
-    return "Sentinel allowed the approved attempt to begin.";
+    return tool
+      ? `Sentinel admitted ${tool}.`
+      : "Sentinel allowed the approved attempt to begin.";
   }
   if (event.event_type.startsWith("authority_")) {
     return "Your reviewed task boundaries were recorded.";
   }
-  if (event.verdict) return `Decision: ${verdictLabel(event.verdict)}.`;
+  if (event.verdict) {
+    return tool
+      ? `${tool}: ${verdictLabel(event.verdict)}.`
+      : `Decision: ${verdictLabel(event.verdict)}.`;
+  }
   return "Sentinel recorded this workspace event.";
+}
+
+function mcpToolSummary(event: AuditEvent) {
+  const details = event.details ?? {};
+  const tool = details.tool;
+  if (typeof tool !== "string") return null;
+  const targets = Array.isArray(details.targets) ? details.targets : [];
+  const target = targets.length === 1 ? String(targets[0]) : null;
+  return target ? `MCP tool ${tool} on ${target}` : `MCP tool ${tool}`;
 }
 
 function friendlyReason(reason: string) {

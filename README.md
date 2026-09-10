@@ -32,6 +32,8 @@ directly on the host machine.
 - A local web app for creating and activating task boundaries.
 - Human review for sensitive or destructive actions.
 - One-time approvals that cannot be reused for a different action.
+- One mandatory agent tool path: Cursor's MCP tools for a local issue fixture
+  cannot write around Sentinel, and Sentinel stopping prevents the effect.
 - Restricted execution with a read-only workspace by default.
 - Safe restart recovery that suspends task authority Sentinel could not verify.
 - A clear activity history for decisions, approvals, and execution.
@@ -42,9 +44,12 @@ directly on the host machine.
 Sentinel is a working prototype and portfolio project, not a production-ready
 security product.
 
-It currently supervises one local workspace and one person. Integrations with
-external coding agents, including Cursor, are advisory because those tools can
-still act outside Sentinel. Multi-user accounts, production isolation, and
+It currently supervises one local workspace and one person. One narrow agent
+path is now mandatory: with Cursor's sandbox on and Sentinel's hooks
+installed, Cursor's tools for a local test issue tracker can only act through
+Sentinel, and they fail closed when Sentinel is stopped. Everything else Cursor
+can do (shell, file edits, browser) is still advisory because those actions can
+happen outside Sentinel. Multi-user accounts, production isolation, and
 complete agent interception remain future work.
 
 The current focus is proving that task boundaries and human approvals remain

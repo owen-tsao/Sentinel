@@ -57,6 +57,9 @@ data/evaluation/contract_communications_review.md
 *.swp
 .DS_Store
 cursor_handover.md
+# Machine-specific MCP client config (absolute paths to a per-run capability file).
+# The tracked template lives under policies/cursor/; the launcher prints the block.
+.cursor/mcp.json
 
 # Logs and local AWS/Terraform
 *.log

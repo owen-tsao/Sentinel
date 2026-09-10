@@ -153,7 +153,7 @@ function ShellContent({ children }: { children: ReactNode }) {
               <p className="mt-0.5 text-[10px] text-[var(--subtext)]">
                 {connected
                   ? status?.mandatory_agent_connected
-                    ? "Mandatory agent connection active"
+                    ? `Mandatory agent connection active · ${status.connection_message}`
                     : `Agent enforcement is advisory · ${status?.connection_message ?? "No mandatory agent connected."}`
                   : message}
               </p>

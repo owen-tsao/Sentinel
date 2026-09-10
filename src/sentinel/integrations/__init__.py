@@ -1,13 +1,24 @@
-"""Adapters that translate external agent actions into Sentinel decisions."""
+"""Agent connection, adapter session, and measured coverage records."""
 
-from sentinel.integrations.cursor import (
-    CURSOR_CAPABILITY_MATRIX,
-    CursorCapability,
-    cursor_authority_boundary_passes,
+from .models import (
+    CURSOR_WEEK12_PROFILE,
+    ActionFamilyCoverage,
+    AdapterSession,
+    AgentConnection,
+    CapabilityProfile,
+    CoverageStatus,
+    IssuedAdapterCapability,
 )
+from .registry import AdapterSessionError, AdapterSessionRegistry
 
 __all__ = [
-    "CURSOR_CAPABILITY_MATRIX",
-    "CursorCapability",
-    "cursor_authority_boundary_passes",
+    "CURSOR_WEEK12_PROFILE",
+    "ActionFamilyCoverage",
+    "AdapterSession",
+    "AdapterSessionError",
+    "AdapterSessionRegistry",
+    "AgentConnection",
+    "CapabilityProfile",
+    "CoverageStatus",
+    "IssuedAdapterCapability",
 ]

@@ -47,6 +47,9 @@ class ApprovalExecutionEnvelope:
     reasons: tuple[str, ...]
     created_at: datetime
     expires_at: datetime
+    family: str = "shell"
+    tool: str | None = None
+    arguments_json: str = "{}"
 
     def recent_actions(self) -> list[dict[str, object]]:
         return json.loads(self.recent_actions_json)
@@ -93,6 +96,7 @@ class InMemoryApprovalCoordinator:
         action: CanonicalAction,
         workspace: str,
         reasons: list[str],
+        arguments: dict[str, object] | None = None,
     ) -> ApprovalExecutionEnvelope:
         """Bind one pending approval ID to its first exact execution attempt."""
 
@@ -100,6 +104,13 @@ class InMemoryApprovalCoordinator:
             raise ApprovalCoordinatorError("approval:attempt_id_required")
         recent_actions_json = json.dumps(
             recent_actions,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        arguments_json = json.dumps(
+            arguments or {},
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,
@@ -124,6 +135,9 @@ class InMemoryApprovalCoordinator:
             reasons=tuple(reasons),
             created_at=created_at,
             expires_at=created_at + self._envelope_ttl,
+            family=action.family,
+            tool=action.tool,
+            arguments_json=arguments_json,
         )
         with self._lock:
             self._purge(now)

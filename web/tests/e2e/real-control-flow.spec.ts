@@ -75,14 +75,13 @@ test("real browser control flow denies once, approves once, and proves audit ord
   await page
     .getByLabel("If something goes wrong")
     .fill("Remove /workspace/build/result.txt.");
-  await page.getByLabel("Test first").click();
+  await page.getByLabel("Run a dry run first").click();
   await page
     .getByRole("option", {
-      name: "No — continue after the other checks",
+      name: "No — apply directly after the other checks",
       exact: true,
     })
     .click();
-  await page.getByText("Advanced settings").click();
   for (const checkbox of await page.getByLabel("Reviewed").all()) {
     await checkbox.check();
   }
