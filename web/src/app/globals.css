@@ -1,27 +1,43 @@
 @import "tailwindcss";
 
 :root {
+  /* Cream canvas, white panels: the contrast is what makes panels read as objects. */
+  --canvas: #fff2e9;
   --paper: #ffffff;
-  --canvas: #ffffff;
-  --hover: rgba(136, 170, 238, 0.08);
-  --line: #eaeaea;
-  --line-strong: #d6d6d6;
-  --subtext: #666666;
-  --faint: #6f6f78;
-  --ink: #171717;
+  --hover: rgba(0, 0, 0, 0.04);
+  --line: #ead9cc;
+  --line-strong: #000000;
+  --outline: #000000;
+  --subtext: #5f5f66;
+  --faint: #6b6b72; /* ~5:1 on the cream canvas at 11px */
+  --ink: #141416;
   --main: #88aaee;
-  --main-soft: rgba(136, 170, 238, 0.16);
-  --main-faint: rgba(136, 170, 238, 0.08);
+  --main-ink: #0a0a0a;
+  --main-line: rgba(0, 0, 0, 0.3);
+  --main-soft: rgba(136, 170, 238, 0.18);
+  --main-faint: rgba(136, 170, 238, 0.1);
   --primary: #88aaee;
   --primary-hover: #7b9edc;
-  --primary-soft: rgba(136, 170, 238, 0.16);
+  --primary-soft: rgba(136, 170, 238, 0.18);
   --primary-ink: #000000;
+  /* Text-safe signal colours (≥4.5:1 on both surfaces); used for words. */
   --success: #15803d;
   --warning: #8a550b;
   --danger: #b4232f;
-  --muted-signal: #a1a1aa;
-  --shadow-card: 0 0 0 1px rgba(0, 0, 0, 0.025),
-    0 2px 4px rgba(0, 0, 0, 0.035);
+  /* Dot colours: brighter for the 6px status dots, still ≥3:1 for non-text UI. */
+  --dot-ok: #22874f;
+  --dot-warn: #b8740f;
+  --dot-off: #c8403f;
+  --muted-signal: #000000;
+  --radius-control: 8px;
+  --radius-panel: 12px;
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, Menlo, monospace;
+}
+
+@theme inline {
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
 }
 
 * {
@@ -29,18 +45,23 @@
 }
 
 html {
-  background: var(--paper);
+  background: var(--canvas);
 }
 
 body {
   margin: 0;
-  background: var(--paper);
+  background: var(--canvas);
   color: var(--ink);
-  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    sans-serif;
-  font-size: 14px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
 }
 
 button,
@@ -86,27 +107,137 @@ button:not(:disabled),
   transform-origin: left;
 }
 
+/*
+ * Ticket geometry. The notches are punched through the whole stack (shadow,
+ * frame, fill) with one mask on the wrapper, so the hole is clean canvas and
+ * the shadow cannot leak into it. A second, slightly larger mask on the fill
+ * leaves a 2px ring of the black frame tracing the U.
+ *
+ * Shadow offset is 6px; the wrapper reserves that space on the right/bottom,
+ * so the ticket's own vertical centre is at calc(50% - 3px) of the wrapper.
+ */
+.ticket {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 0 6px 6px 0;
+  -webkit-mask:
+    radial-gradient(circle at 0 calc(50% - 3px), transparent 16px, #000 16.6px),
+    radial-gradient(circle at calc(100% - 6px) calc(50% - 3px), transparent 16px, #000 16.6px);
+  -webkit-mask-composite: source-in;
+  mask:
+    radial-gradient(circle at 0 calc(50% - 3px), transparent 16px, #000 16.6px),
+    radial-gradient(circle at calc(100% - 6px) calc(50% - 3px), transparent 16px, #000 16.6px);
+  mask-composite: intersect;
+}
+
+.ticket-shadow {
+  position: absolute;
+  inset: 6px 0 0 6px;
+  background: #000;
+  border-radius: 18px;
+}
+
+.ticket-frame {
+  position: relative;
+  display: flex;
+  flex: 1;
+  padding: 2px;
+  background: #000;
+  border-radius: 18px;
+}
+
+.ticket-fill {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  border-radius: 16px; /* frame radius minus frame width keeps the border even at corners */
+  background: var(--ticket-fill, var(--main));
+  color: var(--ticket-ink, var(--main-ink));
+  -webkit-mask:
+    radial-gradient(circle at -2px 50%, transparent 18px, #000 18.6px),
+    radial-gradient(circle at calc(100% + 2px) 50%, transparent 18px, #000 18.6px);
+  -webkit-mask-composite: source-in;
+  mask:
+    radial-gradient(circle at -2px 50%, transparent 18px, #000 18.6px),
+    radial-gradient(circle at calc(100% + 2px) 50%, transparent 18px, #000 18.6px);
+  mask-composite: intersect;
+}
+
+.ticket[data-tone="idle"] {
+  --ticket-fill: var(--paper);
+  --ticket-ink: var(--ink);
+}
+
+/*
+ * Paint-in: when a ticket becomes the active task, the blue grows from the
+ * top-left corner as a circle until it covers the white fill. The circle is a
+ * pseudo-element clipped with clip-path; `isolation` keeps it above the white
+ * background but under the content. Set data-paint only on that transition,
+ * not on mount, so the Overview does not repaint on every visit.
+ */
+.ticket[data-paint="true"] .ticket-fill {
+  position: relative;
+  isolation: isolate;
+  background: var(--paper);
+}
+
+.ticket[data-paint="true"] .ticket-fill::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--main);
+  clip-path: circle(0% at 0 0);
+  animation: ticket-paint 820ms cubic-bezier(0.3, 0.7, 0.2, 1) 80ms forwards;
+}
+
+@keyframes ticket-paint {
+  to {
+    /* 142% of the clip-path reference radius reaches the far corner. */
+    clip-path: circle(142% at 0 0);
+  }
+}
+
 @keyframes contract-receipt-enter {
   from {
     opacity: 0;
-    transform: perspective(1100px) translateY(24px) rotateX(6deg) scale(0.97);
+    transform: translateY(16px) scale(0.97);
   }
   to {
     opacity: 1;
-    transform: perspective(1100px) translateY(0) rotateX(1deg) scale(1);
+    transform: translateY(0) scale(1);
   }
 }
 
+@keyframes backdrop-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* The receipt waits for the ticket behind it to finish painting, then rises. */
 .contract-receipt {
-  animation: contract-receipt-enter 260ms ease-out both;
-  transform: perspective(1100px) rotateX(1deg);
-  transform-origin: center bottom;
+  animation: contract-receipt-enter 360ms cubic-bezier(0.2, 0.8, 0.2, 1) 720ms both;
+}
+
+dialog:has(.contract-receipt)::backdrop {
+  animation: backdrop-enter 360ms ease-out 620ms both;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .contract-receipt {
+  .contract-receipt,
+  dialog:has(.contract-receipt)::backdrop {
     animation: none;
-    transform: none;
+  }
+
+  .ticket[data-paint="true"] .ticket-fill::before {
+    animation: none;
+    clip-path: none;
   }
 
   *,

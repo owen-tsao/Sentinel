@@ -1,23 +1,21 @@
 "use client";
 
-import {
-  Check,
-  CircleAlert,
-  FileCheck2,
-  FileX2,
-  RefreshCw,
-  ShieldCheck,
-} from "lucide-react";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-} from "react";
+import { CircleAlert } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  COLUMN_HEAD_CLASS,
+  Eyebrow,
+  KeyValueList,
+  PageHeader,
+  Panel,
+  SectionHeader,
+  StatusDot,
+  type StatusTone,
+} from "@/components/ui/layout";
 import {
   Select,
   SelectContent,
@@ -26,6 +24,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { eventLabel, verdictLabel } from "@/lib/audit-labels";
 import { ControlApiError, getAuditEvents } from "@/lib/control-api";
 import type { AuditEvent } from "@/lib/control-types";
 import { cn } from "@/lib/utils";
@@ -41,6 +40,11 @@ const eventTypes = [
   "post_execution",
 ];
 
+/**
+ * Activity: filters on one line, then master-detail. The list panel (grouped
+ * by day) sets the height; the detail panel fills it and scrolls internally so
+ * both columns end on the same line.
+ */
 export default function AuditPage() {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [selected, setSelected] = useState<AuditEvent | null>(null);
@@ -50,6 +54,14 @@ export default function AuditPage() {
   const [timeRange, setTimeRange] = useState("24h");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const applyEvents = useCallback((incoming: AuditEvent[]) => {
+    const nextEvents = sortEvents(incoming);
+    setEvents(nextEvents);
+    setSelected((current) =>
+      current ? nextEvents.find((event) => event.event_id === current.event_id) ?? null : null,
+    );
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -61,49 +73,22 @@ export default function AuditPage() {
         verdict: verdict === "all" ? undefined : verdict,
         startTime: startForRange(timeRange),
       });
-      const nextEvents = sortEvents(response.events);
-      setEvents(nextEvents);
-      setSelected((current) =>
-        current
-          ? nextEvents.find((event) => event.event_id === current.event_id) ??
-            null
-          : null,
-      );
+      applyEvents(response.events);
     } catch (caught) {
-      setError(
-        caught instanceof ControlApiError && caught.status === 401
-          ? "Your control session expired. Open a fresh pairing link."
-          : "Activity could not be loaded.",
-      );
+      setError(loadErrorMessage(caught));
     } finally {
       setLoading(false);
     }
-  }, [eventType, taskId, timeRange, verdict]);
+  }, [applyEvents, eventType, taskId, timeRange, verdict]);
 
   useEffect(() => {
     let cancelled = false;
     void getAuditEvents({ startTime: startForRange("24h") })
       .then((response) => {
-        if (!cancelled) {
-          const nextEvents = sortEvents(response.events);
-          setEvents(nextEvents);
-          setSelected((current) =>
-            current
-              ? nextEvents.find(
-                  (event) => event.event_id === current.event_id,
-                ) ?? null
-              : null,
-          );
-        }
+        if (!cancelled) applyEvents(response.events);
       })
       .catch((caught) => {
-        if (!cancelled) {
-          setError(
-            caught instanceof ControlApiError && caught.status === 401
-              ? "Your control session expired. Open a fresh pairing link."
-              : "Activity could not be loaded.",
-          );
-        }
+        if (!cancelled) setError(loadErrorMessage(caught));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -111,76 +96,42 @@ export default function AuditPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [applyEvents]);
 
   const groups = useMemo(() => groupEventsByDay(events), [events]);
   const summary = useMemo(
     () => ({
       total: events.length,
-      approvals: events.filter(
-        (event) => event.event_type === "exact_action_approved",
-      ).length,
+      approvals: events.filter((event) => event.event_type === "exact_action_approved").length,
       blocked: events.filter((event) => event.verdict === "block").length,
-      executions: events.filter(
-        (event) => event.event_type === "post_execution",
-      ).length,
     }),
     [events],
   );
 
   return (
-    <div>
-      <div className="flex flex-wrap items-end justify-between gap-6">
-        <div>
-          <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[#4f6fad]">
-            Activity
-          </p>
-          <h1 className="mt-2 text-[30px] font-semibold tracking-[-0.045em]">
-            What happened
-          </h1>
-          <p className="mt-2 max-w-2xl text-[13px] leading-6 text-[var(--subtext)]">
-            A simple history of decisions and changes across your workspace.
-          </p>
-        </div>
-        <Button variant="secondary" size="sm" onClick={load} disabled={loading}>
-          <RefreshCw aria-hidden="true" data-icon="inline-start" />
-          {loading ? "Refreshing…" : "Refresh"}
-        </Button>
-      </div>
+    <div className="flex flex-col lg:h-[calc(100vh-52px-40px)]">
+      <PageHeader eyebrow="Activity" title="What happened" />
 
       {error ? (
-        <Alert variant="destructive" className="mt-7">
+        <Alert variant="destructive" className="mb-4">
           <CircleAlert aria-hidden="true" />
           <AlertTitle>Activity unavailable</AlertTitle>
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       ) : null}
 
-      <section
-        aria-label="Activity summary"
-        className="mt-9 grid grid-cols-2 border-y border-[var(--line)] sm:grid-cols-4 sm:divide-x sm:divide-[var(--line)]"
-      >
-        <SummaryMetric label="Events shown" value={summary.total} />
-        <SummaryMetric label="Approvals shown" value={summary.approvals} />
-        <SummaryMetric label="Blocked shown" value={summary.blocked} />
-        <SummaryMetric label="Executions shown" value={summary.executions} />
-      </section>
-      <p className="mt-2 text-[10px] text-[var(--faint)]">
-        Summary covers the latest 200 matching events.
-      </p>
-
-      <section aria-labelledby="activity-filters" className="mt-8">
+      <section aria-labelledby="activity-filters" className="mb-6">
         <h2 id="activity-filters" className="sr-only">
           Activity filters
         </h2>
-        <div className="grid items-end gap-4 border-b border-[var(--line)] pb-6 md:grid-cols-2 xl:grid-cols-[1.1fr_0.9fr_0.9fr_0.8fr_auto]">
+        <div className="grid items-end gap-3 md:grid-cols-2 xl:grid-cols-[1.2fr_1fr_1fr_0.8fr_auto]">
           <Filter label="Task reference" htmlFor="audit-task">
             <Input
               id="audit-task"
               value={taskId}
               onChange={(event) => setTaskId(event.target.value)}
               placeholder="Search a task"
-              className="h-10 text-[12px]"
+              className="font-mono text-[12px]"
             />
           </Filter>
           <Filter label="Show" htmlFor="audit-event-type">
@@ -210,9 +161,7 @@ export default function AuditPage() {
                   <SelectItem value="all">All decisions</SelectItem>
                   <SelectItem value="allow">Allowed</SelectItem>
                   <SelectItem value="warn">Warning</SelectItem>
-                  <SelectItem value="confirm_required">
-                    Asked for approval
-                  </SelectItem>
+                  <SelectItem value="confirm_required">Asked for approval</SelectItem>
                   <SelectItem value="block">Blocked</SelectItem>
                 </SelectGroup>
               </SelectContent>
@@ -233,73 +182,78 @@ export default function AuditPage() {
               </SelectContent>
             </Select>
           </Filter>
-          <Button onClick={load} disabled={loading}>
+          {/* Applying also re-fetches, so there is no separate refresh button. */}
+          <Button variant="secondary" className="h-9" onClick={load} disabled={loading}>
             Apply filters
           </Button>
         </div>
       </section>
 
-      <div className="mt-7 grid gap-10 xl:grid-cols-[minmax(0,1fr)_300px]">
-        <div>
-          {!loading && events.length === 0 ? (
-            <div className="border-y border-[var(--line)] py-12 text-center">
-              <p className="text-[13px] font-medium">No matching activity</p>
-              <p className="mt-1 text-[11px] text-[var(--subtext)]">
-                Try a wider time range or clear a filter.
-              </p>
-            </div>
-          ) : (
-            groups.map((group) => (
-              <section
-                key={group.key}
-                className="mb-8"
-                aria-labelledby={`day-${group.key}`}
-              >
-                <h2
-                  id={`day-${group.key}`}
-                  className="mb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--faint)]"
-                >
-                  {group.label}
-                </h2>
-                {group.events.map((event) => (
-                  <ActivityRow
-                    key={event.event_id}
-                    event={event}
-                    selected={selected?.event_id === event.event_id}
-                    onSelect={() => setSelected(event)}
-                  />
-                ))}
-              </section>
-            ))
-          )}
+      {/* Both panels fill the remaining height and scroll inside, so the
+          detail stays beside the list however long the day gets. */}
+      <div className="grid min-h-0 flex-1 gap-7 lg:grid-cols-[minmax(0,1.6fr)_minmax(280px,1fr)]">
+        <div className="flex min-h-0 min-w-0 flex-col">
+          <SectionHeader
+            id="activity-list-heading"
+            label="Events"
+            className={COLUMN_HEAD_CLASS}
+            trailing={
+              <span className="text-[12px] text-[var(--subtext)]">
+                {summary.total} shown · {summary.approvals} approved · {summary.blocked} blocked
+              </span>
+            }
+          />
+          <Panel
+            role="region"
+            aria-labelledby="activity-list-heading"
+            className="min-h-[240px] flex-1 overflow-auto py-1 lg:min-h-0"
+          >
+            {!loading && events.length === 0 ? (
+              <div className="grid min-h-[240px] place-items-center px-6 text-center">
+                <div>
+                  <p className="text-[13px] font-medium">No matching activity</p>
+                  <p className="mt-1 text-[12px] text-[var(--subtext)]">
+                    Try a wider time range or clear a filter.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              groups.map((group) => (
+                <section key={group.key} aria-labelledby={`day-${group.key}`}>
+                  <h2 id={`day-${group.key}`} className="px-4 pb-1 pt-3">
+                    <Eyebrow>{group.label}</Eyebrow>
+                  </h2>
+                  <ol className="divide-y divide-[var(--line)]">
+                    {group.events.map((event) => (
+                      <ActivityRow
+                        key={event.event_id}
+                        event={event}
+                        selected={selected?.event_id === event.event_id}
+                        onSelect={() => setSelected(event)}
+                      />
+                    ))}
+                  </ol>
+                </section>
+              ))
+            )}
+          </Panel>
         </div>
 
-        <aside className="border-t border-[var(--line)] pt-5 xl:border-l xl:border-t-0 xl:pl-7 xl:pt-0">
-          {selected ? (
-            <EventDetail event={selected} />
-          ) : (
-            <div>
-              <h2 className="text-[11px] font-semibold">Activity details</h2>
-              <p className="mt-2 text-[11px] leading-5 text-[var(--subtext)]">
-                Choose an item to see why it happened.
-              </p>
-            </div>
-          )}
-        </aside>
+        <div className="flex min-h-0 min-w-0 flex-col">
+          <SectionHeader id="activity-detail-heading" label="Activity details" className={COLUMN_HEAD_CLASS} />
+          <Panel
+            role="region"
+            aria-labelledby="activity-detail-heading"
+            className="min-h-[160px] flex-1 overflow-auto px-5 py-4 lg:min-h-0"
+          >
+            {selected ? (
+              <EventDetail event={selected} />
+            ) : (
+              <p className="text-[13px] text-[var(--subtext)]">Choose an item to see why it happened.</p>
+            )}
+          </Panel>
+        </div>
       </div>
-    </div>
-  );
-}
-
-function SummaryMetric({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="px-4 py-4 first:pl-0">
-      <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--faint)]">
-        {label}
-      </p>
-      <p className="mt-1 font-mono text-[18px] font-medium tabular-nums">
-        {value}
-      </p>
     </div>
   );
 }
@@ -314,32 +268,27 @@ function ActivityRow({
   onSelect: () => void;
 }) {
   return (
-    <button
-      type="button"
-      aria-label={`View ${event.event_type} event sequence ${
-        event.sequence_id ?? "pending"
-      }`}
-      className={cn(
-        "grid min-h-[68px] w-full grid-cols-[42px_minmax(0,1fr)_auto] items-center gap-3.5 border-t border-[var(--line)] px-0 text-left outline-none transition-colors hover:bg-[var(--main-faint)] focus-visible:ring-2 focus-visible:ring-black focus-visible:ring-inset",
-        selected && "bg-[var(--main-soft)]",
-      )}
-      onClick={onSelect}
-    >
-      <span className="grid size-[34px] place-items-center rounded-[5px] bg-[var(--main-soft)] text-[#294d91]">
-        <EventIcon event={event} />
-      </span>
-      <span>
-        <span className="block text-[12px] font-medium">
-          {eventLabel(event.event_type)}
+    <li>
+      <button
+        type="button"
+        aria-label={`View ${event.event_type} event sequence ${event.sequence_id ?? "pending"}`}
+        aria-current={selected ? "true" : undefined}
+        className={cn(
+          "grid w-full grid-cols-[14px_minmax(0,1fr)_auto] items-start gap-x-2.5 px-4 py-2.5 text-left outline-none transition-colors hover:bg-[var(--hover)] focus-visible:ring-2 focus-visible:ring-black focus-visible:ring-inset",
+          selected && "bg-[var(--hover)]",
+        )}
+        onClick={onSelect}
+      >
+        <span aria-hidden="true" className={cn("mt-[6px] size-1.5 rounded-full", toneClass(eventTone(event)))} />
+        <span className="min-w-0">
+          <span className="block text-[13px] font-medium">{eventLabel(event.event_type)}</span>
+          <span className="mt-0.5 block truncate text-[12px] text-[var(--subtext)]">
+            {eventDescription(event)}
+          </span>
         </span>
-        <span className="mt-0.5 block text-[10px] text-[var(--subtext)]">
-          {eventDescription(event)}
-        </span>
-      </span>
-      <time className="pr-2 text-[10px] text-[var(--faint)]">
-        {formatTime(event.timestamp)}
-      </time>
-    </button>
+        <time className="tabular font-mono text-[11px] text-[var(--faint)]">{formatTime(event.timestamp)}</time>
+      </button>
+    </li>
   );
 }
 
@@ -347,53 +296,40 @@ function EventDetail({ event }: { event: AuditEvent }) {
   return (
     <div>
       <div className="flex items-start justify-between gap-4">
-        <h2 className="text-[11px] font-semibold">Activity details</h2>
+        <StatusDot tone={eventTone(event)} className="text-[12px] text-[var(--subtext)]">
+          {event.verdict ? verdictLabel(event.verdict) : "Recorded"}
+        </StatusDot>
         {event.sequence_id ? (
-          <span className="text-[9px] text-[var(--faint)]">
-            #{event.sequence_id}
-          </span>
+          <span className="font-mono text-[11px] text-[var(--faint)]">#{event.sequence_id}</span>
         ) : null}
       </div>
-      <p className="mt-4 text-[14px] font-medium">
-        {eventLabel(event.event_type)}
-      </p>
-      <p className="mt-1 text-[11px] leading-5 text-[var(--subtext)]">
-        {eventDescription(event)}
-      </p>
-      <dl className="mt-5">
-        <Detail label="When" value={formatTimestamp(event.timestamp)} />
-        <Detail
-          label="Decision"
-          value={event.verdict ? verdictLabel(event.verdict) : "Recorded"}
-        />
-        <Detail
-          label="Environment"
-          value={event.environment ? titleCase(event.environment) : "Current workspace"}
-        />
-      </dl>
+      <p className="mt-2 text-[14px] font-semibold tracking-[-0.01em]">{eventLabel(event.event_type)}</p>
+      <p className="mt-1 text-[12px] leading-5 text-[var(--subtext)]">{eventDescription(event)}</p>
+      <KeyValueList
+        className="mt-4 border-t border-[var(--line)] pt-4 text-[12px]"
+        labelWidth="96px"
+        items={[
+          { label: "When", value: formatTimestamp(event.timestamp) },
+          { label: "Decision", value: event.verdict ? verdictLabel(event.verdict) : "Recorded" },
+          { label: "Environment", value: event.environment ? titleCase(event.environment) : "Current workspace" },
+          ...(typeof event.details?.tool === "string"
+            ? [{ label: "Tool", value: <code className="font-mono text-[11px] font-normal">{event.details.tool}</code> }]
+            : []),
+        ]}
+      />
       {event.reason_codes?.length ? (
-        <div className="mt-5 border-t border-[var(--line)] pt-4">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.07em] text-[var(--faint)]">
-            Why
-          </p>
-          <ul className="mt-2 flex flex-col gap-2">
+        <div className="mt-4 border-t border-[var(--line)] pt-4">
+          <Eyebrow>Why</Eyebrow>
+          <ul className="mt-2 flex flex-col gap-1.5">
             {event.reason_codes.map((reason) => (
-              <li key={reason} className="text-[11px] leading-5 text-[var(--subtext)]">
+              <li key={reason} className="text-[12px] leading-5">
                 {friendlyReason(reason)}
+                <span className="block font-mono text-[10px] leading-4 text-[var(--faint)]">{reason}</span>
               </li>
             ))}
           </ul>
         </div>
       ) : null}
-    </div>
-  );
-}
-
-function Detail({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex justify-between gap-4 border-t border-[var(--line)] py-3 text-[10px]">
-      <dt className="text-[var(--faint)]">{label}</dt>
-      <dd className="text-right text-[var(--subtext)]">{value}</dd>
     </div>
   );
 }
@@ -408,8 +344,8 @@ function Filter({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col gap-2">
-      <label htmlFor={htmlFor} className="text-[10px] font-medium">
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={htmlFor} className="text-[12px] font-medium">
         {label}
       </label>
       {children}
@@ -417,40 +353,28 @@ function Filter({
   );
 }
 
-function EventIcon({ event }: { event: AuditEvent }) {
-  if (event.event_type === "exact_action_denied" || event.verdict === "block") {
-    return <FileX2 aria-hidden="true" size={15} />;
-  }
-  if (
-    event.event_type === "exact_action_approved" ||
-    event.event_type === "post_execution"
-  ) {
-    return <Check aria-hidden="true" size={15} />;
-  }
-  if (event.event_type.startsWith("authority_")) {
-    return <ShieldCheck aria-hidden="true" size={15} />;
-  }
-  return <FileCheck2 aria-hidden="true" size={15} />;
+function eventTone(event: AuditEvent): StatusTone {
+  if (event.event_type === "task_proposed") return "main";
+  if (event.event_type === "exact_action_denied") return "off";
+  if (!event.verdict) return "muted";
+  return event.verdict === "allow" ? "ok" : event.verdict === "block" ? "off" : "warn";
 }
 
-function eventLabel(eventType: string) {
+function toneClass(tone: StatusTone) {
   return {
-    authority_transition_prepared: "Task update prepared",
-    authority_transition_completed: "Task settings updated",
-    task_proposed: "Agent proposed a task",
-    task_proposal_confirmed: "You activated a proposed task",
-    task_proposal_dismissed: "Proposed task dismissed",
-    task_proposal_superseded: "Proposed task replaced",
-    task_proposal_expired: "Proposed task expired",
-    pre_decision: "Change reviewed",
-    decision: "Safety decision made",
-    exact_action_approved: "You approved a change",
-    exact_action_denied: "You denied a change",
-    execution_admitted: "Approved change started",
-    post_execution: "Change completed",
-  }[eventType] ?? "Workspace activity";
+    ok: "bg-[var(--dot-ok)]",
+    warn: "bg-[var(--dot-warn)]",
+    off: "bg-[var(--dot-off)]",
+    muted: "bg-[var(--muted-signal)]",
+    main: "bg-[var(--main)]",
+  }[tone];
 }
 
+function loadErrorMessage(caught: unknown) {
+  return caught instanceof ControlApiError && caught.status === 401
+    ? "Your control session expired. Open a fresh pairing link."
+    : "Activity could not be loaded.";
+}
 function eventDescription(event: AuditEvent) {
   const tool = mcpToolSummary(event);
   if (event.event_type === "exact_action_denied") return "Nothing was changed.";
@@ -542,15 +466,6 @@ function friendlyReason(reason: string) {
     return "Your approval preference required confirmation.";
   }
   return "Sentinel's safety rules required this decision.";
-}
-
-function verdictLabel(verdict: NonNullable<AuditEvent["verdict"]>) {
-  return {
-    allow: "Allowed",
-    warn: "Warning",
-    confirm_required: "Asked for approval",
-    block: "Blocked",
-  }[verdict];
 }
 
 function titleCase(value: string) {

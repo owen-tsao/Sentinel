@@ -298,6 +298,16 @@ class SQLiteIssueFixture:
         with self._lock:
             return int(self._connection.execute("SELECT COUNT(*) FROM fixture_notes").fetchone()[0])
 
+    def list_issue_ids(self, *, limit: int = 200) -> list[str]:
+        """Seeded issue IDs, for the control UI's target picker. Read-only."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT issue_id FROM fixture_issues ORDER BY issue_id LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+            return [row["issue_id"] for row in rows]
+
     def close(self) -> None:
         with self._lock:
             self._connection.close()

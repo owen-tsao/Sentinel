@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 
 import { useControl } from "@/components/control-provider";
 import { Button } from "@/components/ui/button";
+import { Chip, Ticket, TicketFacts, TicketFoot, TicketHead, TicketSeal } from "@/components/ui/ticket";
 import {
   adjustProposal,
   confirmProposal,
@@ -14,11 +15,9 @@ import {
 } from "@/lib/control-api";
 import type { TaskProposalResponse } from "@/lib/control-types";
 
-const sectionLabelClass =
-  "text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--faint)]";
-
 /**
- * The compact confirmation for an agent-proposed task.
+ * The compact confirmation for an agent-proposed task, rendered as the ticket
+ * so the focus slot looks the same before and after activation.
  *
  * Everything shown comes from the server-stored draft. The Activate request
  * sends only the draft ID (plus the active task ID as a stale-view guard), so
@@ -67,91 +66,82 @@ export function ProposedTaskCard({
   }
 
   return (
-    <section
-      aria-labelledby="proposed-task-heading"
-      className="rounded-[5px] border-2 border-black bg-[var(--main-soft)] p-5 shadow-[4px_4px_0_0_#000]"
-    >
-      <p className={sectionLabelClass}>Proposed task</p>
-      <h2 id="proposed-task-heading" className="mt-2 text-[17px] font-semibold leading-6">
-        {proposal.objective}
-      </h2>
-      <p className="mt-1 text-[11px] leading-5 text-[var(--subtext)]">
-        Proposed by the agent {relativeTime(proposal.created_at, now)}; Sentinel has
-        not verified this is your request.
-        {proposal.proposal_number > 1
-          ? ` Proposal ${proposal.proposal_number} this session.`
-          : ""}
-      </p>
+    <Ticket className="flex-1" aria-labelledby="proposed-task-heading">
+      <TicketHead
+        eyebrow="Proposed task · Awaiting your confirmation"
+        title={proposal.objective}
+        titleId="proposed-task-heading"
+        meta={
+          <>
+            Proposed by the agent {relativeTime(proposal.created_at, now)}; Sentinel has
+            not verified this is your request.
+            {proposal.proposal_number > 1
+              ? ` Proposal ${proposal.proposal_number} this session.`
+              : ""}
+          </>
+        }
+        seal={<TicketSeal state="Proposed" mark="dot" />}
+      />
 
-      <dl className="mt-4 divide-y divide-[rgba(0,0,0,0.12)] text-[11px]">
-        <Fact label="Operation" value={proposal.operation === "write" ? "Read and add notes" : "Read only"} />
-        <div className="py-2.5">
-          <dt className="text-[var(--subtext)]">
-            Issues ({proposal.exact_targets.length})
-          </dt>
-          <dd className="mt-1.5 flex flex-wrap gap-1.5">
-            {proposal.exact_targets.map((target) => (
-              <span
-                key={target}
-                className="rounded-[3px] border border-black/25 bg-white px-1.5 py-0.5 font-mono text-[11px]"
-              >
-                {target}
+      <TicketFacts
+        items={[
+          {
+            label: "Operation",
+            value: proposal.operation === "write" ? "Read and add notes" : "Read only",
+          },
+          {
+            label: `Issues (${proposal.exact_targets.length})`,
+            value: (
+              <span className="flex flex-wrap gap-y-1">
+                {proposal.exact_targets.map((target) => (
+                  <Chip key={target}>{target}</Chip>
+                ))}
               </span>
-            ))}
-          </dd>
-        </div>
-        <Fact label="Environment" value={proposal.environment} />
-        <Fact label="Allowed changes" value={proposal.allowed_effects.join(", ")} />
-        <Fact label="Task expires" value={`${proposal.task_duration_minutes} minutes after activation`} />
-      </dl>
+            ),
+          },
+          { label: "Environment", value: proposal.environment },
+          { label: "Allowed changes", value: proposal.allowed_effects.join(", ") },
+          {
+            label: "Task expires",
+            value: `${proposal.task_duration_minutes} minutes after activation`,
+          },
+        ]}
+      />
 
       {proposal.replaces_active_task ? (
-        <p className="mt-3 text-[11px] leading-5 font-medium">
+        <p className="mt-3 text-[13px] font-semibold leading-5">
           Activating replaces your current task; its pending approvals will be cleared.
         </p>
       ) : null}
 
       {error ? (
-        <p role="alert" className="mt-3 text-[11px] leading-5 text-[#8a1c1c]">
+        <p role="alert" className="mt-3 rounded-[6px] border-[1.5px] border-black bg-white px-3 py-2 text-[12px] leading-5 text-[var(--danger)]">
           {error}
         </p>
       ) : null}
 
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        <Button size="sm" disabled={pending !== null} onClick={() => run("activate")}>
-          {pending === "activate" ? "Activating…" : "Activate"}
-        </Button>
-        <Button
-          size="sm"
-          variant="secondary"
-          disabled={pending !== null}
-          onClick={() => run("adjust")}
-        >
-          {pending === "adjust" ? "Opening…" : "Adjust in full form"}
-        </Button>
-        <button
-          type="button"
-          disabled={pending !== null}
-          onClick={() => run("dismiss")}
-          className="link-draw text-[11px] text-[var(--subtext)] hover:text-[var(--ink)] disabled:opacity-60"
-        >
-          {pending === "dismiss" ? "Dismissing…" : "Dismiss"}
-        </button>
-      </div>
-      <p className="mt-3 text-[10px] leading-4 text-[var(--faint)]">
-        This proposal grants nothing until you activate it. Expires{" "}
-        {relativeTime(proposal.proposal_expires_at, now, { future: true })}.
-      </p>
-    </section>
-  );
-}
-
-function Fact({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between gap-5 py-2.5">
-      <dt className="text-[var(--subtext)]">{label}</dt>
-      <dd className="font-medium">{value}</dd>
-    </div>
+      <TicketFoot
+        note={
+          <>
+            This proposal grants nothing until you activate it. Expires{" "}
+            {relativeTime(proposal.proposal_expires_at, now, { future: true })}.
+          </>
+        }
+        actions={
+          <>
+            <Button variant="quiet" disabled={pending !== null} onClick={() => run("dismiss")}>
+              {pending === "dismiss" ? "Dismissing…" : "Dismiss"}
+            </Button>
+            <Button variant="secondary" disabled={pending !== null} onClick={() => run("adjust")}>
+              {pending === "adjust" ? "Opening…" : "Adjust in full form"}
+            </Button>
+            <Button variant="raised" disabled={pending !== null} onClick={() => run("activate")}>
+              {pending === "activate" ? "Activating…" : "Activate"}
+            </Button>
+          </>
+        }
+      />
+    </Ticket>
   );
 }
 

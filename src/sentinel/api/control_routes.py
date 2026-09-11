@@ -31,6 +31,7 @@ from sentinel.api.control_schemas import (
     ProposalConfirmRequest,
     ProposalConfirmResponse,
     ProposalDismissResponse,
+    TargetSuggestionsResponse,
 )
 from sentinel.api.schemas import EvaluateResponse
 from sentinel.approval import PendingApproval
@@ -68,6 +69,7 @@ def build_control_router(
     ] = None,
     dismiss_proposal: Optional[Callable[[str], ProposalDismissResponse]] = None,
     adjust_proposal: Optional[Callable[[str], ProposalAdjustResponse]] = None,
+    target_suggestions: Optional[Callable[[], TargetSuggestionsResponse]] = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/control", tags=["control"])
 
@@ -148,6 +150,17 @@ def build_control_router(
         _authenticate(request, config, pairing)
         response.headers["Cache-Control"] = "no-store"
         return active_authority()
+
+    @router.get("/targets", response_model=TargetSuggestionsResponse)
+    def get_target_suggestions(
+        request: Request,
+        response: Response,
+    ) -> TargetSuggestionsResponse:
+        _authenticate(request, config, pairing)
+        response.headers["Cache-Control"] = "no-store"
+        if target_suggestions is None:
+            return TargetSuggestionsResponse(workspace_root="/workspace", paths=[])
+        return target_suggestions()
 
     @router.get("/proposals/pending", response_model=PendingProposalResponse)
     def get_pending_proposal(

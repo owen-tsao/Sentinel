@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import uvicorn
@@ -19,18 +22,64 @@ if os.environ.get("SENTINEL_ENABLE_ML", "false") != "false":
 
 from sentinel.api.main import create_app  # noqa: E402
 from sentinel.control import ControlConfig  # noqa: E402
+from sentinel.control.pairing import (  # noqa: E402
+    AuthenticatedControlSession,
+    IssuedControlSession,
+    PairingError,
+    PairingService,
+)
 from sentinel.decision.policy import parse_policy_profile  # noqa: E402
 from sentinel.execution import DockerExecutor  # noqa: E402
 
 API_HOST = "127.0.0.1"
 API_PORT = 8000
-UI_ORIGIN = "http://127.0.0.1:3000"
+# Must match the port Playwright serves the UI on; the control API rejects
+# every other browser origin by design. Override with SENTINEL_WEB_PORT.
+UI_ORIGIN = f"http://127.0.0.1:{os.environ.get('SENTINEL_WEB_PORT', '3000')}"
 PAIRING_CAPABILITY = "playwright-real-control-" + ("a" * 40)
+# Manual walkthroughs: keep the fixed link reusable so several browsers (a
+# person and an automated one) can pair with the same running backend without
+# restarting it. The real PairingService is untouched; this only applies to
+# this dev script and only when asked for.
+REUSABLE_PAIRING = os.environ.get("SENTINEL_DEV_REUSABLE_PAIRING") == "1"
 FIXTURE_ROOT = ROOT / "web" / "test-results" / "real-control"
 REPOSITORY = FIXTURE_ROOT / "sample-repository"
 BUILD_DIRECTORY = REPOSITORY / "build"
 MARKER = BUILD_DIRECTORY / "result.txt"
 EXECUTOR_IMAGE = "sentinel-executor:local"
+
+
+class _ReusablePairingService(PairingService):
+    """Dev-only: the fixed capability pairs any number of times and every
+    session it issues stays valid until the process exits. Never use outside
+    this script; the capability here is public by construction anyway."""
+
+    def __init__(self, capability: str) -> None:
+        super().__init__(capability, pairing_ttl=timedelta(days=1))
+        self._capability = capability
+        self._sessions: dict[str, datetime] = {}
+
+    def exchange(self, capability: str) -> IssuedControlSession:
+        if not hmac.compare_digest(capability, self._capability):
+            raise PairingError("control:pairing_invalid_or_expired")
+        token = secrets.token_urlsafe(32)
+        now = datetime.now(timezone.utc)
+        self._sessions[token] = now
+        return IssuedControlSession(token=token, absolute_expires_at=now + timedelta(days=1))
+
+    def authenticate(self, session_token: str | None) -> AuthenticatedControlSession:
+        created = self._sessions.get(session_token or "")
+        if created is None:
+            raise PairingError("control:session_invalid_or_expired")
+        now = datetime.now(timezone.utc)
+        return AuthenticatedControlSession(
+            created_at=created,
+            last_seen_at=now,
+            absolute_expires_at=created + timedelta(days=1),
+        )
+
+    def logout(self, session_token: str | None) -> bool:
+        return self._sessions.pop(session_token or "", None) is not None
 
 
 def _policy_profile():
@@ -127,7 +176,16 @@ def run() -> None:
             ui_origin=UI_ORIGIN,
             demo_mode=True,
         ),
+        pairing_service=(
+            _ReusablePairingService(PAIRING_CAPABILITY) if REUSABLE_PAIRING else None
+        ),
     )
+    if REUSABLE_PAIRING:
+        print(
+            "DEV: reusable pairing enabled; the fixed link pairs any browser until "
+            "this process exits.",
+            flush=True,
+        )
     uvicorn.run(app, host=API_HOST, port=API_PORT)
 
 

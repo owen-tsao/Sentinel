@@ -140,6 +140,34 @@ def state_file_bytes(database: Path) -> bytes:
 
 
 class ControlContractTests(unittest.TestCase):
+    def test_target_suggestions_list_workspace_paths_as_container_paths(self) -> None:
+        with configured_control() as (client, app, _):
+            workspace = Path(app.state.supervision_binding.workspace.path)
+            (workspace / "api.py").write_text("print('hi')\n")
+            (workspace / "build").mkdir()
+            (workspace / "build" / "result.txt").write_text("x")
+            (workspace / "node_modules").mkdir()
+            (workspace / "node_modules" / "junk.js").write_text("x")
+            (workspace / ".env").write_text("SECRET=1")
+
+            unpaired = client.get("/control/targets", headers={"Origin": UI_ORIGIN})
+            headers = pair(client)
+            response = client.get("/control/targets", headers=headers)
+
+        self.assertEqual(unpaired.status_code, 401)
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["workspace_root"], "/workspace")
+        self.assertFalse(body["truncated"])
+        paths = {item["path"]: item["kind"] for item in body["paths"]}
+        self.assertEqual(paths["/workspace/api.py"], "file")
+        self.assertEqual(paths["/workspace/build"], "directory")
+        self.assertEqual(paths["/workspace/build/result.txt"], "file")
+        # Hidden entries and dependency folders are noise in a target picker.
+        self.assertNotIn("/workspace/.env", paths)
+        self.assertNotIn("/workspace/.git", paths)
+        self.assertFalse(any(path.startswith("/workspace/node_modules") for path in paths))
+
     def test_unpaired_browser_cannot_draft_activate_or_query_audit(self) -> None:
         with configured_control() as (client, _, _):
             draft = client.post(
