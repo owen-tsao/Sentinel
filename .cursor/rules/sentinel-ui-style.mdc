@@ -1,0 +1,90 @@
+---
+description: Sentinel control center visual style (cream canvas, one framed blue ticket, quiet white panels) and composition rules for all web UI work
+globs: web/**
+alwaysApply: false
+---
+
+# Sentinel UI Style
+
+Declared September 10, 2026 after the Week 13 UI audit and nine mockup rounds
+(`web/test-results/mockups/overview-v9.html` is the approved reference). This
+is the project-declared style under Owen's `my-ui-standard` skill; that skill's
+composition principles (emphasis budget, layout follows the job, alignment)
+still apply and win over anything here.
+
+## Style: cream canvas, one framed ticket, quiet panels
+
+- **Canvas** is cream `#fff2e9` (sampled from the reference apps). Panels are
+  white. That contrast is what makes panels read as objects, so never put a
+  white floor behind white panels.
+- **The ticket is the one loud element.** The current task (or the pending
+  proposal) is a blue `#88aaee` "authorization ticket": 2px black frame,
+  6px hard offset shadow, half-circle notches punched into both sides with the
+  frame tracing the U. Nothing else on a page has a shadow or a coloured fill.
+  Two tickets, or a ticket plus a raised button outside it, is a bug.
+- **Panels** (`Panel`) are white, 1.5px black border, 12px radius, no shadow.
+  They hold genuinely separate objects: the enforcement grid, the decision
+  log, a form, a dialog. Rows live inside panels; a panel never wraps the page.
+- **Structure lines** are 1.5px black (sidebar edge, header edge, panel
+  borders). Hairlines inside panels are `--line` (warm grey). No other border
+  weights.
+- **Colour is signal only** outside the ticket: 6px dots in green / amber /
+  red / black for ok / warn / off / neutral. No tinted badges, no tinted icon
+  tiles, no accent eyebrows.
+- **Buttons:** raised (`variant="raised"`: white, 2px black, 3px offset
+  shadow) is for the single action inside the ticket. Everything else is
+  `secondary` (1px outline) or a quiet text link with the blue underline draw.
+- **Type:** Geist (via `next/font/google`) and Geist Mono. Five sizes: 10–11px
+  eyebrow (uppercase, +0.08–0.12em), 12px meta, 13px body, 14px emphasis,
+  24px ticket title (−0.03em). Weights 400/500/600. IDs, tool names, times,
+  and chips in mono.
+- **Icons:** Lucide, 15–16px, stroke 1.5–1.6, no containers.
+- **Motion:** none decorative. Raised button presses down on hover/active;
+  colour transitions 120–180ms; respect `prefers-reduced-motion`.
+
+## Composition by page
+
+- **Overview** is two columns (~68/32 on desktop). Left: eyebrow + workspace
+  name, the ticket, then "Enforcement" as a 2×2 panel. Right: "Recent
+  decisions" as a vertical log panel. Both column headers are the same height
+  and both columns end on the same line: the left column sets the height, the
+  log fills it and scrolls internally. Attention (a waiting write) lives in
+  the ticket footer, not as a separate strip.
+- **Settings** is grouped sections: left section nav, then title → one line →
+  rows separated by hairlines inside one white panel per group. No page hero.
+- **Tasks** is two columns: the form panel on the left (goal, then two open
+  groups, then a collapsed "Advanced"), the same `ContractTicket` on the right
+  mirroring the form live (white while draft/ready, blue once active). The one
+  raised action is "Confirm task settings" at the form foot while drafting,
+  then "Activate task" inside the ticket once confirmed. The activation
+  receipt is the same ticket geometry, never a plain dialog. Allowed changes
+  is never a field: it is always the chosen operation.
+  The page is one screen tall: the form panel scrolls inside with its footer
+  pinned, and both columns end on the same line. Before anything is drafted
+  the panel is filled with the three steps, not left blank under the goal box.
+  A half-filled draft survives switching tabs (kept per browser tab); a
+  confirmed copy comes back as an unlocked draft, never as "Ready", because
+  the server-side copy may no longer exist.
+  Motion is reserved for the one moment authority changes: on activation the
+  ticket paints blue left to right, then the receipt rises; both honour
+  reduced motion. Nothing else on the page animates.
+- **Approvals / Activity:** master-detail. List panel (rows separated by
+  hairlines, one dot per row for state) beside a detail panel; both end on
+  the same line and scroll internally. With nothing to show, one `Empty`
+  panel fills the space instead of a short strip.
+- Pickers over typing: where the server knows the valid values (workspace
+  paths, fixture issue IDs, the fixed environment) offer them; still let the
+  user type, and normalise what they type rather than rejecting it later.
+- Context lives in one place. No persistent banner restating the empty state;
+  regions with nothing to say are not rendered.
+- Use the primitives in `web/src/components/ui/ticket.tsx` (`Ticket`,
+  `TicketFacts`, `Chip`) and `web/src/components/ui/layout.tsx` (`Eyebrow`,
+  `PageHeader`, `SectionHeader`, `Panel`, `StatusDot`, `KeyValueList`); do not
+  hand-roll ticket or panel chrome in pages.
+
+❌ White page with white panels; a raised shadow on every button; a tinted
+badge per status; the task in a plain bordered card; a log that runs to the
+viewport while the panel beside it stops short.
+✅ Cream page, one blue punched ticket with the single raised action inside
+it, white 1.5px-black panels for enforcement and the log, both ending on the
+same line, colour only in 6px dots.

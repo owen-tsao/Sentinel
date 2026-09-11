@@ -118,8 +118,10 @@ test("overview shows the proposed task with every fact and grants nothing until 
   await expect(card.getByRole("button", { name: "Adjust in full form" })).toBeEnabled();
   await expect(card.getByRole("button", { name: "Dismiss" })).toBeEnabled();
   await expect(page.getByText("Activating replaces your current task")).toHaveCount(0);
-  // Nothing is active yet: the overview must not claim an active task.
-  await expect(page.getByRole("heading", { name: "No task is active" })).toBeVisible();
+  // Nothing is active yet: the proposal takes the focus slot and the overview
+  // must not claim a current task anywhere.
+  await expect(page.getByText("Current task")).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Create replacement task" })).toHaveCount(0);
 });
 
 test("one click activates the proposal by draft ID only and the card disappears", async ({
@@ -140,8 +142,11 @@ test("one click activates the proposal by draft ID only and the card disappears"
 
   await page.getByRole("button", { name: "Activate" }).click();
 
-  await expect(page.getByRole("region", { name: proposal.objective })).toHaveCount(0);
-  await expect(page.getByText(proposal.objective)).toBeVisible();
+  // The proposal is gone and the same objective now reads as the current task.
+  await expect(page.getByText("Proposed task")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Activate" })).toHaveCount(0);
+  const focus = page.getByRole("region", { name: proposal.objective });
+  await expect(focus).toContainText("Current task");
   expect(confirmBody).toEqual({ expected_active_task_id: null });
 });
 
@@ -258,6 +263,8 @@ test("adjust in full form consumes the draft and prefills the reviewed task form
   await expect(page).toHaveURL(/\/tasks$/);
   await expect(page.getByText(/Prefilled from the agent's proposal/)).toBeVisible();
   await expect(page.getByText("Allowed fixture issues")).toBeVisible();
-  await expect(page.locator("#contract-exact-targets")).toHaveValue("SPIKE-1\nSPIKE-2");
+  // Targets are chips now, each removable on its own.
+  await expect(page.getByRole("button", { name: "Remove SPIKE-1" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Remove SPIKE-2" })).toBeVisible();
   await expect(page.getByRole("region", { name: proposal.objective })).toHaveCount(0);
 });

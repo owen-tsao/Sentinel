@@ -51,6 +51,11 @@ class ControlRuntimeStatus(StrictControlModel):
     rules: ControlCheckResponse
     demo_mode: bool = False
     sample_repository: Optional[str] = None
+    # Fixed at process startup; drafts for any other environment are rejected,
+    # so the UI should offer only this one.
+    execution_environment: Optional[
+        Literal["sandbox", "dev", "staging", "production"]
+    ] = None
 
 
 class AgentConnectionResponse(StrictControlModel):
@@ -195,6 +200,21 @@ class ContractDraftResponse(StrictControlModel):
     suggestions: list[DraftSuggestionResponse]
     questions: list[DraftQuestionResponse]
     proposed_contract: Optional[ContractRecord] = None
+
+
+class TargetSuggestion(StrictControlModel):
+    path: str
+    kind: Literal["file", "directory"]
+
+
+class TargetSuggestionsResponse(StrictControlModel):
+    """Paths the task form can offer. Suggestions only: the server still
+    validates every accepted target, so an omitted path is never a denial."""
+
+    workspace_root: str
+    paths: list[TargetSuggestion]
+    truncated: bool = False
+    fixture_issues: list[str] = Field(default_factory=list)
 
 
 class ContractActivationRequest(StrictControlModel):

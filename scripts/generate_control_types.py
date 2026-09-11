@@ -28,6 +28,7 @@ from sentinel.api.control_schemas import (  # noqa: E402
     ProposalConfirmRequest,
     ProposalConfirmResponse,
     ProposalDismissResponse,
+    TargetSuggestionsResponse,
 )
 
 OUTPUT = ROOT / "web" / "src" / "lib" / "control-types.ts"
@@ -48,6 +49,7 @@ MODELS = (
     ProposalConfirmResponse,
     ProposalDismissResponse,
     ProposalAdjustResponse,
+    TargetSuggestionsResponse,
 )
 
 

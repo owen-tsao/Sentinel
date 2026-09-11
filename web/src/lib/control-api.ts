@@ -14,15 +14,39 @@ import type {
   ProposalConfirmRequest,
   ProposalConfirmResponse,
   ProposalDismissResponse,
+  TargetSuggestionsResponse,
 } from "@/lib/control-types";
 
-const API_ORIGIN =
+export const API_ORIGIN =
   process.env.NEXT_PUBLIC_SENTINEL_API_ORIGIN ?? "http://127.0.0.1:8000";
 
+/** Host shown in the sidebar footer so it is obvious which local process the UI talks to. */
+export const API_HOST = API_ORIGIN.replace(/^https?:\/\//, "");
+
 export class ControlApiError extends Error {
-  constructor(readonly status: number) {
+  constructor(
+    readonly status: number,
+    /** Human-readable reason from the server's `detail`, when it sent one. */
+    readonly detail: string | null = null,
+  ) {
     super(`Control API returned ${status}`);
   }
+}
+
+/** FastAPI puts the reason in `detail`, either as a string or as `{ message }`. */
+async function readErrorDetail(response: Response): Promise<string | null> {
+  try {
+    const body = (await response.json()) as { detail?: unknown };
+    const detail = body?.detail;
+    if (typeof detail === "string") return detail;
+    if (detail && typeof detail === "object" && "message" in detail) {
+      const message = (detail as { message?: unknown }).message;
+      return typeof message === "string" ? message : null;
+    }
+  } catch {
+    // Non-JSON error body; the status code is all we have.
+  }
+  return null;
 }
 
 export async function controlRequest<T>(
@@ -39,7 +63,7 @@ export async function controlRequest<T>(
     },
   });
   if (!response.ok) {
-    throw new ControlApiError(response.status);
+    throw new ControlApiError(response.status, await readErrorDetail(response));
   }
   return (await response.json()) as T;
 }
@@ -61,6 +85,11 @@ export function draftContract(payload: ContractDraftRequest) {
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+/** Workspace paths and fixture issue IDs offered by the task form's target picker. */
+export function getTargetSuggestions() {
+  return controlRequest<TargetSuggestionsResponse>("/control/targets");
 }
 
 export function activateContract(payload: ContractActivationRequest) {

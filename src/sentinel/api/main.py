@@ -58,6 +58,8 @@ from sentinel.api.control_schemas import (
     ProposalConfirmRequest,
     ProposalConfirmResponse,
     ProposalDismissResponse,
+    TargetSuggestion,
+    TargetSuggestionsResponse,
     TaskProposalResponse,
 )
 from sentinel.approval import (
@@ -631,6 +633,7 @@ def create_app(
                     app,
                     draft_id,
                 ),
+                target_suggestions=lambda: _control_target_suggestions(app),
             )
         )
 
@@ -2142,6 +2145,7 @@ def _control_runtime_status(
         ),
         demo_mode=config.demo_mode,
         sample_repository=workspace_path if config.demo_mode else None,
+        execution_environment=app.state.execution_environment,
     )
 
 
@@ -2154,6 +2158,65 @@ def _query_control_audit(
         **filters,
     )
     return AuditListResponse(events=app.state.audit_store.query(query))
+
+
+# Directories that are noise in a target picker. Hidden entries are skipped too.
+_TARGET_SKIP_DIRS = frozenset(
+    {"node_modules", "__pycache__", ".git", ".venv", "venv", "dist", "build_cache"}
+)
+_TARGET_MAX_ENTRIES = 400
+_TARGET_MAX_DEPTH = 6
+
+
+def _control_target_suggestions(app: FastAPI) -> TargetSuggestionsResponse:
+    """List reviewed-workspace paths as the agent would name them.
+
+    The host workspace is mounted at ``execution_cwd`` inside the executor, so
+    ``<workspace>/api.py`` is offered as ``/workspace/api.py``. This is a
+    convenience listing only: accepted targets are still validated on save.
+    """
+
+    root = Path(app.state.supervision_binding.workspace.path)
+    container_root = app.state.execution_cwd
+    entries: list[TargetSuggestion] = []
+    truncated = False
+    for current, dirnames, filenames in os.walk(root, followlinks=False):
+        relative_dir = Path(current).relative_to(root)
+        depth = len(relative_dir.parts)
+        dirnames[:] = sorted(
+            name
+            for name in dirnames
+            if not name.startswith(".") and name not in _TARGET_SKIP_DIRS
+        )
+        if depth >= _TARGET_MAX_DEPTH:
+            dirnames[:] = []
+        for name in dirnames:
+            entries.append(
+                TargetSuggestion(
+                    path=posixpath.join(container_root, *relative_dir.parts, name),
+                    kind="directory",
+                )
+            )
+        for name in sorted(filenames):
+            if name.startswith("."):
+                continue
+            entries.append(
+                TargetSuggestion(
+                    path=posixpath.join(container_root, *relative_dir.parts, name),
+                    kind="file",
+                )
+            )
+        if len(entries) >= _TARGET_MAX_ENTRIES:
+            truncated = True
+            break
+    fixture = getattr(app.state, "mcp_fixture", None)
+    fixture_issues = fixture.list_issue_ids() if fixture is not None else []
+    return TargetSuggestionsResponse(
+        workspace_root=container_root,
+        paths=entries[:_TARGET_MAX_ENTRIES],
+        truncated=truncated,
+        fixture_issues=fixture_issues,
+    )
 
 
 def _write_pre_decision_audit(

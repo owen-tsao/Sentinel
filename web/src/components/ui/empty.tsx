@@ -2,12 +2,13 @@ import { cva, type VariantProps } from "class-variance-authority"
 
 import { cn } from "@/lib/utils"
 
+/** An empty state is a panel too: white, 1.5px black frame, centred copy. */
 function Empty({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="empty"
       className={cn(
-        "flex min-w-0 flex-1 flex-col items-center justify-center gap-5 text-balance border-y border-[var(--line)] bg-white p-8 text-center md:p-12",
+        "flex min-w-0 flex-1 flex-col items-center justify-center gap-5 text-balance rounded-[var(--radius-panel)] border-[1.5px] border-[var(--outline)] bg-[var(--paper)] p-8 text-center md:p-12",
         className
       )}
       {...props}
@@ -29,12 +30,13 @@ function EmptyHeader({ className, ...props }: React.ComponentProps<"div">) {
 }
 
 const emptyMediaVariants = cva(
-  "mb-2 flex shrink-0 items-center justify-center [&_svg]:pointer-events-none [&_svg]:shrink-0",
+  "mb-2 flex shrink-0 items-center justify-center text-[var(--ink)] [&_svg]:pointer-events-none [&_svg]:shrink-0",
   {
     variants: {
       variant: {
         default: "bg-transparent",
-        icon: "flex size-10 shrink-0 items-center justify-center rounded-full border border-[var(--line)] bg-[var(--canvas)] text-[var(--ink)] [&_svg:not([class*='size-'])]:size-4",
+        // Icons stand alone; no tinted tile behind them.
+        icon: "[&_svg:not([class*='size-'])]:size-4",
       },
     },
     defaultVariants: {
@@ -62,7 +64,7 @@ function EmptyTitle({ className, ...props }: React.ComponentProps<"h2">) {
   return (
     <h2
       data-slot="empty-title"
-      className={cn("text-[15px] font-semibold tracking-[-0.02em]", className)}
+      className={cn("text-[14px] font-semibold tracking-[-0.01em]", className)}
       {...props}
     />
   )

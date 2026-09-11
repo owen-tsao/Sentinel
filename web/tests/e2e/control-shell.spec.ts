@@ -93,11 +93,13 @@ test("pairs from the fragment, clears it, and renders server authority", async (
   // The pairing fragment must be stripped from the URL regardless of which
   // port the Playwright config serves the UI on.
   await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:\d+\/$/);
+  // Enforcement health is an inline status line, not a banner.
   await expect(
-    page.getByText(
-      "Agent enforcement is advisory · No mandatory agent connected.",
-    ),
-  ).toBeVisible();
+    page.getByRole("listitem").filter({ hasText: "Cursor agent" }),
+  ).toContainText("Waiting");
+  await expect(page.getByRole("listitem").filter({ hasText: "Hooks" })).toContainText(
+    "Not detected",
+  );
   await expect(
     page.getByRole("heading", {
       name: "Write exactly /workspace/build/result.txt.",

@@ -175,9 +175,7 @@ test("overview stays focused on the task and attention, not MCP detail", async (
   await installRoutes(page, { connected: true });
   await page.goto("/");
 
-  await expect(
-    page.getByText("Mandatory agent connection active · Cursor MCP shim connected. Only the fixture tool family is mandatory."),
-  ).toBeVisible();
+  await expect(page.getByText("Agent connected", { exact: true })).toBeVisible();
   await expect(page.getByRole("region", { name: "Agent coverage" })).toHaveCount(0);
   await expect(page.getByText("Fixture issue tools (MCP)")).toHaveCount(0);
 });
@@ -188,9 +186,7 @@ test("overview explains when no mandatory agent path is running", async ({
   await installRoutes(page, { connected: false });
   await page.goto("/settings");
 
-  await expect(
-    page.getByText("Agent enforcement is advisory · No mandatory agent connected."),
-  ).toBeVisible();
+  await expect(page.getByText("Agent enforcement advisory", { exact: true })).toBeVisible();
   await expect(
     page.getByText(/No mandatory agent path is running in this Sentinel process/),
   ).toBeVisible();

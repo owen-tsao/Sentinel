@@ -24,15 +24,13 @@ test("real browser control flow denies once, approves once, and proves audit ord
   test.setTimeout(90_000);
 
   await page.goto(`/#pair=${pairingCapability}`);
-  await expect(page).toHaveURL("http://127.0.0.1:3000/");
+  await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:\d+\/$/);
   await expect(
-    page.getByText(
-      "Agent enforcement is advisory · No mandatory agent connected.",
-    ),
+    page.getByText("Agent enforcement advisory", { exact: true }),
   ).toBeVisible();
-  await expect(page.getByText("Approval preference")).toBeVisible();
-  await expect(page.getByText("Workspace access")).toBeVisible();
-  await expect(page.getByText("Protected execution")).toBeVisible();
+  await expect(page.getByText("Current task")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "No task is active" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Create a task" })).toBeVisible();
 
   const status = await page.evaluate(async (origin) => {
     const response = await fetch(`${origin}/control/status`, {
@@ -62,7 +60,7 @@ test("real browser control flow denies once, approves once, and proves audit ord
     page.getByRole("link", { name: "Tasks", exact: true }).first(),
   ).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(page).toHaveURL("http://127.0.0.1:3000/tasks");
+  await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:\d+\/tasks$/);
   await page.getByLabel("Task goal").fill(rawPrompt);
   await page.getByRole("button", { name: "Build task settings" }).click();
   await expect(
@@ -82,9 +80,6 @@ test("real browser control flow denies once, approves once, and proves audit ord
       exact: true,
     })
     .click();
-  for (const checkbox of await page.getByLabel("Reviewed").all()) {
-    await checkbox.check();
-  }
   await expectAccessiblePage(page);
   await captureScreenshot(page, "02-tasks-reviewed-draft.png");
 
@@ -93,7 +88,7 @@ test("real browser control flow denies once, approves once, and proves audit ord
       response.url() === `${apiOrigin}/control/contracts/draft` &&
       response.request().method() === "POST",
   );
-  await page.getByRole("button", { name: "Save task settings" }).click();
+  await page.getByRole("button", { name: "Confirm task settings" }).click();
   const proposedResponse = await proposedResponsePromise;
   const proposedBody = await proposedResponse.json();
   expect(proposedBody.proposed_contract.status).toBe("proposed");
@@ -116,7 +111,7 @@ test("real browser control flow denies once, approves once, and proves audit ord
   ).toBeVisible();
   await page.getByRole("button", { name: "Done" }).click();
   await expect(page.getByText("Active task").last()).toBeVisible();
-  await expect(page.getByText("Approval mode is on.")).toBeVisible();
+  await expect(page.getByText(/^Task active · expires /)).toBeVisible();
 
   const deniedPayload = actionPayload(active, "playwright-denied");
   const deniedRequest = await request.post(`${apiOrigin}/execute`, {

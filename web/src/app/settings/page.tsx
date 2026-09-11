@@ -6,16 +6,12 @@ import { useMemo, useRef, useState } from "react";
 import { AgentCoverage } from "@/components/agent-coverage";
 import { GitHubIcon, LinearIcon, SlackIcon } from "@/components/brand-icons";
 import { useControl } from "@/components/control-provider";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Eyebrow, PageHeader, Panel, StatusDot, type StatusTone } from "@/components/ui/layout";
 import type { IntegrationStatusResponse } from "@/lib/control-types";
 import { cn } from "@/lib/utils";
 
-type SettingsSection =
-  | "general"
-  | "connections"
-  | "approvals"
-  | "workspace";
+type SettingsSection = "general" | "connections" | "approvals" | "workspace";
 
 const sections: Array<{ id: SettingsSection; label: string }> = [
   { id: "general", label: "General" },
@@ -45,6 +41,11 @@ const providers = [
   },
 ];
 
+/**
+ * Settings: grouped sections. A section nav on the left; each group on the
+ * right is title → one line → rows inside one white panel. Nothing here is
+ * loud: there is no primary action on a settings page.
+ */
 export default function SettingsPage() {
   const { status } = useControl();
   const [section, setSection] = useState<SettingsSection>("connections");
@@ -58,33 +59,14 @@ export default function SettingsPage() {
     );
   }, [query]);
 
-  function focusConnections() {
-    setSection("connections");
-    window.requestAnimationFrame(() => searchRef.current?.focus());
-  }
-
   return (
     <div>
-      <div className="flex flex-wrap items-end justify-between gap-6">
-        <div>
-          <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[#4f6fad]">
-            Settings
-          </p>
-          <h1 className="mt-2 text-[30px] font-semibold tracking-[-0.045em]">
-            Make Sentinel yours
-          </h1>
-          <p className="mt-2 max-w-2xl text-[13px] leading-6 text-[var(--subtext)]">
-            Manage connections, workspace access, and approval preferences in
-            one place.
-          </p>
-        </div>
-        <Button onClick={focusConnections}>View planned connections</Button>
-      </div>
+      <PageHeader eyebrow="Settings" title={status?.workspace.name ?? "Your workspace"} />
 
-      <div className="mt-10 grid gap-8 border-t border-[var(--line)] pt-6 lg:grid-cols-[190px_minmax(0,1fr)] lg:gap-11">
+      <div className="grid gap-7 lg:grid-cols-[180px_minmax(0,1fr)]">
         <nav
           aria-label="Settings sections"
-          className="flex overflow-x-auto border-b border-[var(--line)] pb-3 lg:flex-col lg:gap-1 lg:border-0 lg:pb-0"
+          className="flex gap-1 overflow-x-auto lg:flex-col"
         >
           {sections.map((item) => (
             <button
@@ -92,9 +74,8 @@ export default function SettingsPage() {
               type="button"
               aria-current={section === item.id ? "page" : undefined}
               className={cn(
-                "h-10 shrink-0 rounded-[5px] px-3 text-left text-[11px] text-[var(--subtext)] outline-none transition-colors hover:bg-[var(--main-faint)] hover:text-[var(--ink)] focus-visible:ring-2 focus-visible:ring-black",
-                section === item.id &&
-                  "bg-[var(--main-soft)] font-semibold text-[var(--ink)]",
+                "h-8 shrink-0 rounded-[7px] border-[1.5px] border-transparent px-2.5 text-left text-[13px] font-medium text-[var(--subtext)] outline-none transition-colors hover:bg-[var(--hover)] hover:text-[var(--ink)] focus-visible:ring-2 focus-visible:ring-black",
+                section === item.id && "border-[var(--outline)] bg-white text-[var(--ink)]",
               )}
               onClick={() => setSection(item.id)}
             >
@@ -103,7 +84,7 @@ export default function SettingsPage() {
           ))}
         </nav>
 
-        <div className="min-w-0">
+        <div className="flex min-w-0 flex-col gap-8">
           {section === "connections" ? (
             <ConnectionsSection
               query={query}
@@ -141,92 +122,89 @@ function ConnectionsSection({
   integration: IntegrationStatusResponse | null;
 }) {
   const agentConnected = integration?.agent.status === "connected";
+  const searching = Boolean(query.trim());
   return (
-    <section aria-labelledby="connections-heading">
-      <h2
-        id="connections-heading"
-        className="text-[19px] font-semibold tracking-[-0.025em]"
+    <>
+      <SettingsGroup
+        title="Connections"
+        description="The tools and agents Sentinel supervises. Connecting an account never grants an agent task authority."
+        aside={
+          <div className="relative w-full max-w-[260px]">
+            <Search
+              aria-hidden="true"
+              size={14}
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--faint)]"
+            />
+            <label htmlFor="connection-search" className="sr-only">
+              Search connections
+            </label>
+            <Input
+              ref={searchRef}
+              id="connection-search"
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search connections"
+              className="h-8 pl-8 text-[12px]"
+            />
+          </div>
+        }
       >
-        Connections
-      </h2>
-      <p className="mt-1 text-[11px] text-[var(--subtext)]">
-        Connect the tools and agents you want Sentinel to supervise.
-      </p>
+        {!searching ? (
+          <>
+            <GroupLabel>Connected</GroupLabel>
+            <ConnectionRow
+              icon={<ShieldCheck aria-hidden="true" size={16} strokeWidth={1.6} />}
+              name="Local control channel"
+              description="Protects this browser and workspace."
+              tone="ok"
+              status="Connected"
+            />
+            <ConnectionRow
+              icon={<Bot aria-hidden="true" size={16} strokeWidth={1.6} />}
+              name="Cursor (MCP)"
+              description={
+                integration
+                  ? agentConnected
+                    ? "Fixture issue tools are mediated by Sentinel; other actions stay advisory."
+                    : "Sentinel is ready for the MCP shim; it has not connected yet."
+                  : "External agent integrations remain advisory."
+              }
+              tone={integration ? (agentConnected ? "ok" : "warn") : "muted"}
+              status={integration ? (agentConnected ? "Connected" : "Waiting") : "Optional"}
+            />
+          </>
+        ) : null}
 
-      <div className="relative mt-6">
-        <Search
-          aria-hidden="true"
-          size={16}
-          className="pointer-events-none absolute left-3.5 top-3 text-[var(--faint)]"
-        />
-        <label htmlFor="connection-search" className="sr-only">
-          Search connections
-        </label>
-        <Input
-          ref={searchRef}
-          id="connection-search"
-          type="search"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search connections"
-          className="h-10 pl-10"
-        />
-      </div>
-
-      {!query.trim() ? (
-        <div className="mt-8">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--faint)]">
-            Connected
-          </p>
-          <ConnectionRow
-            icon={ShieldCheck}
-            name="Local control channel"
-            description="Protects this browser and workspace."
-            status="Connected"
-          />
-          <ConnectionRow
-            icon={Bot}
-            name="Cursor (MCP)"
-            description={
-              integration
-                ? agentConnected
-                  ? "Fixture issue tools are mediated by Sentinel; other actions stay advisory."
-                  : "Sentinel is ready for the MCP shim; it has not connected yet."
-                : "External agent integrations remain advisory."
-            }
-            status={
-              integration ? (agentConnected ? "Connected" : "Waiting") : "Optional"
-            }
-          />
-        </div>
-      ) : null}
-
-      {!query.trim() ? (
-        <div className="mt-10 border-t border-[var(--line)] pt-6">
-          <AgentCoverage integration={integration} />
-        </div>
-      ) : null}
-
-      <div className="mt-8">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--faint)]">
-          Available
-        </p>
+        <GroupLabel>Available · OAuth planned</GroupLabel>
         {visibleProviders.length ? (
           visibleProviders.map((provider) => (
-            <ProviderRow key={provider.name} {...provider} />
+            <ConnectionRow
+              key={provider.name}
+              icon={<provider.icon className="size-4" />}
+              name={provider.name}
+              description={provider.description}
+              tone="muted"
+              status="Not connected"
+            />
           ))
         ) : (
-          <p className="border-t border-[var(--line)] py-8 text-[11px] text-[var(--subtext)]">
+          <p className="px-5 py-6 text-[13px] text-[var(--subtext)]">
             No connections match your search.
           </p>
         )}
-      </div>
+      </SettingsGroup>
 
-      <p className="mt-8 border-t border-[var(--line)] pt-4 text-[10px] leading-5 text-[var(--subtext)]">
-        OAuth connections are planned, not active in this local build.
-        Connecting an account will never grant an agent task authority.
-      </p>
-    </section>
+      {!searching ? (
+        <SettingsGroup
+          title="Agent coverage"
+          description="What Sentinel can actually enforce, by action family."
+          labelledBy="agent-coverage-heading"
+        >
+          <AgentCoverage integration={integration} />
+        </SettingsGroup>
+      ) : null}
+    </>
   );
 }
 
@@ -236,11 +214,7 @@ function GeneralSection() {
       title="General"
       description="The defaults used across this local control center."
     >
-      <SettingRow
-        label="Interface"
-        description="Plain-language supervision"
-        value="On"
-      />
+      <SettingRow label="Interface" description="Plain-language supervision" value="On" />
       <SettingRow
         label="Learning model"
         description="Decisions use deterministic rules in this build"
@@ -280,23 +254,13 @@ function ApprovalsSection() {
   );
 }
 
-function WorkspaceSection({
-  name,
-  demoMode,
-}: {
-  name: string;
-  demoMode: boolean;
-}) {
+function WorkspaceSection({ name, demoMode }: { name: string; demoMode: boolean }) {
   return (
     <SettingsGroup
       title="Workspace access"
       description="Where the current Sentinel process is allowed to operate."
     >
-      <SettingRow
-        label="Current workspace"
-        description={name}
-        value="Selected"
-      />
+      <SettingRow label="Current workspace" description={name} value="Selected" />
       <SettingRow
         label="Workspace switching"
         description="Restart Sentinel to review a different project"
@@ -311,22 +275,39 @@ function WorkspaceSection({
   );
 }
 
+/** Title → one line → a white panel of rows. Optional aside (e.g. a search field) sits on the title line. */
 function SettingsGroup({
   title,
   description,
+  aside,
+  labelledBy,
   children,
 }: {
   title: string;
   description: string;
+  aside?: React.ReactNode;
+  labelledBy?: string;
   children: React.ReactNode;
 }) {
+  const headingId = labelledBy ?? `${title.toLowerCase().replaceAll(/\s+/g, "-")}-heading`;
   return (
-    <section>
-      <h2 className="text-[19px] font-semibold tracking-[-0.025em]">{title}</h2>
-      <p className="mt-1 text-[11px] text-[var(--subtext)]">{description}</p>
-      <div className="mt-6">{children}</div>
+    <section aria-labelledby={headingId}>
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h2 id={headingId} className="text-[14px] font-semibold tracking-[-0.01em]">
+            {title}
+          </h2>
+          <p className="mt-0.5 text-[12px] text-[var(--subtext)]">{description}</p>
+        </div>
+        {aside}
+      </div>
+      <Panel className="mt-3 divide-y divide-[var(--line)]">{children}</Panel>
     </section>
   );
+}
+
+function GroupLabel({ children }: { children: React.ReactNode }) {
+  return <Eyebrow className="px-5 pb-1 pt-3">{children}</Eyebrow>;
 }
 
 function SettingRow({
@@ -339,62 +320,39 @@ function SettingRow({
   value: string;
 }) {
   return (
-    <div className="flex min-h-16 items-center justify-between gap-6 border-t border-[var(--line)]">
+    <div className="flex min-h-[56px] items-center justify-between gap-6 px-5 py-3">
       <div>
-        <p className="text-[12px] font-medium">{label}</p>
-        <p className="mt-0.5 text-[10px] text-[var(--subtext)]">
-          {description}
-        </p>
+        <p className="text-[13px] font-medium">{label}</p>
+        <p className="mt-0.5 text-[12px] text-[var(--subtext)]">{description}</p>
       </div>
-      <span className="shrink-0 text-[11px] text-[var(--subtext)]">{value}</span>
+      <span className="shrink-0 text-[12px] text-[var(--subtext)]">{value}</span>
     </div>
   );
 }
 
 function ConnectionRow({
-  icon: Icon,
+  icon,
   name,
   description,
+  tone,
   status,
 }: {
-  icon: typeof Bot;
+  icon: React.ReactNode;
   name: string;
   description: string;
+  tone: StatusTone;
   status: string;
 }) {
   return (
-    <div className="grid min-h-[68px] grid-cols-[42px_minmax(0,1fr)_auto] items-center gap-3.5 border-t border-[var(--line)]">
-      <div className="grid size-[34px] place-items-center rounded-[5px] border border-[rgba(136,170,238,0.55)] bg-[var(--main-soft)] text-[#294d91]">
-        <Icon aria-hidden="true" size={16} />
+    <div className="grid min-h-[56px] grid-cols-[16px_minmax(0,1fr)_auto] items-center gap-3.5 px-5 py-3">
+      <span className="text-[var(--ink)]">{icon}</span>
+      <div className="min-w-0">
+        <p className="text-[13px] font-medium">{name}</p>
+        <p className="mt-0.5 text-[12px] text-[var(--subtext)]">{description}</p>
       </div>
-      <div>
-        <p className="text-[12px] font-medium">{name}</p>
-        <p className="mt-0.5 text-[10px] text-[var(--subtext)]">
-          {description}
-        </p>
-      </div>
-      <span className="text-[10px] font-medium text-[#4f6fad]">{status}</span>
-    </div>
-  );
-}
-
-function ProviderRow({
-  name,
-  description,
-  icon: Icon,
-}: (typeof providers)[number]) {
-  return (
-    <div className="grid min-h-[68px] grid-cols-[42px_minmax(0,1fr)_auto] items-center gap-3.5 border-t border-[var(--line)]">
-      <div className="grid size-[34px] place-items-center rounded-[5px] border border-[rgba(136,170,238,0.55)] bg-[var(--main-soft)] text-[#294d91]">
-        <Icon className="size-4" />
-      </div>
-      <div>
-        <p className="text-[12px] font-medium">{name}</p>
-        <p className="mt-0.5 text-[10px] text-[var(--subtext)]">
-          {description}
-        </p>
-      </div>
-      <span className="text-[10px] text-[var(--subtext)]">OAuth planned</span>
+      <StatusDot tone={tone} className="text-[12px] text-[var(--subtext)]">
+        {status}
+      </StatusDot>
     </div>
   );
 }

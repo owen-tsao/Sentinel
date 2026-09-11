@@ -2,6 +2,7 @@ import * as React from "react"
 
 import { cn } from "@/lib/utils"
 
+/** Same chrome as `Panel` in layout.tsx: white, 1.5px black frame, no shadow. */
 const Card = React.forwardRef<
   HTMLDivElement,
   React.HTMLAttributes<HTMLDivElement>
@@ -9,7 +10,7 @@ const Card = React.forwardRef<
   <div
     ref={ref}
     className={cn(
-      "border-y border-[var(--line)] bg-white text-[var(--ink)]",
+      "rounded-[var(--radius-panel)] border-[1.5px] border-[var(--outline)] bg-[var(--paper)] text-[var(--ink)]",
       className
     )}
     {...props}
@@ -35,7 +36,7 @@ const CardTitle = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <h2
     ref={ref}
-    className={cn("font-semibold leading-none tracking-[-0.02em]", className)}
+    className={cn("text-[14px] font-semibold leading-none tracking-[-0.01em]", className)}
     {...props}
   />
 ))
@@ -47,7 +48,7 @@ const CardDescription = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <div
     ref={ref}
-    className={cn("text-[13px] leading-5 text-[var(--subtext)]", className)}
+    className={cn("text-[12px] leading-5 text-[var(--subtext)]", className)}
     {...props}
   />
 ))

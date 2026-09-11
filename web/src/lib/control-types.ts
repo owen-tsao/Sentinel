@@ -135,6 +135,7 @@ export type ControlRuntimeStatus = {
   rules: ControlCheckResponse;
   demo_mode?: boolean;
   sample_repository?: string | null;
+  execution_environment?: "sandbox" | "dev" | "staging" | "production" | null;
 };
 
 export type ControlWorkspaceResponse = {
@@ -225,6 +226,11 @@ export type ProviderScope = {
   credential_principal_id: string;
   actor_id?: string | null;
   adapter_id: string;
+};
+
+export type TargetSuggestion = {
+  path: string;
+  kind: "file" | "directory";
 };
 
 export type TaskProposalResponse = {
@@ -326,4 +332,11 @@ export type ProposalAdjustResponse = {
   draft_id: string;
   raw_prompt: string;
   accepted_contract: AcceptedContractDraft;
+};
+
+export type TargetSuggestionsResponse = {
+  workspace_root: string;
+  paths: Array<TargetSuggestion>;
+  truncated?: boolean;
+  fixture_issues?: Array<string>;
 };

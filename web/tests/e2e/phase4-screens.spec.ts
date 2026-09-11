@@ -79,40 +79,41 @@ async function installBaseRoutes(
   );
 }
 
-test("overview renders authoritative workspace settings and demo boundary", async ({
+test("overview shows the active task as the flagged focus block, not a settings digest", async ({
   page,
 }) => {
   await installBaseRoutes(page, { authority: activeContract });
 
   await page.goto("/");
 
-  await expect(page.getByText("Approval preference")).toBeVisible();
-  await expect(page.getByText("Workspace access")).toBeVisible();
-  await expect(page.getByText("Protected execution")).toBeVisible();
-  await expect(page.getByText("Decision policy")).toBeVisible();
   await expect(page.getByText("sample-repository").first()).toBeVisible();
+  const focus = page.getByRole("region", {
+    name: "Write exactly /workspace/build/result.txt.",
+  });
+  await expect(focus).toBeVisible();
+  await expect(focus).toContainText("Current task");
+  await expect(focus).toContainText("Approval mode is on.");
+  await expect(focus.getByText("Allowed", { exact: true })).toBeVisible();
+  await expect(focus.getByText("Environment", { exact: true })).toBeVisible();
+  await expect(focus.getByText("Expires", { exact: true })).toBeVisible();
   await expect(
-    page.getByRole("heading", {
-      name: "Write exactly /workspace/build/result.txt.",
-    }),
+    focus.getByRole("link", { name: "Create replacement task" }),
   ).toBeVisible();
-  await expect(
-    page.getByText(/actions routed through Sentinel are limited/i),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("link", { name: "Create replacement task" }),
-  ).toBeVisible();
+  await expect(page.getByText("Recent decisions")).toBeVisible();
+  // Settings live in one place; the overview does not restate them.
+  await expect(page.getByText("Approval preference")).toHaveCount(0);
+  await expect(page.getByText("Decision policy")).toHaveCount(0);
 });
 
-test("create task warning draws the blue underline on hover", async ({ page }) => {
+test("quiet links draw the blue underline on hover", async ({ page }) => {
   await installBaseRoutes(page);
   await page.goto("/");
 
-  const createTask = page.getByRole("link", { name: "Create task" });
-  await createTask.hover();
+  const openActivity = page.getByRole("link", { name: "Open activity" });
+  await openActivity.hover();
   await page.waitForTimeout(250);
 
-  const underline = await createTask.evaluate(
+  const underline = await openActivity.evaluate(
     (element) => getComputedStyle(element, "::after").transform,
   );
   expect(underline).not.toBe("matrix(0, 0, 0, 1, 0, 0)");
@@ -225,7 +226,9 @@ test("task review keeps proposal and activation as separate actions", async ({
   await page
     .getByLabel("Task goal")
     .fill("Create /workspace/build/result.txt in sandbox.");
-  await expect(page.getByText("Behind the contract")).toBeVisible();
+  // The ticket preview is present before anything is drafted; no dark teaser panel.
+  await expect(page.getByText("No task drafted")).toBeVisible();
+  await expect(page.getByText("Behind the contract")).toHaveCount(0);
   await page.getByRole("button", { name: "Build task settings" }).click();
 
   await expect(
@@ -236,6 +239,13 @@ test("task review keeps proposal and activation as separate actions", async ({
   ).toBeVisible();
   await expect(page.getByText("Setup progress")).toHaveCount(0);
   await expect(page.getByText("Suggested").first()).toBeVisible();
+  // Allowed changes is no longer a field: it is always the chosen operation.
+  await expect(page.getByLabel("Allowed changes")).toHaveCount(0);
+  // One confirm button replaces per-field review checkboxes; it stays disabled
+  // until every required answer is present.
+  const confirm = page.getByRole("button", { name: "Confirm task settings" });
+  await expect(page.getByLabel("Reviewed")).toHaveCount(0);
+  await expect(confirm).toBeDisabled();
   await page
     .getByLabel("If something goes wrong")
     .fill("Remove the exact created file.");
@@ -244,13 +254,27 @@ test("task review keeps proposal and activation as separate actions", async ({
     "Run a dry run first",
     "Yes — the agent must preview shell changes before applying them",
   );
-  // Only the five authority-granting fields carry a review checkbox now;
-  // advanced settings are accepted unless changed.
-  await expect(page.getByLabel("Reviewed")).toHaveCount(5);
-  for (const checkbox of await page.getByLabel("Reviewed").all()) {
-    await checkbox.check();
-  }
-  await page.getByRole("button", { name: "Save task settings" }).click();
+  await expect(confirm).toBeEnabled();
+
+  // Glancing at another tab must not throw away a half-filled contract: the
+  // draft is kept for this browser tab and restored on return.
+  await page.getByRole("link", { name: "Activity" }).click();
+  await expect(page).toHaveURL(/\/audit$/);
+  await page.getByRole("link", { name: "Tasks" }).click();
+  await expect(page.getByLabel("If something goes wrong")).toHaveValue(
+    "Remove the exact created file.",
+  );
+  await expect(
+    page.getByRole("button", { name: "Remove /workspace/build/result.txt" }),
+  ).toBeVisible();
+  await expect(confirm).toBeEnabled();
+
+  // The ticket preview mirrors the form live, before anything is saved.
+  const ticket = page.getByRole("region", {
+    name: "Write exactly /workspace/build/result.txt.",
+  });
+  await expect(ticket).toContainText("Draft");
+  await confirm.click();
 
   await expect(
     page.getByText(/cannot act until you activate this task/i),
@@ -258,12 +282,27 @@ test("task review keeps proposal and activation as separate actions", async ({
   await expect(
     page.getByRole("combobox", { name: "Operation", exact: true }),
   ).toBeDisabled();
-  await page
-    .getByRole("button", { name: "Activate task" })
-    .click();
+  await expect(ticket).toContainText("Ready");
+
+  // A confirmed copy lives on the server and may vanish (restart, expiry), so
+  // leaving and returning brings back an unlocked draft, never a stale "Ready".
+  await page.getByRole("link", { name: "Activity" }).click();
+  await expect(page).toHaveURL(/\/audit$/);
+  await page.getByRole("link", { name: "Tasks" }).click();
+  await expect(ticket).toContainText("Draft");
+  await expect(confirm).toBeEnabled();
+  await confirm.click();
+  await expect(ticket).toContainText("Ready");
+  await ticket.getByRole("button", { name: "Activate task" }).click();
   await expect(
     page.getByRole("heading", { name: "Contract active" }),
   ).toBeVisible();
+  // The paint-in is requested only on this transition and respects reduced motion.
+  await expect(ticket).toHaveAttribute("data-paint", "true");
+  const paintAnimation = await ticket
+    .locator(".ticket-fill")
+    .evaluate((el) => getComputedStyle(el, "::before").animationName);
+  expect(paintAnimation).toBe("none");
   await expect(page.getByText("sandbox", { exact: true }).last()).toBeVisible();
   const receipt = page.getByRole("dialog");
   await expect(receipt).toBeVisible();
