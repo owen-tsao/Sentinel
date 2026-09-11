@@ -11,7 +11,7 @@ editing is an advanced fallback.
 
 This roadmap separates the work into two phases:
 
-- **Part 1: Local Product Proof (Weeks 1-17)** builds the guardrail engine,
+- **Part 1: Local Product Proof (Weeks 1-18)** builds the guardrail engine,
   persistent task authority, local execution and audit, protected human review,
   one mandatory MCP fixture path, low-friction task preparation, persistent
   guardrails, a local agent command center, one conditional real-provider
@@ -91,7 +91,7 @@ and mandatory enforcement work together:
   through Sentinel; exceptional review routes to the protected web app.
 - **Scale without replacing the core:** a future hosted control plane may manage organizations, identity, policy, and audit indexing while enforcement remains local, regional, or customer-hosted.
 
-## Part 1: Local Product Proof (Weeks 1-17)
+## Part 1: Local Product Proof (Weeks 1-18)
 
 ### Local Product Definition of Done
 
@@ -465,7 +465,7 @@ reconciliation or its audit cannot be verified.
 multi-workspace management, GitHub OAuth, marketing, ML, production provider
 enforcement, and mandatory external-agent integration.
 
-### Planning discipline for Weeks 12-17
+### Planning discipline for Weeks 12-18
 
 - Each active week plan must name one load-bearing assumption, validate it
   before broad implementation, and stop when its kill condition fires.
@@ -593,9 +593,9 @@ what is still unverified, and how to run the measurement.
 
 **Why now (decided September 10, 2026):** the control center was built
 without applying the project's UI standard (monochrome, hairline borders,
-inverted CTAs, one label per control, grouped settings). Weeks 14–16 add
+inverted CTAs, one label per control, grouped settings). Weeks 14–17 add
 policy tiers, an OS-level fallback, provider connections, and sessions; if
-those land on the current pattern they will be rebuilt in Week 16. This pass
+those land on the current pattern they will be rebuilt in Week 17. This pass
 fixes the bones only.
 
 **Scope:**
@@ -628,10 +628,49 @@ rather than monochrome), and Tasks, Approvals, and Activity were restructured
 rather than only re-skinned. See
 [UI Foundation Handover](./UI%20Foundation%20Handover.md). A
 [Week 14 Plan](./Week%2014%20Plan.md) proposes spending Week 14 on the
-friction candidates below and moving transition drafts and guardrails to
-Week 15; that reordering is awaiting a decision.
+friction candidates and moving transition drafts and guardrails to Week 15;
+the reordering was approved on September 11 and is reflected below.
 
-### Week 14: Transition Drafts and Persistent Guardrails
+### Week 14: Consent at Activation
+
+**Goal:** Make routine, in-scope work cost one human interaction without
+changing what can be granted.
+
+**Decided September 11, 2026:** the Week 13 live run ended with the user's
+verdict that per-write approval after a reviewed contract is overkill and the
+browser tab is the wrong place to approve. The friction candidates below were
+promoted from "for planning" to the Week 14 scope, and the former Week 14
+(transition drafts and guardrails) moved to Week 15, shifting Weeks 15–17 by
+one week. Full plan, threat model, phases, and measurement:
+[Week 14 Plan](./Week%2014%20Plan.md).
+
+**Riskiest assumption:** A write budget granted at activation can be enforced
+so no write ever runs outside both the contract's exact scope and a
+confirm/block tier, and doing so brings routine fixture work to one
+interaction per job.
+
+**Planned outcome:**
+
+- A bounded write budget carried by the activated contract ("up to N notes"),
+  capped by a new ceiling field, part of the content hash, shown on the
+  ticket, card, and receipt; in-scope, in-budget writes run and are audited,
+  everything else stops exactly as today.
+- Standing reads under the ceiling: in-pattern fixture reads pass with no
+  active task; writes still require one. "No active task" keeps its meaning
+  for writes and for the stale-view and supersession rules.
+- A half-day spike on an OS-level confirmation surface with a written
+  verdict; built only if it needs no new dependency and cannot be driven by a
+  same-user process, and even then only to *open* the existing card.
+- The ten-fresh-chat baseline Week 13 left unmeasured, run before and after.
+
+**Kill condition:** Any path where a write escapes both exact scope and a
+confirm/block tier, or a budget that anything but the protected activation
+click can set or raise. Then budgets are dropped and per-write approval stays.
+
+**Deliverable:** Activation that carries its own consent, standing reads, a
+measured before/after, and a verdict on the OS surface.
+
+### Week 15: Transition Drafts and Persistent Guardrails
 
 **Goal:** Handle changing work with compact protected review and a durable
 local policy ceiling.
@@ -648,7 +687,7 @@ authority change behind browser confirmation.
   server-owned ceiling.
 - Allow runtime changes only to narrow the ceiling. Widening remains a
   protected restart procedure with a new content binding and never expands an
-  active task; Week 14 adds no widening UI or API.
+  active task; Week 15 adds no widening UI or API.
 - Prepare transition drafts only for narrow, replace, and sensitive expansion.
   Treat continue and ordinary extension as fresh replacement drafts this week.
 - Require protected browser confirmation for every Cursor-originated authority
@@ -670,8 +709,9 @@ events, history, or agent suggestions.
 **Friction candidates carried from Week 13 (user verdict, September 10, 2026):**
 the one-click proposal loop worked end to end in a real Cursor chat, but the
 user judged it impractical next to Cursor's inline approve box and found
-per-write approval after a reviewed contract excessive. These are candidates
-for Week 14 planning, not commitments; each needs its own threat-model pass.
+per-write approval after a reviewed contract excessive. On September 11 these
+became the Week 14 scope above; the notes are kept here as the original
+framing. Each still needs its own threat-model pass.
 
 1. **Tiered write policy.** Activation grants scope; the risk tier decides
    review. Reversible in-scope writes (a note on an issue) run and are
@@ -699,7 +739,7 @@ the friction problem is not solved.
 
 ## Phase 7: Real Provider Mediation and Session Isolation
 
-### Week 15: First Sentinel-Mediated Provider Tool
+### Week 16: First Sentinel-Mediated Provider Tool
 
 **Goal:** Retain the local fixture as a regression baseline and conditionally
 add one narrow disposable provider action whose credential and execution path
@@ -748,7 +788,7 @@ provider enforcement. Arbitrary same-user operating-system compromise remains
 out of scope. If the gate fails, deliver a documented provider spike and retain
 the supported local fixture.
 
-### Week 16: Isolated Local Sessions and Agent Command Center
+### Week 17: Isolated Local Sessions and Agent Command Center
 
 **Goal:** Prove session isolation first, then reshape the web app around
 supervising active agents rather than constructing contracts.
@@ -783,7 +823,7 @@ editor move remain post-validation work.
 
 ## Phase 8: Validation and Release
 
-### Week 17: Validation, Hardening, and Release Decision
+### Week 18: Validation, Hardening, and Release Decision
 
 **Goal:** Freeze new features, test the complete verified local path, and decide
 whether the result is ready to label a release candidate.
@@ -798,7 +838,7 @@ failures.
 
 - Run the Sentinel-owned Docker path and measured MCP path through task
   preparation, guardrails, isolated sessions, exact approval, execution, and
-  audit. Include the provider path only if Week 15 passed its entry and safety
+  audit. Include the provider path only if Week 16 passed its entry and safety
   gates.
 - Keep Cursor-native shell, file, browser, and subagent actions explicitly
   advisory.
@@ -823,7 +863,7 @@ workflow.
 **Deliverable:** A hardened, measured local package and explicit release
 decision. Public marketing publication begins only after this gate passes.
 
-## Local Product Non-Goals Through Week 17
+## Local Product Non-Goals Through Week 18
 
 These are intentionally excluded from the local product proof:
 
@@ -839,7 +879,7 @@ These are intentionally excluded from the local product proof:
 - Production-ready real-agent framework adapters.
 - Production provider credentials or customer accounts.
 - A claim that Sentinel observes or controls unmediated agent behavior.
-- Public marketing before the Week 17 release gate.
+- Public marketing before the Week 18 release gate.
 - LLM task suggestions before a separate shadow evaluation.
 - A general-purpose prompt-writing assistant unrelated to high-impact action safety.
 - Automatic permission expansion based on learned behavior; any future
@@ -848,7 +888,7 @@ These are intentionally excluded from the local product proof:
 
 ## Post-Gate Local Follow-Up
 
-If Week 17 passes its preregistered release gates:
+If Week 18 passes its preregistered release gates:
 
 - Build and publish the separate public marketing site using sanitized
   screenshots, measured claims, clear installation guidance, and no protected
@@ -866,7 +906,7 @@ If Week 17 passes its preregistered release gates:
 
 ## Part 2: Hosted/Hybrid Production Scaling
 
-After Week 17, the roadmap turns the validated local product into a
+After Week 18, the roadmap turns the validated local product into a
 hosted/hybrid platform while preserving enforcement close to the agent.
 
 ### Stage 1: Hosted Control Plane and Multi-Tenant Web App
@@ -1002,7 +1042,7 @@ Protected provider credentials + stronger managed execution
 Full AI-agent security control plane
 ```
 
-Weeks 12-17 should remain disciplined: prove that automatic task preparation,
+Weeks 12-18 should remain disciplined: prove that automatic task preparation,
 persistent guardrails, agent management, and narrow mandatory mediation create
 a useful local product. Multi-tenant hosting, production credential brokering,
 production agent integrations, and managed execution come only after those

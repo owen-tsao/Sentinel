@@ -236,7 +236,7 @@ The contract lifecycle is `proposed -> pending_review | active -> superseded | s
 An unrelated objective receives a new task/contract ID and becomes the session's active task; the previous task is suspended. Narrowing or extending the same objective creates a new immutable version in the existing lineage. Only a trusted user event may switch or reactivate the session's active task, and action requests referencing any other task are rejected. This prevents the agent from selecting old authority or letting one task silently accumulate unrelated permissions.
 
 Provider OAuth and Sentinel solve different problems. The local product first
-proves task authorization with coding actions and mediated test tools. Week 15
+proves task authorization with coding actions and mediated test tools. Week 16
 may validate one narrow provider path using a disposable identity only after
 credential-isolation and live-metadata assumptions pass. Production provider
 connections remain later work: Sentinel keeps the broad credential behind its
@@ -663,16 +663,21 @@ Week 12 mediation responsibilities:
 - Keep shell, file, browser, subagent, and real-provider action families
   advisory or unavailable until separately proven.
 
-Weeks 13-17 expand this proof in dependency order:
+Weeks 13-18 expand this proof in dependency order (reordered September 11,
+2026, after the Week 13 live run showed per-write approval was the main source
+of friction):
 
 - Week 13 adds automatic complete drafts and compact protected confirmation.
-- Week 14 adds conservative transition drafts and protected persistent
+- Week 14 makes activation carry its own consent: a ceiling-capped write
+  budget, standing reads under the ceiling, and a spike on an OS-level
+  confirmation surface.
+- Week 15 adds conservative transition drafts and protected persistent
   guardrails.
-- Week 15 conditionally adds one narrow provider tool after credential and
+- Week 16 conditionally adds one narrow provider tool after credential and
   metadata spikes pass.
-- Week 16 proves two isolated sessions before adding a minimal session command
+- Week 17 proves two isolated sessions before adding a minimal session command
   center.
-- Week 17 freezes features for validation, hardening, packaging, and an
+- Week 18 freezes features for validation, hardening, packaging, and an
   evidence-based release decision.
 
 Continuing thin CLI responsibilities:
@@ -692,7 +697,7 @@ Host and MCP responsibilities:
 
 Public marketing remains physically separate from protected contracts,
 approvals, credentials, command output, and local audit data. Its implementation
-moves until after the Week 17 release gate. Draft-only LLM suggestions also
+moves until after the Week 18 release gate. Draft-only LLM suggestions also
 remain post-gate and require a separate shadow evaluation.
 
 ## 6. Technology Stack
@@ -1317,6 +1322,23 @@ Sentinel should be presented as:
 > A local-first command center and authorization gateway for AI agents: it
 > turns user instructions into bounded task authority, mediates supported
 > tools, requests review for sensitive changes, and records what happened.
+
+In plainer terms (agreed September 11, 2026), Sentinel plays three roles, and
+the product should be judged on all three:
+
+1. **Guard.** The authorization gateway: bounded task contracts, exact
+   approval for sensitive changes, fail-closed mediation of supported tools.
+   This is the part that is proven today, for one adapter and one tool family.
+2. **Hub.** The place where a person connects agents, sees what each one is
+   allowed to do right now, and changes that with a click. Today: one agent
+   kind, one connection, the Settings and Tasks pages. Week 17 (sessions)
+   is where this becomes real for more than one agent.
+3. **Monitor.** The record of what agents actually did through Sentinel, and
+   an honest statement of what Sentinel could not see. Today: the Activity
+   page and the audit store, limited explicitly to mediated actions.
+
+The order matters: the guard is what makes the hub and monitor trustworthy,
+and no claim in the other two roles may outrun what the guard mediates.
 
 The honest claim:
 

@@ -2,21 +2,19 @@
 
 Status: proposed on September 11, 2026, starting from
 [UI Foundation Handover](./UI%20Foundation%20Handover.md) and
-[Week 13 Handover](./Week%2013%20Handover.md). Implementation requires
-explicit approval. This plan approves no new dependency.
+[Week 13 Handover](./Week%2013%20Handover.md). The reorder was approved the
+same day; **implementation has not been approved yet** and starts only on
+explicit go-ahead. This plan approves no new dependency.
 
-**This plan reorders the Roadmap and needs a decision.** The Roadmap's Week 14
-is "Transition Drafts and Persistent Guardrails". The Week 13 live run ended
+**Why this replaced the Roadmap's original Week 14.** The original Week 14
+was "Transition Drafts and Persistent Guardrails". The Week 13 live run ended
 with a clear user verdict: the loop works, but per-write approval after a
 reviewed contract is overkill, and a browser tab is the wrong place to click
 "Approve". That verdict is the first free-use false-interruption report, and
-the Roadmap already names the Week 13 friction measures as the yardstick.
-Recommendation: spend Week 14 on friction (this plan) and move transition
-drafts and versioned guardrails to Week 15, pushing provider mediation to
-Week 16 and sessions to Week 17 alongside validation. Alternative: keep the
-Roadmap order and accept that the product stays annoying for two more weeks
-while more machinery is added on top of the annoying part. The rest of this
-document assumes the recommendation.
+the Roadmap already names the Week 13 friction measures as the yardstick. So
+Week 14 is now friction (this plan); transition drafts and guardrails moved to
+Week 15, provider mediation to Week 16, sessions to Week 17, and validation to
+Week 18. The Roadmap and Product Architecture reflect this.
 
 ## The problem in one paragraph
 
