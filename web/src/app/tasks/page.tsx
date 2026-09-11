@@ -34,12 +34,14 @@ import {
   activateContract,
   ControlApiError,
   draftContract,
+  PROPOSAL_PREFILL_KEY,
 } from "@/lib/control-api";
 import type {
   AcceptedContractDraft,
   ContractRecord,
   ContractDraftResponse,
   DraftSuggestionResponse,
+  ProposalAdjustResponse,
 } from "@/lib/control-types";
 
 /**
@@ -109,6 +111,44 @@ export default function TasksPage() {
   );
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const prefillApplied = useRef(false);
+
+  // "Adjust in full form" hands the agent's (already consumed) draft over via
+  // session storage. It only prefills fields; every authority field must still
+  // be reviewed and the server re-validates on save.
+  useEffect(() => {
+    if (prefillApplied.current) return;
+    prefillApplied.current = true;
+    const raw = window.sessionStorage.getItem(PROPOSAL_PREFILL_KEY);
+    if (!raw) return;
+    window.sessionStorage.removeItem(PROPOSAL_PREFILL_KEY);
+    let prefill: ProposalAdjustResponse;
+    try {
+      prefill = JSON.parse(raw) as ProposalAdjustResponse;
+    } catch {
+      return;
+    }
+    if (!prefill?.accepted_contract || typeof prefill.raw_prompt !== "string") return;
+    const { raw_prompt: prompt, accepted_contract: accepted } = prefill;
+    void (async () => {
+      setRawPrompt(prompt);
+      setPending("compile");
+      try {
+        const result = await draftContract({ raw_prompt: prompt });
+        setPreview(result);
+        setForm(formFromAccepted(accepted));
+        setReviewed(new Set());
+        setSafetyOpen(false);
+        setNotice(
+          "Prefilled from the agent's proposal. Review each setting before saving; the proposal itself has been retired.",
+        );
+      } catch (caught) {
+        setError(actionError(caught, "The proposal could not be loaded into the form."));
+      } finally {
+        setPending(null);
+      }
+    })();
+  }, []);
 
   const sources = useMemo(
     () =>
@@ -1131,6 +1171,26 @@ function formFromSuggestions(
     backupRequired: values.get("backup_required") === true,
     expiresInMinutes: stringValue(values.get("expires_in_minutes")) || "60",
     toolFamily: "shell",
+  };
+}
+
+function formFromAccepted(accepted: AcceptedContractDraft): DraftForm {
+  return {
+    operation: accepted.operation,
+    exactTargets: accepted.exact_targets.join("\n"),
+    environment: accepted.environment,
+    expectedSideEffects: accepted.expected_side_effects.join("\n"),
+    allowedEffects: accepted.allowed_effects.join(", "),
+    forbiddenOperations: (accepted.forbidden_operations ?? []).join(", "),
+    forbiddenEffects: accepted.forbidden_effects.join("\n"),
+    forbiddenEffectCodes: (accepted.forbidden_effect_codes ?? []).join(", "),
+    rollbackPlan: accepted.rollback_plan,
+    dryRunRequired: accepted.dry_run_required ? "yes" : "no",
+    rollbackRequired: accepted.rollback_required ?? false,
+    transactionRequired: accepted.transaction_required ?? false,
+    backupRequired: accepted.backup_required ?? false,
+    expiresInMinutes: String(accepted.expires_in_minutes ?? 60),
+    toolFamily: accepted.tool_family ?? "shell",
   };
 }
 

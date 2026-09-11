@@ -543,38 +543,84 @@ sandbox behavior and subagent hook behavior remain unverified. Details in
 **Goal:** Remove manual contract entry from the Week 12 MCP workflow without
 pretending an advisory Cursor prompt is trusted authority.
 
-The proposed implementation checklist is
-[Week 13 Plan](./Week%2013%20Plan.md). It becomes implementation authority only
-after explicit approval.
+The implementation checklist is [Week 13 Plan](./Week%2013%20Plan.md).
 
-**Riskiest assumption:** A strict deterministic compiler and compact protected
-confirmation reduce user work enough to improve the workflow without guessing
-authority-bearing facts.
+**Riskiest assumption:** The agent can hand Sentinel a complete, structured
+task proposal through a channel Sentinel already controls, and one compact
+protected confirmation can show exactly what will be granted.
+
+**Reconciliation (September 9, 2026):** Earlier drafts of this section
+described the intake as a "prompt grammar" parsed from Cursor text. The plan
+and the implementation use a structured MCP tool instead
+(`sentinel_task_propose(operation, issue_ids, minutes)`), because it reuses
+every Week 12 control (adapter bearer, startup ceiling, canonicalization,
+audit, fail-closed hooks) and needs no parser. The hook-based prompt channel
+is not built; it stays a fallback only if live trials show the agent will not
+propose on its own.
 
 **Planned outcome:**
 
-- Accept one exact prompt grammar from Cursor as advisory input.
+- Accept one structured proposal from the agent as advisory input.
 - Prepare a complete non-authorizing task draft from explicit validated facts.
 - Reject missing or ambiguous facts rather than guessing or starting a
   clarification system this week.
 - Show every authority-bearing field in one compact browser confirmation with
-  no manual field entry for the supported prompt.
+  no manual field entry for the supported proposal.
 - Keep the previous task active while a replacement remains a draft; activating
   the replacement suspends the previous task atomically.
 - Let the confirmed task cover at least three matching MCP reads without
   repeated task review.
-- Measure draft success, compact-review time, manual edits, repeated reviews,
-  false interruptions, and raw-prompt retention.
+- Measure proposal success, compact-review time, manual edits, repeated reviews,
+  false interruptions, and raw-text retention.
 
-**Kill condition:** If the supported complete prompt still requires manual
-field entry, if the draft can change explicit user facts, or if an unconfirmed
-Cursor event changes authority, keep the Week 11 manual flow. Also retain the
-old flow if preregistered review-time or manual-edit thresholds show no useful
-friction reduction.
+**Kill condition:** If the supported proposal still requires manual field
+entry, if the draft can change explicit facts between proposal and activation,
+if an unconfirmed proposal changes authority, or if the agent will not use the
+tool without hand-holding, keep the Week 11 manual flow. Also retain the old
+flow as default if preregistered review-time or manual-edit thresholds show no
+useful friction reduction.
 
-**Deliverable:** One supported prompt becomes a complete draft automatically,
-one protected compact action activates it, and multiple matching tool calls use
-that task without repeated review.
+**Deliverable:** One structured proposal becomes a complete draft
+automatically, one protected compact action activates it, and multiple
+matching tool calls use that task without repeated review.
+
+**Status (September 9, 2026):** Built and verified in-process; the live Cursor
+trials that decide the kill condition have not been run yet. See
+[Week 13 Handover](./Week%2013%20Handover.md) for what is proven by tests,
+what is still unverified, and how to run the measurement.
+
+### Before Week 14: UI Foundation Pass (bounded, ~1.5 days)
+
+**Why now (decided September 10, 2026):** the control center was built
+without applying the project's UI standard (monochrome, hairline borders,
+inverted CTAs, one label per control, grouped settings). Weeks 14–16 add
+policy tiers, an OS-level fallback, provider connections, and sessions; if
+those land on the current pattern they will be rebuilt in Week 16. This pass
+fixes the bones only.
+
+**Scope:**
+
+- Replace the current tokens with the standard's light "blueprint" set and
+  rebuild four primitives every page consumes: page header, section header,
+  setting row (one label, right-aligned value, at most one supporting line),
+  card.
+- Write the Settings information architecture before building it, grouped
+  like a production settings surface: Workspace, Agents (connections,
+  coverage, MCP), Policy (approval preference, ceiling, guardrails
+  placeholder), Activity & data. Later weeks add to these groups rather than
+  appending rows.
+- Re-skin Overview and Settings using the primitives. Tasks, Approvals, and
+  Activity take the new tokens but keep their layouts; Weeks 14 and 16
+  restructure them.
+- Update mocked Playwright specs whose text assertions change; screenshot
+  before/after for the handover.
+
+**Explicitly out:** new features, dark mode, the command-center layout,
+anything session-related, marketing surfaces.
+
+**Done when:** Overview and Settings pass the standard's "would Linear or
+Plain ship this" check in a screenshot review, every page uses the shared
+primitives, and the full mocked Playwright suite is green.
 
 ### Week 14: Transition Drafts and Persistent Guardrails
 
@@ -611,6 +657,36 @@ preregistered classification-error or unnecessary-prompt thresholds fail.
 **Deliverable:** Persistent local guardrails and conservative task-change
 drafts that reduce reconstruction work without granting authority from Cursor
 events, history, or agent suggestions.
+
+**Friction candidates carried from Week 13 (user verdict, September 10, 2026):**
+the one-click proposal loop worked end to end in a real Cursor chat, but the
+user judged it impractical next to Cursor's inline approve box and found
+per-write approval after a reviewed contract excessive. These are candidates
+for Week 14 planning, not commitments; each needs its own threat-model pass.
+
+1. **Tiered write policy.** Activation grants scope; the risk tier decides
+   review. Reversible in-scope writes (a note on an issue) run and are
+   audited; confirmation is reserved for irreversible, bulk, production, or
+   out-of-pattern effects; blocks stay blocks. Optionally a per-card *write
+   budget* ("allow up to N notes without asking") so the consent happens at
+   activation. Kill condition: any path where a write escapes both the
+   contract's exact scope and a confirm/block tier.
+2. **OS-level confirmation surface.** A macOS notification with Activate /
+   Approve actions (deep-linking to the browser card as fallback) or a small
+   always-on-top window, so confirmation happens where the user already is
+   while staying outside the agent's reach. Prioritized over further browser
+   polish. Kill condition: the surface can be driven or spoofed by a same-user
+   agent process, or it needs a dependency the project would not otherwise
+   take.
+3. **Standing read permission at startup.** The ceiling auto-activates a
+   read-only task over the fixture scope so reads never raise a card; only
+   writes and scope changes do. Kill condition: it changes what "no active
+   task" means anywhere in the authority model without a fresh review of the
+   stale-view and supersession rules.
+
+The Week 13 measurement targets (false interruptions, repeated reviews) stay
+the yardstick: if these do not bring routine work to one confirmation per job,
+the friction problem is not solved.
 
 ## Phase 7: Real Provider Mediation and Session Isolation
 

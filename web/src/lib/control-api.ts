@@ -9,6 +9,11 @@ import type {
   ContractDraftRequest,
   ContractDraftResponse,
   ControlStatusResponse,
+  PendingProposalResponse,
+  ProposalAdjustResponse,
+  ProposalConfirmRequest,
+  ProposalConfirmResponse,
+  ProposalDismissResponse,
 } from "@/lib/control-types";
 
 const API_ORIGIN =
@@ -87,6 +92,42 @@ export function denyAction(approvalId: string) {
     { method: "POST" },
   );
 }
+
+export function getPendingProposal() {
+  return controlRequest<PendingProposalResponse>("/control/proposals/pending");
+}
+
+/**
+ * The body carries only a stale-view guard: the task ID the browser saw, or
+ * null if it saw none. Every authority fact the task will grant is re-read
+ * server-side from the stored draft named by `draftId`.
+ */
+export function confirmProposal(
+  draftId: string,
+  payload: ProposalConfirmRequest,
+) {
+  return controlRequest<ProposalConfirmResponse>(
+    `/control/proposals/${encodeURIComponent(draftId)}/confirm`,
+    { method: "POST", body: JSON.stringify(payload) },
+  );
+}
+
+export function dismissProposal(draftId: string) {
+  return controlRequest<ProposalDismissResponse>(
+    `/control/proposals/${encodeURIComponent(draftId)}/dismiss`,
+    { method: "POST" },
+  );
+}
+
+export function adjustProposal(draftId: string) {
+  return controlRequest<ProposalAdjustResponse>(
+    `/control/proposals/${encodeURIComponent(draftId)}/adjust`,
+    { method: "POST" },
+  );
+}
+
+/** Session-only handoff from the compact card to the full form. Not authority. */
+export const PROPOSAL_PREFILL_KEY = "sentinel.proposal-prefill";
 
 export type AuditFilters = {
   taskId?: string;

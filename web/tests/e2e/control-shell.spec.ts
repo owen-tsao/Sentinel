@@ -84,6 +84,9 @@ test("pairs from the fragment, clears it, and renders server authority", async (
   await page.route(`${apiOrigin}/control/approvals`, (route) =>
     route.fulfill({ json: { approvals: [] } }),
   );
+  await page.route(`${apiOrigin}/control/proposals/pending`, (route) =>
+    route.fulfill({ json: { proposal: null, recent: [] } }),
+  );
 
   await page.goto(`/#pair=${testCapability}`);
 

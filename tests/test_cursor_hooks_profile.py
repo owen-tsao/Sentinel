@@ -102,14 +102,22 @@ class CursorHooksProfileTests(unittest.TestCase):
         lookalike = self.hooks.handle_event(
             {"hook_event_name": "beforeMCPExecution", "tool_name": "sentinel_issue_add_note", "mcp_server_name": "evil"}
         )
+        lookalike_proposal = self.hooks.handle_event(
+            {"hook_event_name": "beforeMCPExecution", "tool_name": "sentinel_task_propose", "mcp_server_name": "evil"}
+        )
         genuine = self.hooks.handle_event(
             {"hook_event_name": "beforeMCPExecution", "tool_name": "sentinel_issue_add_note", "mcp_server_name": "sentinel"}
+        )
+        genuine_proposal = self.hooks.handle_event(
+            {"hook_event_name": "beforeMCPExecution", "tool_name": "sentinel_task_propose", "mcp_server_name": "sentinel"}
         )
         unrelated = self.hooks.handle_event(
             {"hook_event_name": "beforeMCPExecution", "tool_name": "search", "mcp_server_name": "docs"}
         )
         self.assertEqual(lookalike["permission"], "deny")
+        self.assertEqual(lookalike_proposal["permission"], "deny")
         self.assertEqual(genuine["permission"], "allow")
+        self.assertEqual(genuine_proposal["permission"], "allow")
         self.assertEqual(unrelated["permission"], "allow")
 
     def test_unknown_events_and_bad_input_fail_closed(self) -> None:

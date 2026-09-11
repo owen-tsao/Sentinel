@@ -19,7 +19,10 @@ from pathlib import Path
 from typing import Any
 
 SENTINEL_SERVER_NAMES = {"sentinel", "sentinel-spike"}
-FIXTURE_TOOL_PREFIX = "sentinel_issue_"
+# Fixture tools and the Week 13 task-proposal tool are only valid from
+# Sentinel's own MCP server; a lookalike server must not be able to spoof them.
+SENTINEL_TOOL_PREFIXES = ("sentinel_issue_", "sentinel_task_")
+FIXTURE_TOOL_PREFIX = SENTINEL_TOOL_PREFIXES[0]
 PROTECTED_CONFIG_SUFFIXES = (
     ".cursor/hooks.json",
     ".cursor/mcp.json",
@@ -111,8 +114,8 @@ def handle_before_shell_execution(payload: dict[str, Any]) -> dict[str, Any]:
 def handle_before_mcp_execution(payload: dict[str, Any]) -> dict[str, Any]:
     tool_name = str(payload.get("tool_name", ""))
     server = str(payload.get("mcp_server_name", ""))
-    if tool_name.startswith(FIXTURE_TOOL_PREFIX) and server not in SENTINEL_SERVER_NAMES:
-        return _deny(f"fixture tool '{tool_name}' is only valid from the Sentinel MCP server, not '{server or 'unknown'}'.")
+    if tool_name.startswith(SENTINEL_TOOL_PREFIXES) and server not in SENTINEL_SERVER_NAMES:
+        return _deny(f"Sentinel tool '{tool_name}' is only valid from the Sentinel MCP server, not '{server or 'unknown'}'.")
     return _allow()
 
 

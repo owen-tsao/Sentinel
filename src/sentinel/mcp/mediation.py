@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 from sentinel.actions.models import CanonicalAction
 from sentinel.decision.contract_policy import ContractMatchResult
+from sentinel.proposals import ProposalFacts, ProposalValidationError, facts_from_arguments
 from sentinel.supervision import CeilingDecision
 
 McpVerdict = Literal["allow", "confirm_required", "block"]
@@ -32,6 +33,10 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
         "arguments": {"issue_id", "body"},
     },
 }
+# The proposal tool is not a fixture operation. It is canonicalized separately
+# and never reaches the fixture's operation-state machine.
+PROPOSAL_TOOL = "sentinel_task_propose"
+PROPOSAL_ARGUMENTS = {"operation", "issue_ids", "minutes"}
 MAX_ISSUE_ID_LENGTH = 64
 
 
@@ -106,6 +111,22 @@ def canonicalize_mcp_call(tool: str, arguments: dict[str, Any], *, environment: 
     )
 
 
+def canonicalize_task_proposal(arguments: dict[str, Any]) -> ProposalFacts:
+    """Shape-check proposal arguments: exact key set, then typed facts. Ceiling checks come later."""
+
+    if not isinstance(arguments, dict):
+        raise McpCanonicalizationError("mcp:arguments_invalid", "Arguments must be an object.")
+    if set(arguments) != PROPOSAL_ARGUMENTS:
+        raise McpCanonicalizationError(
+            "mcp:unknown_argument",
+            f"{PROPOSAL_TOOL} accepts exactly {sorted(PROPOSAL_ARGUMENTS)}; received {sorted(arguments)}.",
+        )
+    try:
+        return facts_from_arguments(arguments["operation"], arguments["issue_ids"], arguments["minutes"])
+    except ProposalValidationError as exc:
+        raise McpCanonicalizationError(exc.reason_code, exc.reason) from exc
+
+
 @dataclass(frozen=True)
 class McpDecision:
     verdict: McpVerdict
@@ -115,7 +136,23 @@ class McpDecision:
     guidance: str
 
 
-def decide_mcp_action(ceiling: CeilingDecision, match: ContractMatchResult | None) -> McpDecision:
+NO_TASK_GUIDANCE = (
+    "No task is active. Call sentinel_task_propose with the exact operation ('read' or 'write'), "
+    "the issue IDs you need, and a duration in minutes. The user will confirm it in Sentinel; "
+    "do not retry this call until they have."
+)
+AWAITING_CONFIRMATION_GUIDANCE = (
+    "A task proposal is already waiting for the user in Sentinel. Do not retry or propose again "
+    "until they confirm or dismiss it."
+)
+
+
+def decide_mcp_action(
+    ceiling: CeilingDecision,
+    match: ContractMatchResult | None,
+    *,
+    proposal_pending: bool = False,
+) -> McpDecision:
     """Compose the ceiling and the active-contract match. Ceiling first, then contract."""
 
     if ceiling.verdict == "forbidden":
@@ -124,9 +161,15 @@ def decide_mcp_action(ceiling: CeilingDecision, match: ContractMatchResult | Non
             "This operation is outside the startup guardrails; no task can authorize it. Ask the user.",
         )
     if match is None:
+        if proposal_pending:
+            return McpDecision(
+                "block", "task:awaiting_confirmation",
+                "A proposed task is waiting for the user's confirmation.", ("task:awaiting_confirmation",),
+                AWAITING_CONFIRMATION_GUIDANCE,
+            )
         return McpDecision(
             "block", "contract:not_found", "No active task authorizes this action.", ("contract:not_found",),
-            "Ask the user to activate a task for this fixture in the Sentinel control center, then retry.",
+            NO_TASK_GUIDANCE,
         )
     if not match.matches:
         return McpDecision(

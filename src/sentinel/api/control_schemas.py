@@ -215,5 +215,64 @@ class ActiveAuthorityResponse(StrictControlModel):
     active_contract: Optional[ContractRecord] = None
 
 
+class TaskProposalResponse(StrictControlModel):
+    """One agent task proposal as stored by the server. Never contains agent prose."""
+
+    draft_id: str
+    state: Literal["pending", "confirmed", "superseded", "dismissed", "expired"]
+    source: Literal["agent_mcp"]
+    objective: str
+    operation: Literal["read", "write"]
+    exact_targets: list[str]
+    environment: str
+    allowed_effects: list[str]
+    task_duration_minutes: int
+    content_sha256: str = Field(..., min_length=64, max_length=64)
+    proposal_number: int = Field(..., ge=1)
+    created_at: datetime
+    proposal_expires_at: datetime
+    replaces_active_task: bool = False
+    resolution: Optional[str] = None
+    resolved_at: Optional[datetime] = None
+    confirmed_contract_id: Optional[str] = None
+
+
+class PendingProposalResponse(StrictControlModel):
+    proposal: Optional[TaskProposalResponse] = None
+    recent: list[TaskProposalResponse] = Field(default_factory=list)
+
+
+class ProposalConfirmRequest(StrictControlModel):
+    """Only a concurrency guard. Every authority fact comes from the stored draft.
+
+    The field is required so that `null` unambiguously means "my view showed no
+    active task"; omitting it is a 422, never a skipped check.
+    """
+
+    expected_active_task_id: Optional[str] = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+    )
+
+
+class ProposalConfirmResponse(StrictControlModel):
+    draft_id: str
+    active_contract: ContractRecord
+
+
+class ProposalDismissResponse(StrictControlModel):
+    draft_id: str
+    state: Literal["dismissed", "superseded"]
+
+
+class ProposalAdjustResponse(StrictControlModel):
+    """Prefill for the full form. The draft is consumed the moment this is issued."""
+
+    draft_id: str
+    raw_prompt: str
+    accepted_contract: AcceptedContractDraft
+
+
 class AuditListResponse(StrictControlModel):
     events: list[AuditEvent]

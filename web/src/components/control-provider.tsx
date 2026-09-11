@@ -14,12 +14,14 @@ import {
 import type {
   ContractRecord,
   ControlStatusResponse,
+  TaskProposalResponse,
 } from "@/lib/control-types";
 import {
   ControlApiError,
   controlRequest,
   getActiveAuthority,
   getControlStatus,
+  getPendingProposal,
   listApprovals,
 } from "@/lib/control-api";
 
@@ -36,6 +38,7 @@ type ControlContextValue = {
   status: ControlStatusResponse | null;
   activeContract: ContractRecord | null;
   approvalCount: number;
+  proposal: TaskProposalResponse | null;
   message: string;
   refresh: () => Promise<void>;
 };
@@ -68,6 +71,7 @@ export function ControlProvider({ children }: { children: ReactNode }) {
   const [activeContract, setActiveContract] =
     useState<ContractRecord | null>(null);
   const [approvalCount, setApprovalCount] = useState(0);
+  const [proposal, setProposal] = useState<TaskProposalResponse | null>(null);
   const [message, setMessage] = useState("Connecting to local Sentinel…");
   const hasConnected = useRef(false);
   const initialConnection = useRef<Promise<void> | null>(null);
@@ -75,20 +79,23 @@ export function ControlProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(async () => {
     try {
       const nextStatus = await getControlStatus();
-      const [authority, approvals] = await Promise.all([
+      const [authority, approvals, proposals] = await Promise.all([
         getActiveAuthority(),
         listApprovals(),
+        getPendingProposal(),
       ]);
       hasConnected.current = true;
       setStatus(nextStatus);
       setActiveContract(authority.active_contract ?? null);
       setApprovalCount(approvals.approvals.length);
+      setProposal(proposals.proposal ?? null);
       setConnection("connected");
       setMessage("Sentinel-owned local control channel");
     } catch (error) {
       setStatus(null);
       setActiveContract(null);
       setApprovalCount(0);
+      setProposal(null);
       if (error instanceof ControlApiError && error.status === 401) {
         setConnection(hasConnected.current ? "expired" : "pairing_required");
         setMessage(
@@ -147,10 +154,11 @@ export function ControlProvider({ children }: { children: ReactNode }) {
       status,
       activeContract,
       approvalCount,
+      proposal,
       message,
       refresh,
     }),
-    [connection, status, activeContract, approvalCount, message, refresh],
+    [connection, status, activeContract, approvalCount, proposal, message, refresh],
   );
 
   return (

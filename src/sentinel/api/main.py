@@ -53,6 +53,12 @@ from sentinel.api.control_schemas import (
     DraftSuggestionResponse,
     FamilyCoverageResponse,
     IntegrationStatusResponse,
+    PendingProposalResponse,
+    ProposalAdjustResponse,
+    ProposalConfirmRequest,
+    ProposalConfirmResponse,
+    ProposalDismissResponse,
+    TaskProposalResponse,
 )
 from sentinel.approval import (
     ApprovalBinding,
@@ -115,6 +121,12 @@ from sentinel.integrations import AdapterSessionError, AdapterSessionRegistry
 from sentinel.integrations.hooks import inspect_hooks_profile
 from sentinel.mcp import SQLiteIssueFixture
 from sentinel.mcp.gateway import McpMediator
+from sentinel.proposals import (
+    InMemoryTaskProposalStore,
+    ProposalStateError,
+    TaskProposal,
+    TaskProposalService,
+)
 from sentinel.supervision import (
     SQLiteSupervisionPolicyStore,
     SupervisionPolicy,
@@ -485,6 +497,7 @@ def create_app(
         app.state.mcp_mediator = None
         app.state.adapter_registry = None
         app.state.mcp_fixture = None
+        app.state.task_proposals = None
         if supervision_policy_binding is not None:
             selected_fixture = mcp_fixture
             if selected_fixture is None:
@@ -499,6 +512,15 @@ def create_app(
             selected_registry = adapter_registry or AdapterSessionRegistry(
                 supervision_session_id=supervision_binding.session_id,
             )
+            # Proposals are process-local like adapter sessions and pending
+            # approvals; a restart clears them and the agent proposes again.
+            task_proposals = TaskProposalService(
+                store=InMemoryTaskProposalStore(),
+                policy_binding=supervision_policy_binding,
+                supervision=supervision_binding,
+                audit_store=app.state.audit_store,
+                environment=app.state.execution_environment,
+            )
             mediator = McpMediator(
                 registry=selected_registry,
                 fixture=selected_fixture,
@@ -511,10 +533,12 @@ def create_app(
                 audit_store=app.state.audit_store,
                 environment=app.state.execution_environment,
                 lock=app.state.session_locks.hold,
+                proposals=task_proposals,
             )
             app.state.mcp_mediator = mediator
             app.state.adapter_registry = selected_registry
             app.state.mcp_fixture = selected_fixture
+            app.state.task_proposals = task_proposals
             app.include_router(
                 build_integration_router(
                     config=control_config,
@@ -593,6 +617,20 @@ def create_app(
                     control_config,
                 ),
                 integration_status=lambda: _control_integration_status(app),
+                pending_proposal=lambda: _control_pending_proposal(app),
+                confirm_proposal=lambda draft_id, payload: _confirm_task_proposal(
+                    app,
+                    draft_id,
+                    payload,
+                ),
+                dismiss_proposal=lambda draft_id: _dismiss_task_proposal(
+                    app,
+                    draft_id,
+                ),
+                adjust_proposal=lambda draft_id: _adjust_task_proposal(
+                    app,
+                    draft_id,
+                ),
             )
         )
 
@@ -1608,6 +1646,7 @@ def _accepted_fixture_contract(
     accepted: AcceptedContractDraft,
     *,
     prompt_sha256: str,
+    authorization_reference: str | None = None,
 ) -> ActionContract:
     """A task over the MCP issue fixture. Targets are issue IDs the ceiling permits.
 
@@ -1615,6 +1654,9 @@ def _accepted_fixture_contract(
     the startup policy pattern, and only the read/write operations the fixture
     tools express. Reads are always included because a note-writing task is
     useless without them and reads are ordinary under the ceiling.
+
+    Both the manual form and the Week 13 proposal confirmation build through
+    this function, so there is exactly one place fixture authority is shaped.
     """
 
     policy_binding = app.state.supervision_policy_binding
@@ -1691,7 +1733,7 @@ def _accepted_fixture_contract(
         transaction_required=accepted.transaction_required,
         backup_required=accepted.backup_required,
         source_prompt_sha256=prompt_sha256,
-        authorization_reference=f"control-draft:{uuid4()}",
+        authorization_reference=authorization_reference or f"control-draft:{uuid4()}",
         expires_at=(
             datetime.now(timezone.utc)
             + timedelta(minutes=accepted.expires_in_minutes)
@@ -1758,6 +1800,208 @@ def _control_active_authority(app: FastAPI) -> ActiveAuthorityResponse:
         else None
     )
     return ActiveAuthorityResponse(active_contract=active)
+
+
+# -- agent task proposals (Week 13) --------------------------------------------------
+
+
+def _proposal_response(
+    app: FastAPI,
+    proposal: TaskProposal,
+    *,
+    active_task_id: str | None,
+) -> TaskProposalResponse:
+    return TaskProposalResponse(
+        draft_id=proposal.draft_id,
+        state=proposal.state,
+        source=proposal.source,
+        objective=proposal.objective,
+        operation=proposal.operation,
+        exact_targets=list(proposal.exact_targets),
+        environment=proposal.environment,
+        allowed_effects=list(proposal.allowed_effects),
+        task_duration_minutes=proposal.task_duration_minutes,
+        content_sha256=proposal.content_sha256,
+        proposal_number=proposal.proposal_number,
+        created_at=proposal.created_at,
+        proposal_expires_at=proposal.proposal_expires_at,
+        replaces_active_task=proposal.state == "pending" and active_task_id is not None,
+        resolution=proposal.resolution,
+        resolved_at=proposal.resolved_at,
+        confirmed_contract_id=proposal.confirmed_contract_id,
+    )
+
+
+def _current_active_task_id(app: FastAPI) -> str | None:
+    if not app.state.authority_service.authority_available:
+        return None
+    active = app.state.contract_store.get_active(app.state.supervision_binding.session_id)
+    return active.task_id if active is not None else None
+
+
+def _control_pending_proposal(app: FastAPI) -> PendingProposalResponse:
+    service: TaskProposalService | None = app.state.task_proposals
+    if service is None:
+        return PendingProposalResponse()
+    active_task_id = _current_active_task_id(app)
+    pending = service.pending()
+    return PendingProposalResponse(
+        proposal=(
+            _proposal_response(app, pending, active_task_id=active_task_id)
+            if pending is not None
+            else None
+        ),
+        recent=[
+            _proposal_response(app, item, active_task_id=active_task_id)
+            for item in service.history()[:10]
+        ],
+    )
+
+
+def _require_proposal_service(app: FastAPI) -> TaskProposalService:
+    service: TaskProposalService | None = app.state.task_proposals
+    if service is None:
+        raise HTTPException(status_code=404, detail="Task proposals are not enabled.")
+    return service
+
+
+def _proposal_state_conflict(exc: ProposalStateError) -> HTTPException:
+    status = 404 if exc.reason_code == "proposal:not_found" else 409
+    return HTTPException(status_code=status, detail={"reason_code": exc.reason_code, "message": exc.reason})
+
+
+def _accepted_draft_from_proposal(proposal: TaskProposal) -> AcceptedContractDraft:
+    """Expand stored facts into the same shape the manual form submits.
+
+    Only the five authority facts come from the proposal. The descriptive and
+    narrowing fields are fixed server-side defaults for fixture tasks, so a
+    proposal can never widen them.
+    """
+
+    write = proposal.operation == "write"
+    return AcceptedContractDraft(
+        operation=proposal.operation,
+        exact_targets=list(proposal.exact_targets),
+        environment=proposal.environment,  # type: ignore[arg-type]
+        expected_side_effects=[
+            "One reviewed internal note per approval on the listed fixture issues."
+            if write
+            else "Read-only access to the listed fixture issues."
+        ],
+        allowed_effects=set(proposal.allowed_effects),
+        forbidden_operations={"delete", "network", "credential_access"},
+        forbidden_effects=["No deletion, network, or credential access."],
+        forbidden_effect_codes={"delete", "network", "credential_access"},
+        rollback_plan="Notes are disposable fixture data; nothing outside the fixture changes.",
+        dry_run_required=False,
+        expires_in_minutes=proposal.task_duration_minutes,
+        tool_family="sentinel_issue_fixture",
+    )
+
+
+def _confirm_task_proposal(
+    app: FastAPI,
+    draft_id: str,
+    payload: ProposalConfirmRequest,
+) -> ProposalConfirmResponse:
+    """One protected click: rebuild the contract from the stored draft and activate it.
+
+    The request carries only the draft ID (plus an optional stale-view guard).
+    Every authority fact is re-read from the server-stored proposal and
+    re-validated against the ceiling by `_accepted_fixture_contract`, the same
+    builder the manual form uses.
+    """
+
+    service = _require_proposal_service(app)
+    session_id = app.state.supervision_binding.session_id
+    with app.state.session_locks.hold(session_id):
+        try:
+            proposal = service.require_confirmable(draft_id)
+        except ProposalStateError as exc:
+            raise _proposal_state_conflict(exc) from exc
+        active_task_id = _current_active_task_id(app)
+        # `None` here means the browser saw no active task; it must still match.
+        if payload.expected_active_task_id != active_task_id:
+            raise HTTPException(
+                status_code=409,
+                detail={"reason_code": "proposal:stale_view", "message": "The active task changed; refresh and review again."},
+            )
+        accepted = _accepted_draft_from_proposal(proposal)
+        contract = _accepted_fixture_contract(
+            app,
+            accepted,
+            prompt_sha256=proposal.content_sha256,
+            authorization_reference=f"task-proposal:{proposal.draft_id}",
+        )
+        now = datetime.now(timezone.utc)
+        try:
+            proposed = app.state.authority_service.create_proposed(
+                contract,
+                session_id=session_id,
+                authorization_source="protected_local_ui",
+                created_at=now,
+                preflight_status="complete",
+            )
+        except (ContractStoreError, AuditStoreError) as exc:
+            raise HTTPException(status_code=409, detail="Proposed contract could not be created.") from exc
+        activation = _activate_control_contract(
+            app,
+            ContractActivationRequest(
+                contract_id=proposed.contract_id,
+                expected_version=proposed.version,
+                expected_active_task_id=active_task_id,
+            ),
+        )
+        active = activation.active_contract
+        request_id = f"proposal-confirm:{uuid4()}"
+        try:
+            service.confirm(
+                draft_id,
+                contract_id=active.contract_id,
+                task_id=active.task_id,
+                request_id=request_id,
+            )
+        except ProposalStateError:
+            # Authority is already active; the draft record is evidence only.
+            pass
+    return ProposalConfirmResponse(draft_id=draft_id, active_contract=active)
+
+
+def _dismiss_task_proposal(app: FastAPI, draft_id: str) -> ProposalDismissResponse:
+    service = _require_proposal_service(app)
+    # Same lock as confirm/propose so a dismiss cannot land between confirm's
+    # state check and its activation.
+    with app.state.session_locks.hold(app.state.supervision_binding.session_id):
+        try:
+            dismissed = service.dismiss(
+                draft_id,
+                resolution="human_dismissed",
+                request_id=f"proposal-dismiss:{uuid4()}",
+            )
+        except ProposalStateError as exc:
+            raise _proposal_state_conflict(exc) from exc
+    return ProposalDismissResponse(draft_id=draft_id, state=dismissed.state)  # type: ignore[arg-type]
+
+
+def _adjust_task_proposal(app: FastAPI, draft_id: str) -> ProposalAdjustResponse:
+    """Hand the draft to the full form and retire it so it cannot also be confirmed."""
+
+    service = _require_proposal_service(app)
+    with app.state.session_locks.hold(app.state.supervision_binding.session_id):
+        try:
+            proposal = service.require_confirmable(draft_id)
+            service.dismiss(
+                draft_id,
+                resolution="adjusted_in_full_form",
+                request_id=f"proposal-adjust:{uuid4()}",
+            )
+        except ProposalStateError as exc:
+            raise _proposal_state_conflict(exc) from exc
+    return ProposalAdjustResponse(
+        draft_id=draft_id,
+        raw_prompt=proposal.objective,
+        accepted_contract=_accepted_draft_from_proposal(proposal),
+    )
 
 
 def _control_executor_ready(executor: object) -> bool:

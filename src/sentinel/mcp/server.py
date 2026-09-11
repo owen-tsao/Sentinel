@@ -18,11 +18,36 @@ import uuid
 from typing import Any
 
 SERVER_NAME = "sentinel"
-SERVER_VERSION = "0.12.0"
+SERVER_VERSION = "0.13.0"
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 INTEGRATION_PATH = "/integration/mcp/call"
 
 TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "sentinel_task_propose",
+        "description": (
+            "Propose a Sentinel task for the local fixture tracker when no task is active. State the exact "
+            "operation ('read' to inspect issues, 'write' to also add notes), the issue IDs you need, and how "
+            "many minutes the task should last. Sentinel stores this as a draft that grants nothing; the user "
+            "confirms it with one click in the control center. Call this first when a fixture tool reports that "
+            "no task is active, then wait for the user before retrying."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "operation": {"type": "string", "enum": ["read", "write"]},
+                "issue_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "description": "Exact issue IDs such as SPIKE-1",
+                },
+                "minutes": {"type": "integer", "minimum": 1, "maximum": 1440},
+            },
+            "required": ["operation", "issue_ids", "minutes"],
+            "additionalProperties": False,
+        },
+    },
     {
         "name": "sentinel_issue_read",
         "description": "Read one issue from the local Sentinel fixture tracker. Every call is mediated by Sentinel.",
@@ -145,6 +170,17 @@ def handle_tools_call(params: dict[str, Any]) -> dict[str, Any]:
         summary["result"] = outcome.get("result")
         return _tool_result(json.dumps(summary, sort_keys=True), is_error=False, structured=summary)
     if verdict == "confirm_required":
+        if outcome.get("reason_code") == "task:proposal_pending":
+            result = outcome.get("result") or {}
+            summary["draft_id"] = result.get("draft_id")
+            replaces = " It will replace the currently active task when confirmed." if result.get("replaces_active_task") else ""
+            return _tool_result(
+                "Sentinel stored your task proposal; it grants nothing yet. A confirmation card is waiting for the "
+                f"user in the Sentinel control center.{replaces} Tell the user to confirm it there, and do not retry "
+                "fixture tools or propose again until they have.",
+                is_error=True,
+                structured=summary,
+            )
         summary["approval_id"] = outcome.get("approval_id")
         return _tool_result(
             "Sentinel requires human approval for this exact action; nothing was performed. "

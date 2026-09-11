@@ -26,6 +26,11 @@ from sentinel.api.control_schemas import (
     PairExchangeRequest,
     PairExchangeResponse,
     PendingApprovalResponse,
+    PendingProposalResponse,
+    ProposalAdjustResponse,
+    ProposalConfirmRequest,
+    ProposalConfirmResponse,
+    ProposalDismissResponse,
 )
 from sentinel.api.schemas import EvaluateResponse
 from sentinel.approval import PendingApproval
@@ -57,6 +62,12 @@ def build_control_router(
     query_audit: Callable[..., AuditListResponse],
     runtime_status: Callable[[], ControlRuntimeStatus],
     integration_status: Callable[[], Optional[IntegrationStatusResponse]] = lambda: None,
+    pending_proposal: Callable[[], PendingProposalResponse] = PendingProposalResponse,
+    confirm_proposal: Optional[
+        Callable[[str, ProposalConfirmRequest], ProposalConfirmResponse]
+    ] = None,
+    dismiss_proposal: Optional[Callable[[str], ProposalDismissResponse]] = None,
+    adjust_proposal: Optional[Callable[[str], ProposalAdjustResponse]] = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/control", tags=["control"])
 
@@ -137,6 +148,61 @@ def build_control_router(
         _authenticate(request, config, pairing)
         response.headers["Cache-Control"] = "no-store"
         return active_authority()
+
+    @router.get("/proposals/pending", response_model=PendingProposalResponse)
+    def get_pending_proposal(
+        request: Request,
+        response: Response,
+    ) -> PendingProposalResponse:
+        _authenticate(request, config, pairing)
+        response.headers["Cache-Control"] = "no-store"
+        return pending_proposal()
+
+    @router.post(
+        "/proposals/{draft_id}/confirm",
+        response_model=ProposalConfirmResponse,
+    )
+    def confirm_task_proposal(
+        draft_id: str,
+        request: Request,
+        response: Response,
+        payload: Optional[ProposalConfirmRequest] = None,
+    ) -> ProposalConfirmResponse:
+        _authenticate(request, config, pairing)
+        response.headers["Cache-Control"] = "no-store"
+        if confirm_proposal is None:
+            raise HTTPException(status_code=404, detail="Task proposals are not enabled.")
+        return confirm_proposal(draft_id, payload or ProposalConfirmRequest())
+
+    @router.post(
+        "/proposals/{draft_id}/dismiss",
+        response_model=ProposalDismissResponse,
+    )
+    def dismiss_task_proposal(
+        draft_id: str,
+        request: Request,
+        response: Response,
+    ) -> ProposalDismissResponse:
+        _authenticate(request, config, pairing)
+        response.headers["Cache-Control"] = "no-store"
+        if dismiss_proposal is None:
+            raise HTTPException(status_code=404, detail="Task proposals are not enabled.")
+        return dismiss_proposal(draft_id)
+
+    @router.post(
+        "/proposals/{draft_id}/adjust",
+        response_model=ProposalAdjustResponse,
+    )
+    def adjust_task_proposal(
+        draft_id: str,
+        request: Request,
+        response: Response,
+    ) -> ProposalAdjustResponse:
+        _authenticate(request, config, pairing)
+        response.headers["Cache-Control"] = "no-store"
+        if adjust_proposal is None:
+            raise HTTPException(status_code=404, detail="Task proposals are not enabled.")
+        return adjust_proposal(draft_id)
 
     @router.get("/approvals", response_model=ApprovalListResponse)
     def list_approvals(
