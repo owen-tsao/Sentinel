@@ -622,6 +622,15 @@ anything session-related, marketing surfaces.
 Plain ship this" check in a screenshot review, every page uses the shared
 primitives, and the full mocked Playwright suite is green.
 
+**Status (September 11, 2026):** Merged to `main`. The look diverged from the
+scope above by user decision (cream canvas, blue ticket, black hairlines
+rather than monochrome), and Tasks, Approvals, and Activity were restructured
+rather than only re-skinned. See
+[UI Foundation Handover](./UI%20Foundation%20Handover.md). A
+[Week 14 Plan](./Week%2014%20Plan.md) proposes spending Week 14 on the
+friction candidates below and moving transition drafts and guardrails to
+Week 15; that reordering is awaiting a decision.
+
 ### Week 14: Transition Drafts and Persistent Guardrails
 
 **Goal:** Handle changing work with compact protected review and a durable
