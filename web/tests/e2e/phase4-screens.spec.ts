@@ -74,6 +74,9 @@ async function installBaseRoutes(
   await page.route(`${apiOrigin}/control/approvals`, (route) =>
     route.fulfill({ json: { approvals: options.approvals ?? [] } }),
   );
+  await page.route(`${apiOrigin}/control/proposals/pending`, (route) =>
+    route.fulfill({ json: { proposal: null, recent: [] } }),
+  );
 }
 
 test("overview renders authoritative workspace settings and demo boundary", async ({

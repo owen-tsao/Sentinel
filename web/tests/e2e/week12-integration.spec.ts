@@ -142,6 +142,9 @@ async function installRoutes(page: Page, options: { connected: boolean }) {
   await page.route(`${apiOrigin}/control/approvals`, (route) =>
     route.fulfill({ json: { approvals: options.connected ? [mcpApproval] : [] } }),
   );
+  await page.route(`${apiOrigin}/control/proposals/pending`, (route) =>
+    route.fulfill({ json: { proposal: null, recent: [] } }),
+  );
 }
 
 test("settings shows honest per-family coverage when the MCP shim is connected", async ({

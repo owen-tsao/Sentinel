@@ -34,12 +34,15 @@ from sentinel.decision.engine import VERDICT_RISK_SCORES, VERDICT_TO_RISK_TIER
 from sentinel.integrations import AdapterSession, AdapterSessionError, AdapterSessionRegistry
 from sentinel.mcp.fixture import FixtureError, OperationBinding, SQLiteIssueFixture
 from sentinel.mcp.mediation import (
+    PROPOSAL_TOOL,
     McpActionFacts,
     McpCanonicalizationError,
     McpDecision,
     canonicalize_mcp_call,
+    canonicalize_task_proposal,
     decide_mcp_action,
 )
+from sentinel.proposals import ProposalError, TaskProposalService
 from sentinel.supervision import SupervisionPolicyBinding
 
 ADAPTER_AGENT_ID = "cursor_mcp_adapter"
@@ -63,6 +66,7 @@ class McpMediator:
         environment: str,
         lock: LockFactory | None = None,
         clock: Callable[[], datetime] | None = None,
+        proposals: TaskProposalService | None = None,
     ) -> None:
         self._registry = registry
         self._fixture = fixture
@@ -76,6 +80,7 @@ class McpMediator:
         self._environment = environment
         self._lock = lock or (lambda _session_id: nullcontext())
         self._now = clock or (lambda: datetime.now(timezone.utc))
+        self._proposals = proposals
 
     # -- adapter entry point ----------------------------------------------------------
 
@@ -93,6 +98,10 @@ class McpMediator:
         ceiling_problem = self._ceiling_problem(adapter)
         if ceiling_problem is not None:
             return self._blocked(request_id, payload, ceiling_problem, coverage="unavailable")
+        if payload.tool == PROPOSAL_TOOL:
+            # Proposals share the bearer, ceiling, and audit path but are not
+            # fixture operations: nothing below this line runs for them.
+            return self._propose(request_id, adapter, payload)
         try:
             facts = canonicalize_mcp_call(payload.tool, payload.arguments, environment=self._environment)
         except McpCanonicalizationError as exc:
@@ -124,6 +133,51 @@ class McpMediator:
         if decision.verdict == "allow":
             return self._admit_and_apply(request_id, payload, decision, facts, record, binding, approval_id=None)
         return self._request_or_report_approval(request_id, payload, decision, facts, record, binding)
+
+    # -- agent task proposals -----------------------------------------------------------
+
+    def _propose(self, request_id: str, adapter: AdapterSession, payload: McpCallRequest) -> McpCallResponse:
+        if self._proposals is None:
+            problem = McpDecision("block", "mcp:unsupported_tool", "Task proposals are not enabled in this process.",
+                                  ("mcp:unsupported_tool",), "Ask the user to create the task in the Sentinel control center.")
+            self._write_decision(request_id, payload, problem, facts=None, record=None)
+            return self._blocked(request_id, payload, problem, coverage="unsupported")
+        try:
+            facts = canonicalize_task_proposal(payload.arguments)
+            proposal, superseded = self._proposals.propose(
+                facts, request_id=request_id, adapter_session_id=adapter.adapter_session_id,
+            )
+        except (McpCanonicalizationError, ProposalError) as exc:
+            guidance = getattr(exc, "guidance", "") or (
+                "Call sentinel_task_propose with exactly: operation ('read' or 'write'), "
+                "issue_ids (list of issue IDs), minutes (whole number)."
+            )
+            field = getattr(exc, "field", None)
+            if field:
+                guidance = f"Fix the '{field}' argument. {guidance}"
+            problem = McpDecision("block", exc.reason_code, exc.reason, (exc.reason_code,), guidance)
+            self._write_decision(request_id, payload, problem, facts=None, record=None)
+            return self._blocked(request_id, payload, problem, coverage="mandatory")
+        active = self._active_record()
+        decision = McpDecision(
+            "confirm_required", "task:proposal_pending",
+            "The task proposal is stored and waiting for the user to confirm it in Sentinel.",
+            ("task:proposal_pending",),
+            "A task proposal is waiting for the user in Sentinel. Do not retry or call other tools until they confirm it.",
+        )
+        self._write_decision(request_id, payload, decision, facts=None, record=None)
+        return McpCallResponse(
+            request_id=request_id, verdict="confirm_required", reason_code=decision.reason_code,
+            reason=decision.reason, reason_codes=list(decision.reason_codes), guidance=decision.guidance,
+            risk_score=VERDICT_RISK_SCORES["confirm_required"], risk_tier=VERDICT_TO_RISK_TIER["confirm_required"],
+            attempt_id=payload.attempt_id, coverage_status="mandatory",
+            result={
+                "draft_id": proposal.draft_id,
+                "proposal_expires_at": proposal.proposal_expires_at.isoformat(),
+                "replaces_active_task": active is not None,
+                "superseded_draft_id": superseded.draft_id if superseded else None,
+            },
+        )
 
     # -- protected-browser retry ------------------------------------------------------
 
@@ -237,7 +291,10 @@ class McpMediator:
                 record, facts.action, expected_contract_id=record.contract_id, expected_version=record.version,
                 session_id=self._supervision.session_id, active_task_id=record.task_id, now=self._now(),
             )
-        return decide_mcp_action(ceiling, match)
+        proposal_pending = (
+            record is None and self._proposals is not None and self._proposals.pending() is not None
+        )
+        return decide_mcp_action(ceiling, match, proposal_pending=proposal_pending)
 
     def _operation_binding(self, attempt_id: str, adapter: AdapterSession, facts: McpActionFacts,
                            record: ContractRecord) -> OperationBinding:

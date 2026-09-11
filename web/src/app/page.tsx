@@ -3,13 +3,14 @@
 import Link from "next/link";
 
 import { useControl } from "@/components/control-provider";
+import { ProposedTaskCard } from "@/components/proposed-task-card";
 import { Button } from "@/components/ui/button";
 
 const sectionLabelClass =
   "text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--faint)]";
 
 export default function Home() {
-  const { status, activeContract, approvalCount } = useControl();
+  const { status, activeContract, approvalCount, proposal } = useControl();
 
   return (
     <div>
@@ -85,7 +86,8 @@ export default function Home() {
             </div>
         </section>
 
-        <section className="xl:col-start-2 xl:row-start-1">
+        <section className="xl:col-start-2 xl:row-start-1 flex flex-col gap-6">
+          {proposal ? <ProposedTaskCard proposal={proposal} /> : null}
           {approvalCount > 0 ? (
             <div className="rounded-[5px] border-2 border-black bg-[var(--main-soft)] p-5 shadow-[4px_4px_0_0_#000]">
               <p className={sectionLabelClass}>
@@ -103,7 +105,7 @@ export default function Home() {
                 <Link href="/approvals">Review change</Link>
               </Button>
             </div>
-          ) : (
+          ) : proposal ? null : (
             <div>
               <p className={sectionLabelClass}>Attention</p>
               <h2 className="mt-2 text-[15px] font-semibold">

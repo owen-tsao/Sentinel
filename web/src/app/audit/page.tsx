@@ -437,6 +437,11 @@ function eventLabel(eventType: string) {
   return {
     authority_transition_prepared: "Task update prepared",
     authority_transition_completed: "Task settings updated",
+    task_proposed: "Agent proposed a task",
+    task_proposal_confirmed: "You activated a proposed task",
+    task_proposal_dismissed: "Proposed task dismissed",
+    task_proposal_superseded: "Proposed task replaced",
+    task_proposal_expired: "Proposed task expired",
     pre_decision: "Change reviewed",
     decision: "Safety decision made",
     exact_action_approved: "You approved a change",
@@ -451,6 +456,9 @@ function eventDescription(event: AuditEvent) {
   if (event.event_type === "exact_action_denied") return "Nothing was changed.";
   if (event.event_type === "exact_action_approved") {
     return "The approval can be used once.";
+  }
+  if (event.event_type.startsWith("task_propos")) {
+    return proposalDescription(event);
   }
   if (event.event_type === "post_execution") {
     if (tool) {
@@ -472,6 +480,11 @@ function eventDescription(event: AuditEvent) {
     return "Your reviewed task boundaries were recorded.";
   }
   if (event.verdict) {
+    if (event.details?.tool === "sentinel_task_propose") {
+      return event.verdict === "confirm_required"
+        ? "The agent proposed a task; it waits for your confirmation and grants nothing."
+        : `Task proposal rejected: ${verdictLabel(event.verdict)}.`;
+    }
     return tool
       ? `${tool}: ${verdictLabel(event.verdict)}.`
       : `Decision: ${verdictLabel(event.verdict)}.`;
@@ -479,10 +492,37 @@ function eventDescription(event: AuditEvent) {
   return "Sentinel recorded this workspace event.";
 }
 
+function proposalDescription(event: AuditEvent) {
+  const details = event.details ?? {};
+  const targets = Array.isArray(details.targets)
+    ? details.targets.map(String)
+    : [];
+  const scope = targets.length
+    ? `${details.operation === "write" ? "notes on" : "reads of"} ${targets.join(", ")}`
+    : "a fixture task";
+  switch (event.event_type) {
+    case "task_proposed":
+      return `The agent asked for ${scope}. Nothing was granted.`;
+    case "task_proposal_confirmed":
+      return `You activated ${scope} with one click; the task was rebuilt from the stored draft.`;
+    case "task_proposal_dismissed":
+      return details.resolution === "adjusted_in_full_form"
+        ? "You chose to adjust it in the full form instead."
+        : "You dismissed it. Nothing was granted.";
+    case "task_proposal_superseded":
+      return "A newer proposal from the agent replaced it.";
+    case "task_proposal_expired":
+      return "It was not confirmed in time. Nothing was granted.";
+    default:
+      return "Sentinel recorded a task proposal event.";
+  }
+}
+
 function mcpToolSummary(event: AuditEvent) {
   const details = event.details ?? {};
   const tool = details.tool;
   if (typeof tool !== "string") return null;
+  if (tool === "sentinel_task_propose") return "the task proposal tool";
   const targets = Array.isArray(details.targets) ? details.targets : [];
   const target = targets.length === 1 ? String(targets[0]) : null;
   return target ? `MCP tool ${tool} on ${target}` : `MCP tool ${tool}`;

@@ -23,6 +23,11 @@ from sentinel.api.control_schemas import (  # noqa: E402
     ContractDraftRequest,
     ContractDraftResponse,
     ControlStatusResponse,
+    PendingProposalResponse,
+    ProposalAdjustResponse,
+    ProposalConfirmRequest,
+    ProposalConfirmResponse,
+    ProposalDismissResponse,
 )
 
 OUTPUT = ROOT / "web" / "src" / "lib" / "control-types.ts"
@@ -38,6 +43,11 @@ MODELS = (
     ApprovalDecisionRequest,
     ApprovalActionResponse,
     AuditListResponse,
+    PendingProposalResponse,
+    ProposalConfirmRequest,
+    ProposalConfirmResponse,
+    ProposalDismissResponse,
+    ProposalAdjustResponse,
 )
 
 

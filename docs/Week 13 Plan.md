@@ -145,6 +145,32 @@ Exit evidence: a short table of the three trials per channel, the chosen
 channel with reasons, and the activation refactor sketch. Kill if neither
 channel works in at least two of three trials.
 
+### Phase 0 record (September 9, 2026)
+
+Decision made in the open, with the live part still owed:
+
+| Check | Result | Status |
+|---|---|---|
+| 0.3 Activation can take a server-stored draft without duplicating contract building | Yes. `_accepted_fixture_contract` gained an `authorization_reference` argument; the confirm route rebuilds the `AcceptedContractDraft` from the stored facts and calls the same activation path the manual form uses. No second builder. | Verified (tests) |
+| 0.1 Failed read guidance names the propose tool | `contract:not_found` and `task:awaiting_confirmation` guidance now say to call `sentinel_task_propose` with explicit fields, and the shim surfaces that text to the agent. | Verified (tests); whether Cursor's agent follows it unprompted is **unverified** until the live trials below |
+| 0.1 Agent proposes unprompted in a fresh chat, 3 trials | 3 of 3 fresh Cursor subagents proposed on the first blocked call with correct fields (one chose read-only unprompted; one recovered from an out-of-scope rejection and asked the user). Proxy for a real user chat; one real chat still owed. Table in the [Week 13 Handover](./Week%2013%20Handover.md). | Verified by proxy |
+| 0.2 `beforeSubmitPrompt` hook channel | Not built. Deliberately skipped because the MCP tool needs no parser and reuses the Week 12 controls; the hook stays a fallback if 0.1 fails in 2 of 3 trials. | Deferred |
+
+Channel chosen: the MCP tool. Kill condition on 0.1 not triggered (3/3 by
+proxy); the [Week 13 Handover](./Week%2013%20Handover.md) lists the trials and
+the one real chat still owed.
+
+Two clarifications made while implementing, so later readers do not trip on
+them:
+
+- The card shows an "objective" line while the plan says no agent prose is
+  stored. Both hold: the objective is derived server-side from the structured
+  facts (`derive_objective`), the same way the manual fixture form already
+  generates its objective. No agent text is stored anywhere.
+- "Adjust in full form" consumes the draft (recorded as `superseded` with
+  resolution `adjusted_in_full_form`). It returns a prefill for the form; the
+  form's normal review-and-activate path applies from there.
+
 ## Phase 1: Server-owned proposal store
 
 - `ProposedTask` model: `draft_id`, `supervision_session_id`, `policy_sha256`,

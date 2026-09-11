@@ -227,6 +227,26 @@ export type ProviderScope = {
   adapter_id: string;
 };
 
+export type TaskProposalResponse = {
+  draft_id: string;
+  state: "pending" | "confirmed" | "superseded" | "dismissed" | "expired";
+  source: "agent_mcp";
+  objective: string;
+  operation: "read" | "write";
+  exact_targets: Array<string>;
+  environment: string;
+  allowed_effects: Array<string>;
+  task_duration_minutes: number;
+  content_sha256: string;
+  proposal_number: number;
+  created_at: string;
+  proposal_expires_at: string;
+  replaces_active_task?: boolean;
+  resolution?: string | null;
+  resolved_at?: string | null;
+  confirmed_contract_id?: string | null;
+};
+
 export type ControlStatusResponse = {
   paired?: true;
   supervision_session_id: string;
@@ -281,4 +301,29 @@ export type ApprovalActionResponse = {
 
 export type AuditListResponse = {
   events: Array<AuditEvent>;
+};
+
+export type PendingProposalResponse = {
+  proposal?: TaskProposalResponse | null;
+  recent?: Array<TaskProposalResponse>;
+};
+
+export type ProposalConfirmRequest = {
+  expected_active_task_id: string | null;
+};
+
+export type ProposalConfirmResponse = {
+  draft_id: string;
+  active_contract: ContractRecord;
+};
+
+export type ProposalDismissResponse = {
+  draft_id: string;
+  state: "dismissed" | "superseded";
+};
+
+export type ProposalAdjustResponse = {
+  draft_id: string;
+  raw_prompt: string;
+  accepted_contract: AcceptedContractDraft;
 };
