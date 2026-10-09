@@ -658,53 +658,156 @@ interaction per job.
 - Standing reads under the ceiling: in-pattern fixture reads pass with no
   active task; writes still require one. "No active task" keeps its meaning
   for writes and for the stale-view and supersession rules.
-- A half-day spike on an OS-level confirmation surface with a written
-  verdict; built only if it needs no new dependency and cannot be driven by a
-  same-user process, and even then only to *open* the existing card.
+- A half-day spike on a browser-sent notification: the paired Sentinel tab
+  uses the standard Notification API to surface a pending proposal or
+  approval on any OS, with an action button that completes the decision
+  through the existing protected route where the browser supports it, and a
+  click that focuses the card everywhere. No OS-native prompt, no deep link.
 - The ten-fresh-chat baseline Week 13 left unmeasured, run before and after.
 
 **Kill condition:** Any path where a write escapes both exact scope and a
 confirm/block tier, or a budget that anything but the protected activation
 click can set or raise. Then budgets are dropped and per-write approval stays.
+If a notification click can complete a decision without the paired session
+and Origin check, it is reduced to open-only.
 
 **Deliverable:** Activation that carries its own consent, standing reads, a
-measured before/after, and a verdict on the OS surface.
+measured before/after, and a notification from the paired tab.
 
-### Week 15: Transition Drafts and Persistent Guardrails
+**Amended September 11 (afternoon):** implementation approved after three
+plan gaps were fixed: the budgetable tier is now defined as a third disjoint
+operation set (`issue_add_note` moves there from `confirm_operations`; no
+budget means confirm, as today); the notification spike targets the browser
+Notification API instead of macOS-only `osascript`/`tkinter`; and the
+harness separates read-only jobs so standing reads do not distort the
+before/after. Details in the plan's "Amendments" section.
 
-**Goal:** Handle changing work with compact protected review and a durable
-local policy ceiling.
+**Built September 11 (evening), unmeasured:** all three parts are implemented
+and verified in-process (637 pytest, 33 Playwright, Bugbot and Security
+reviews clean after fixes). The kill condition did not trip: the agent cannot
+set a budget, the confirm body cannot carry one, blocked and replayed writes
+spend nothing, and the notification click is no stronger than the card
+button. Standing reads were additionally made to fail closed while authority
+is quarantined. The ten-run baseline and post-change runs and a live
+notification check are still owed; see
+[Week 14 Handover](./Week%2014%20Handover.md).
 
-**Riskiest assumption:** Sentinel can classify task changes conservatively
-enough to reduce repeated setup while keeping every Cursor-originated
-authority change behind browser confirmation.
+**User verdict, September 11 (evening):** the per-task write budget is the
+wrong abstraction and is dropped as a concept. What the user wanted was (a) no
+activation click for work that does not need one, not only reads, and (b) a
+per-action prompt only when the action is actually dangerous. Standing reads
+and the three ceiling tiers (ordinary / in-scope write / confirm) stay; the
+user-facing count was removed the same evening from every card, form, and
+agent message, leaving only a silent runaway cap in the ceiling (50 per task,
+blocks with "propose a fresh task" rather than raising a card). The
+fixture's exact-ticket scope was a
+proof of the narrowest boundary, not the scope model for real tools. Both
+points feed the Week 15 scope decision below.
 
-**Planned outcome:**
+### Week 15: Scope Decision, Standing Permissions, and Guardrails
 
-- Evolve Week 12's immutable startup ceiling into protected, versioned local
-  guardrails.
-- Intersect every draft, transition, approval, and execution with the
-  server-owned ceiling.
-- Allow runtime changes only to narrow the ceiling. Widening remains a
-  protected restart procedure with a new content binding and never expands an
-  active task; Week 15 adds no widening UI or API.
-- Prepare transition drafts only for narrow, replace, and sensitive expansion.
-  Treat continue and ordinary extension as fresh replacement drafts this week.
-- Require protected browser confirmation for every Cursor-originated authority
-  change until an authenticated host-provenance gate passes.
-- Keep the previous task active while replacement or sensitive expansion is
-  pending or rejected.
-- Measure classification errors, review time, stale-authority reuse, and
-  unnecessary transition prompts on a preregistered workflow pack.
+**Goal:** Decide what Sentinel actually protects and for whom, then turn the
+startup ceiling into user-set standing permissions so routine work needs no
+activation click and only dangerous actions prompt.
 
-**Kill condition:** If a transition draft can retain stale targets, cross the
-guardrail ceiling, or alter authority before confirmation, keep every new
-prompt as a fresh replacement draft. Also retain the previous flow if
-preregistered classification-error or unnecessary-prompt thresholds fail.
+**Plan:** [Week 15 Plan](./Week%2015%20Plan.md) and the
+[Week 15 Scope Decision](./Week%2015%20Scope%20Decision.md), both drafted
+September 11 (evening) and awaiting the user's review. The plan narrows this
+entry in three places, each with a stated reason: Codex is coverage-mapped as
+advisory rather than parity-checked; no Slack write is attempted this week;
+and the build is tiered so the authority ships before the screens.
 
-**Deliverable:** Persistent local guardrails and conservative task-change
-drafts that reduce reconstruction work without granting authority from Cursor
-events, history, or agent suggestions.
+**Reordered September 11, 2026 (user decision):** the scope decision moves
+ahead of everything else this week, and the one-day security deep review
+follows it rather than preceding it, because a threat model written against
+the fake tracker would protect the wrong thing. Transition drafts (the
+original Week 15 headline) are deferred to whichever later week the scope
+decision makes them relevant.
+
+**Part 1: scope decision (first, about half a day plus one spike).** A short
+written decision, reviewed by the user before any Week 15 code, answering:
+
+- **Where integrations live.** Sentinel is the MCP server the agent talks to.
+  *Owned* mode: Sentinel holds the OAuth connection (email, calendar, Slack)
+  and calls the provider, so enforcement is complete because the agent never
+  holds a credential. *Proxy* mode: Sentinel forwards to a user-connected MCP
+  server for long-tail tools, labelled "mandatory only when Sentinel is the
+  sole configured route." Owned mode is where enforcement lives; this means
+  Sentinel needs OAuth and a real Connections page.
+- **First providers.** Communications first (email, calendar, Slack), because
+  a plain verb splits sharply into safe and unsafe there and the roadmap's
+  domain gate already starts there. "Dangerous" is decided from provider
+  facts (external recipient, public channel, member count, reversibility),
+  not from a model.
+- **Agent hosts.** MCP is the common denominator across Cursor, Claude Code,
+  Codex, and (to verify) Hermes. The deciding question per host is whether it
+  can be configured so a provider is reachable *only* through Sentinel. Prove
+  on Cursor, check config parity on Claude Code and Codex, label the rest
+  "mandatory only if MCP-only, otherwise advisory." Native shell, file, and
+  browser tools stay advisory on every host.
+- **What "scope" means.** Two axes, not one. *Exposure*: which resources the
+  agent may touch at all, reads included, because a customer thread or an
+  external channel is confidential even though reading it is reversible.
+  *Damage*: which operations on those resources ask, based on reversibility,
+  breadth, and whether the effect leaves the boundary. Scope is therefore
+  resource-shaped (this repo; these channels; this inbox minus these labels),
+  never "the whole account" by default and never exact record IDs by default.
+
+**Riskiest assumption (unverified) and the spike:** one real provider with a
+throwaway account (a disposable Gmail or Slack workspace), fronted by Sentinel,
+driven from Cursor and from Claude Code. Confirm (a) the host can be locked to
+Sentinel as the only route and (b) Sentinel receives the full canonical
+arguments (recipient, channel, body) needed to decide. **Kill condition:** if
+a host lets the agent add its own MCP servers and the user cannot lock that
+down, the coverage claim for that host drops to "mandatory only when
+configured" and the decision says so up front.
+
+**Part 2: security deep review (one day, after Part 1).** Threat model v2 for
+the whole local product as scoped by Part 1 (agent-side: prompt injection via
+content, replay, time-of-check races, proposal floods; host-side: same-user
+process, cookie and Origin assumptions, the service worker; human-side:
+mis-clicks, stale views, notification fatigue); an afternoon red-team pass
+against the real code written up as findings with severity; an enforcement
+coverage map of every surface marked enforced / advisory / unsupported with
+the reason; and a ranked fix list. ML hardening is explicitly deferred until a
+mediated provider produces real decisions to evaluate against.
+
+**Part 3: standing permissions (the build, remaining days).** Generalise the
+Week 14 idea into three layers:
+
+1. **Standing permissions**, set once per workspace or account in Settings:
+   what the agent may do with no task and no click (read and edit in this
+   repo; read and draft in this inbox except customer-labelled threads; read
+   and post in these channels). This is the persistent-guardrails mechanism
+   from the original Week 15, now user-shaped rather than a startup constant.
+   Runtime changes may only narrow; widening remains a protected procedure
+   with a fresh content binding.
+2. **Task activation** only for stepping outside standing permissions (a
+   customer thread, a second repo, an unusual provider); one click, the card
+   names the exact step outside.
+3. **Per-action confirmation** only for dangerous actions regardless of task
+   (irreversible, external, bulk, production); blocks for critical ones.
+
+The user-facing write count is already gone (Week 14, same evening); the
+silent runaway cap stays in the ceiling. Keep the fixture as a regression bench
+only.
+
+**Kill condition:** if standing permissions can be widened by anything but the
+protected settings flow, or if a task can retain authority the standing set
+did not grant after it expires, revert to activation-per-task. If the Part 1
+spike fails its kill condition for every host, Sentinel's honest posture is
+"advisory except owned providers," and the roadmap says so.
+
+**Deliverable:** a reviewed scope decision, a threat model and coverage map
+for the product as scoped, and standing permissions that make routine
+in-scope work click-free while dangerous actions still ask.
+
+**Original Week 15 notes (transition drafts), kept for reference:** handle
+changing work with compact protected review; classify task changes
+conservatively; prepare transition drafts only for narrow, replace, and
+sensitive expansion; keep the previous task active while a replacement is
+pending; measure classification errors and unnecessary prompts. Deferred
+until the scope decision shows where task changes actually occur.
 
 **Friction candidates carried from Week 13 (user verdict, September 10, 2026):**
 the one-click proposal loop worked end to end in a real Cursor chat, but the
