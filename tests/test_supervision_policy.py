@@ -59,13 +59,22 @@ class SupervisionPolicyCeilingTests(unittest.TestCase):
             classify(self.policy, operation="issue_add_note", note_bytes=10).verdict,
             classify(self.policy, operation="issue_delete").verdict,
         }
-        self.assertEqual(verdicts, {"ordinary", "confirm_required", "forbidden"})
+        self.assertEqual(verdicts, {"ordinary", "budgetable", "forbidden"})
         self.assertNotIn("allow", verdicts)
+        confirming = week12_fixture_policy(
+            confirm_operations=frozenset({"issue_add_note"}),
+            budgetable_operations=frozenset(),
+            max_write_budget=0,
+        )
+        self.assertEqual(classify(confirming, operation="issue_add_note", note_bytes=10).verdict, "confirm_required")
 
-    def test_read_is_ordinary_and_note_requires_confirmation(self) -> None:
+    def test_read_is_ordinary_and_note_is_budgetable_never_allow(self) -> None:
         self.assertEqual(classify(self.policy).reason_code, "supervision:ordinary_operation")
         note = classify(self.policy, operation="issue_add_note", note_bytes=12)
-        self.assertEqual(note.verdict, "confirm_required")
+        self.assertEqual(note.verdict, "budgetable")
+        self.assertEqual(note.reason_code, "supervision:budgetable_operation")
+        self.assertEqual(self.policy.max_write_budget, 50)
+        self.assertFalse(self.policy.standing_read)
 
     def test_forbidden_operations_and_unknown_operations_fail_closed(self) -> None:
         for operation in ("issue_delete", "fixture_admin", "network_access", "issue_rename"):
@@ -96,10 +105,15 @@ class SupervisionPolicyCeilingTests(unittest.TestCase):
         )
         wider = week12_fixture_policy(
             ordinary_operations=frozenset({"issue_read", "issue_add_note"}),
-            confirm_operations=frozenset(),
+            budgetable_operations=frozenset(),
+            max_write_budget=0,
         )
+        bigger_budget = week12_fixture_policy(max_write_budget=6)
+        standing = week12_fixture_policy(standing_read=True)
         self.assertEqual(same.content_sha256, self.policy.content_sha256)
         self.assertNotEqual(wider.content_sha256, self.policy.content_sha256)
+        self.assertNotEqual(bigger_budget.content_sha256, self.policy.content_sha256)
+        self.assertNotEqual(standing.content_sha256, self.policy.content_sha256)
 
     def test_invalid_ceilings_are_rejected_at_construction(self) -> None:
         cases = {
@@ -118,6 +132,8 @@ class SupervisionPolicyCeilingTests(unittest.TestCase):
             "supervision:no_operations": {
                 "ordinary_operations": frozenset(),
                 "confirm_operations": frozenset(),
+                "budgetable_operations": frozenset(),
+                "max_write_budget": 0,
             },
         }
         for expected, overrides in cases.items():
@@ -125,6 +141,32 @@ class SupervisionPolicyCeilingTests(unittest.TestCase):
                 with self.assertRaises(SupervisionPolicyError) as raised:
                     week12_fixture_policy(**overrides)
                 self.assertEqual(raised.exception.reason_code, expected)
+
+    def test_budget_tier_must_be_disjoint_and_consistently_configured(self) -> None:
+        cases = [
+            # The same op cannot be both always-confirm and budgetable.
+            ("supervision:overlapping_operations", {"confirm_operations": frozenset({"issue_add_note"})}),
+            # A budgetable tier with no budget is inert by accident, not by design.
+            ("supervision:invalid_write_budget", {"max_write_budget": 0}),
+            # A budget with nothing to spend it on is equally a misconfiguration.
+            ("supervision:invalid_write_budget", {"budgetable_operations": frozenset(), "max_write_budget": 3}),
+            ("supervision:invalid_write_budget", {"max_write_budget": -1}),
+            ("supervision:invalid_write_budget", {"max_write_budget": 101}),
+            ("supervision:invalid_write_budget", {"max_write_budget": True}),
+            ("supervision:invalid_standing_read", {"standing_read": "yes"}),
+        ]
+        for expected, overrides in cases:
+            with self.subTest(overrides=overrides):
+                with self.assertRaises(SupervisionPolicyError) as raised:
+                    week12_fixture_policy(**overrides)
+                self.assertEqual(raised.exception.reason_code, expected)
+        # A confirm-only ceiling with no budget tier is still a valid ceiling.
+        legacy = week12_fixture_policy(
+            confirm_operations=frozenset({"issue_add_note"}),
+            budgetable_operations=frozenset(),
+            max_write_budget=0,
+        )
+        self.assertEqual(legacy.permitted_operations, frozenset({"issue_read", "issue_add_note"}))
 
 
 class SupervisionPolicyBindingTests(unittest.TestCase):
@@ -143,7 +185,8 @@ class SupervisionPolicyBindingTests(unittest.TestCase):
             rebound = second.bind(week12_fixture_policy(), session)
             weaker = week12_fixture_policy(
                 ordinary_operations=frozenset({"issue_read", "issue_add_note"}),
-                confirm_operations=frozenset(),
+                budgetable_operations=frozenset(),
+                max_write_budget=0,
             )
             with self.assertRaises(SupervisionPolicyError) as raised:
                 second.bind(weaker, session)
@@ -206,7 +249,8 @@ class SupervisionPolicyStartupTests(unittest.TestCase):
 
                 weaker = week12_fixture_policy(
                     ordinary_operations=frozenset({"issue_read", "issue_add_note"}),
-                    confirm_operations=frozenset(),
+                    budgetable_operations=frozenset(),
+                    max_write_budget=0,
                 )
                 with self.assertRaises(SupervisionPolicyError) as raised:
                     create_app(

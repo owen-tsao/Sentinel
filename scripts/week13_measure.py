@@ -32,6 +32,11 @@ HUMAN_EVENTS = {
 }
 
 
+BUDGETED_WRITE = "mcp:budgeted_write"
+STANDING_READ = "supervision:standing_read"
+BUDGET_EXHAUSTED = "supervision:write_budget_exhausted"
+
+
 @dataclass
 class Event:
     event_type: str
@@ -39,6 +44,7 @@ class Event:
     contract_id: str | None
     verdict: str | None
     details: dict
+    reason_codes: list[str]
     raw: str
 
 
@@ -55,6 +61,15 @@ class Tally:
     human_interactions_in_completed_loops: list[int] = field(default_factory=list)
     prose_hits: int = 0
     unconfirmed_contract_ids: set[str] = field(default_factory=set)
+    # Week 14. Read-only proposals are counted apart from write jobs because
+    # standing reads remove them entirely after the change, which would
+    # otherwise flatter the per-job interaction count.
+    read_only_confirmations: int = 0
+    budgeted_notes: int = 0
+    # Distinct attempts, not decision rows: a replay of an already-applied
+    # attempt logs the exhausted reason again without producing a card.
+    budget_exhausted_attempts: set[str] = field(default_factory=set)
+    standing_reads: int = 0
 
 
 def load_events(database: Path) -> list[Event]:
@@ -82,6 +97,7 @@ def load_events(database: Path) -> list[Event]:
                 contract_id=contract_id,
                 verdict=verdict,
                 details=payload.get("details") or {},
+                reason_codes=list(payload.get("reason_codes") or []),
                 raw=event_json,
             )
         )
@@ -127,6 +143,8 @@ def tally_run(root: Path, tally: Tally, *, prose_marker: str | None) -> None:
             proposed_at[details["draft_id"]] = event.timestamp
         elif event.event_type == "task_proposal_confirmed":
             tally.confirmations += 1
+            if details.get("operation") == "read":
+                tally.read_only_confirmations += 1
             started = proposed_at.get(details["draft_id"])
             if started is not None:
                 tally.confirm_seconds.append((event.timestamp - started).total_seconds())
@@ -139,12 +157,23 @@ def tally_run(root: Path, tally: Tally, *, prose_marker: str | None) -> None:
                 tally.human_dismissals += 1
         if event.event_type.startswith("task_propos") and event.contract_id:
             proposal_contract_ids.add(event.contract_id)
+        if event.event_type == "execution_admitted":
+            if BUDGETED_WRITE in event.reason_codes:
+                tally.budgeted_notes += 1
+            if STANDING_READ in event.reason_codes:
+                tally.standing_reads += 1
+        if event.event_type == "decision" and BUDGET_EXHAUSTED in event.reason_codes:
+            tally.budget_exhausted_attempts.add(str(details.get("attempt_id") or event.raw))
 
     tally.unconfirmed_contract_ids |= proposal_contract_ids - confirmed_contracts
 
-    # A completed loop = one confirmed proposal followed by at least one applied
-    # write. Count every human browser interaction in that window.
-    confirmed_indexes = [i for i, e in enumerate(events) if e.event_type == "task_proposal_confirmed"]
+    # A completed loop = one confirmed *write* proposal followed by at least one
+    # applied note. Count every human browser interaction in that window: two
+    # under per-note approval, one when the note ran inside the task.
+    confirmed_indexes = [
+        i for i, e in enumerate(events)
+        if e.event_type == "task_proposal_confirmed" and e.details.get("operation") != "read"
+    ]
     for start in confirmed_indexes:
         window = events[start:]
         applied = next(
@@ -187,7 +216,11 @@ def report(tally: Tally, *, prose_marker: str | None) -> None:
         loops = f"{tally.completed_loops} loops; interactions per loop: {counts}"
     else:
         loops = "no completed loop (confirm + applied note)"
-    print(f"{'Repeated reviews (task + one note)':<44}{loops:<52}exactly 2")
+    print(f"{'Interactions per write job (task + note)':<44}{loops:<52}2 before Week 14; 1 after")
+    print(f"{'Read-only proposals confirmed':<44}{str(tally.read_only_confirmations):<52}report; 0 once standing reads are on")
+    print(f"{'Notes run inside the task (no card)':<44}{str(tally.budgeted_notes):<52}report")
+    print(f"{'Writes blocked at the runaway limit':<44}{str(len(tally.budget_exhausted_attempts)):<52}expect 0; any means a looping agent")
+    print(f"{'Reads with no task (standing)':<44}{str(tally.standing_reads):<52}report")
     print(f"{'Human dismissals':<44}{str(tally.human_dismissals):<52}report; judge unnecessary ones by hand")
     prose = f"{tally.prose_hits} hits for {prose_marker!r}" if prose_marker else "not checked (pass --prose-marker)"
     print(f"{'Raw agent text retained':<44}{prose:<52}0")

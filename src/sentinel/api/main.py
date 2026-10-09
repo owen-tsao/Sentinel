@@ -1695,6 +1695,25 @@ def _accepted_fixture_contract(
     tools = {"sentinel_issue_read"}
     if accepted.operation == "write":
         tools.add("sentinel_issue_add_note")
+    # Week 14 write limit, as revised: the ceiling decides. An in-scope note task
+    # carries the ceiling's runaway cap; a read task or a ceiling that does not
+    # place notes in the middle tier carries zero. The request cannot raise it
+    # and is not offered a choice; a value above the cap or on the wrong
+    # operation is rejected outright rather than quietly clamped.
+    policy = policy_binding.policy
+    notes_run_in_task = accepted.operation == "write" and "issue_add_note" in policy.budgetable_operations
+    if accepted.write_budget > 0:
+        if not notes_run_in_task:
+            raise HTTPException(
+                status_code=422,
+                detail="The startup ceiling does not allow a write budget for this task.",
+            )
+        if accepted.write_budget > policy.max_write_budget:
+            raise HTTPException(
+                status_code=422,
+                detail=f"The startup ceiling caps write budgets at {policy.max_write_budget} notes.",
+            )
+    write_budget = policy.max_write_budget if notes_run_in_task else 0
     unsatisfiable = [
         label
         for flag, label in (
@@ -1741,6 +1760,7 @@ def _accepted_fixture_contract(
             datetime.now(timezone.utc)
             + timedelta(minutes=accepted.expires_in_minutes)
         ),
+        write_budget=write_budget,
     )
 
 
@@ -1824,6 +1844,7 @@ def _proposal_response(
         environment=proposal.environment,
         allowed_effects=list(proposal.allowed_effects),
         task_duration_minutes=proposal.task_duration_minutes,
+        write_budget=proposal.write_budget,
         content_sha256=proposal.content_sha256,
         proposal_number=proposal.proposal_number,
         created_at=proposal.created_at,
@@ -1882,15 +1903,18 @@ def _accepted_draft_from_proposal(proposal: TaskProposal) -> AcceptedContractDra
     """
 
     write = proposal.operation == "write"
+    budget = proposal.write_budget if write else 0
+    if write and budget > 0:
+        side_effect = "Internal notes on the listed fixture issues, added within the task without a per-note approval."
+    elif write:
+        side_effect = "One reviewed internal note per approval on the listed fixture issues."
+    else:
+        side_effect = "Read-only access to the listed fixture issues."
     return AcceptedContractDraft(
         operation=proposal.operation,
         exact_targets=list(proposal.exact_targets),
         environment=proposal.environment,  # type: ignore[arg-type]
-        expected_side_effects=[
-            "One reviewed internal note per approval on the listed fixture issues."
-            if write
-            else "Read-only access to the listed fixture issues."
-        ],
+        expected_side_effects=[side_effect],
         allowed_effects=set(proposal.allowed_effects),
         forbidden_operations={"delete", "network", "credential_access"},
         forbidden_effects=["No deletion, network, or credential access."],
@@ -1899,6 +1923,7 @@ def _accepted_draft_from_proposal(proposal: TaskProposal) -> AcceptedContractDra
         dry_run_required=False,
         expires_in_minutes=proposal.task_duration_minutes,
         tool_family="sentinel_issue_fixture",
+        write_budget=budget,
     )
 
 
@@ -2093,6 +2118,8 @@ def _control_integration_status(
             policy_sha256=policy_binding.content_sha256,
             expires_at=policy_binding.expires_at,
             expired=expired,
+            max_write_budget=policy.max_write_budget,
+            standing_read=policy.standing_read,
         ),
         agent=AgentConnectionResponse(
             host=connection.host,

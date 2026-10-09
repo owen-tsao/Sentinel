@@ -120,6 +120,11 @@ class ActionContract(_StrictModel):
     authorization_reference: str = Field(..., min_length=1, max_length=500)
     version: int = Field(default=1, ge=1)
     expires_at: datetime
+    # Week 14 consent-at-activation: how many budgetable writes this task may
+    # run without a per-write approval card. Zero means every such write still
+    # stops for exact approval. Granted only by the protected activation click
+    # and bounded by the startup ceiling's `max_write_budget`.
+    write_budget: int = Field(default=0, ge=0, le=1_000)
 
     @validator("expires_at")
     def _normalize_expiry(cls, value: datetime) -> datetime:

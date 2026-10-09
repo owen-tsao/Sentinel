@@ -18,6 +18,8 @@ export type ContractPreview = {
   environment: string;
   targets: string[];
   expiresInMinutes: number | null;
+  /** True for a fixture write task: notes inside it run without a card. */
+  notesRun: boolean;
 };
 
 /**
@@ -78,6 +80,7 @@ export function ContractTicket({
         environment: contract.contract.environment,
         targets: contract.contract.exact_targets,
         expires: `${formatMinutes(contract.expires_at)} · ${formatClock(contract.expires_at)}`,
+        notesRun: notesRunInTask(contract),
       }
     : {
         title: draftTitle(preview),
@@ -88,6 +91,7 @@ export function ContractTicket({
           preview?.expiresInMinutes && preview.expiresInMinutes > 0
             ? `${preview.expiresInMinutes} min after activation`
             : "—",
+        notesRun: preview?.notesRun ?? false,
       };
 
   const seal =
@@ -144,7 +148,7 @@ export function ContractTicket({
               ? replacesActive
                 ? "Activating replaces the current task."
                 : "Activating turns approval mode on for this task."
-              : "Reads run freely; each write pauses for your approval."
+              : writeSentence(facts.notesRun)
         }
         actions={
           stage === "ready" && onActivate ? (
@@ -179,6 +183,7 @@ export function ActivationReceipt({
   const operation = contract?.contract.allowed_operations[0] ?? "Not specified";
   const environment = contract?.contract.environment ?? "Not specified";
   const expires = contract?.expires_at ? `${formatMinutes(contract.expires_at)}` : "Not specified";
+  const receiptNotesRun = contract ? notesRunInTask(contract) : false;
 
   return (
     <dialog
@@ -214,7 +219,11 @@ export function ActivationReceipt({
             ]}
           />
           <TicketFoot
-            note="Sentinel will enforce these boundaries for actions routed through it and ask before important changes."
+            note={
+              receiptNotesRun
+                ? "Sentinel will enforce these boundaries. Notes inside this task run without asking; anything outside it is blocked."
+                : "Sentinel will enforce these boundaries for actions routed through it and ask before important changes."
+            }
             actions={
               <Button type="button" variant="raised" autoFocus onClick={onClose}>
                 Done
@@ -225,6 +234,21 @@ export function ActivationReceipt({
       ) : null}
     </dialog>
   );
+}
+
+/** Fixture notes inside a write task run without a card; other write tools still pause per write. */
+function notesRunInTask(record: ContractRecord): boolean {
+  return (
+    record.contract.allowed_operations.includes("write") &&
+    (record.contract.allowed_tools ?? []).includes("sentinel_issue_add_note") &&
+    (record.contract.write_budget ?? 0) > 0
+  );
+}
+
+function writeSentence(notesRun: boolean): string {
+  return notesRun
+    ? "Reads run freely; notes inside this task run without asking. Anything outside it is blocked."
+    : "Reads run freely; each write pauses for your approval.";
 }
 
 export function draftTitle(preview: ContractPreview | null): string {

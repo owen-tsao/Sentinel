@@ -136,6 +136,18 @@ class McpDecision:
     guidance: str
 
 
+@dataclass(frozen=True)
+class WriteBudgetState:
+    """What the active task granted and what its durable operation records already show spent."""
+
+    granted: int
+    spent: int
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.granted - self.spent)
+
+
 NO_TASK_GUIDANCE = (
     "No task is active. Call sentinel_task_propose with the exact operation ('read' or 'write'), "
     "the issue IDs you need, and a duration in minutes. The user will confirm it in Sentinel; "
@@ -145,6 +157,9 @@ AWAITING_CONFIRMATION_GUIDANCE = (
     "A task proposal is already waiting for the user in Sentinel. Do not retry or propose again "
     "until they confirm or dismiss it."
 )
+STANDING_READ_REASON = "supervision:standing_read"
+BUDGETED_WRITE_REASON = "mcp:budgeted_write"
+BUDGET_EXHAUSTED_REASON = "supervision:write_budget_exhausted"
 
 
 def decide_mcp_action(
@@ -152,8 +167,16 @@ def decide_mcp_action(
     match: ContractMatchResult | None,
     *,
     proposal_pending: bool = False,
+    standing_read: bool = False,
+    budget: WriteBudgetState | None = None,
 ) -> McpDecision:
-    """Compose the ceiling and the active-contract match. Ceiling first, then contract."""
+    """Compose the ceiling and the active-contract match. Ceiling first, then contract.
+
+    `standing_read` is true only when the caller has already established that
+    the ceiling declares standing reads, the action is a read, and the ceiling
+    classified it as ordinary. `budget` is supplied only for budgetable
+    operations under an active task; it never widens a mismatch or a block.
+    """
 
     if ceiling.verdict == "forbidden":
         return McpDecision(
@@ -161,6 +184,12 @@ def decide_mcp_action(
             "This operation is outside the startup guardrails; no task can authorize it. Ask the user.",
         )
     if match is None:
+        if standing_read and ceiling.verdict == "ordinary":
+            return McpDecision(
+                "allow", STANDING_READ_REASON,
+                "The startup ceiling permits this read with no active task.", (STANDING_READ_REASON,),
+                "",
+            )
         if proposal_pending:
             return McpDecision(
                 "block", "task:awaiting_confirmation",
@@ -180,6 +209,32 @@ def decide_mcp_action(
     if ceiling.verdict == "confirm_required":
         return McpDecision(
             "confirm_required", ceiling.reason_code, ceiling.reason, (ceiling.reason_code,),
+            "Ask the user to approve this exact action in the Sentinel control center, then retry unchanged.",
+        )
+    if ceiling.verdict == "budgetable":
+        # An in-scope write in this tier runs without a card. The task's write
+        # limit is a runaway bound, not a consent knob: hitting it blocks with a
+        # clear next step so a looping agent can never turn into a stream of
+        # approval cards for the human.
+        if budget is not None and budget.granted > 0 and budget.remaining > 0:
+            return McpDecision(
+                "allow", BUDGETED_WRITE_REASON,
+                "The action is within the ceiling and the active task.",
+                (BUDGETED_WRITE_REASON,),
+                "This write ran within the active task.",
+            )
+        if budget is not None and budget.granted > 0:
+            return McpDecision(
+                "block", BUDGET_EXHAUSTED_REASON,
+                f"This task reached its runaway write limit of {budget.granted}.",
+                (BUDGET_EXHAUSTED_REASON,),
+                "Stop and propose a fresh task with sentinel_task_propose if more writes are genuinely "
+                "needed; the user will see that as one activation, not a stream of approvals.",
+            )
+        return McpDecision(
+            "confirm_required", "supervision:confirm_operation",
+            "The active task grants no writes of this kind, so this operation needs exact human approval.",
+            ("supervision:confirm_operation",),
             "Ask the user to approve this exact action in the Sentinel control center, then retry unchanged.",
         )
     return McpDecision(

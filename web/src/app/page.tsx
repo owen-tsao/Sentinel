@@ -41,7 +41,11 @@ export default function Home() {
         {proposal ? (
           <ProposedTaskCard proposal={proposal} />
         ) : (
-          <TaskTicket active={activeContract} approvalCount={approvalCount} />
+          <TaskTicket
+            active={activeContract}
+            approvalCount={approvalCount}
+            standingRead={status?.integration?.ceiling.standing_read ?? false}
+          />
         )}
 
         <SectionHeader
@@ -99,9 +103,11 @@ export default function Home() {
 function TaskTicket({
   active,
   approvalCount,
+  standingRead,
 }: {
   active: ContractRecord | null;
   approvalCount: number;
+  standingRead: boolean;
 }) {
   const contract = active?.contract;
   if (!active || !contract) {
@@ -121,8 +127,9 @@ function TaskTicket({
             No task is active
           </h2>
           <p className="mt-2 max-w-[44ch] text-[13px] leading-5 text-[var(--subtext)]">
-            Sentinel-guarded tools stay blocked until you activate a task. Your agent can
-            propose one from Cursor, or you can write one here.
+            {standingRead
+              ? "Your agent can read fixture issues, but every write stays blocked until you activate a task. It can propose one from Cursor, or you can write one here."
+              : "Sentinel-guarded tools stay blocked until you activate a task. Your agent can propose one from Cursor, or you can write one here."}
           </p>
           <Button asChild variant="raised" className="mt-6">
             <Link href="/tasks">Create a task</Link>
@@ -131,6 +138,19 @@ function TaskTicket({
       </Ticket>
     );
   }
+
+  const canWrite = contract.allowed_operations.some((operation) => operation !== "read");
+  // Fixture notes inside the task run without a card; other write tasks still
+  // pause per write (their tools are in the confirm tier).
+  const notesRun =
+    canWrite &&
+    (contract.allowed_tools ?? []).includes("sentinel_issue_add_note") &&
+    (contract.write_budget ?? 0) > 0;
+  const writeRule = !canWrite
+    ? "Reads run freely; this task cannot write."
+    : notesRun
+      ? "Reads run freely; notes inside this task run without asking. Anything outside it is blocked."
+      : "Reads run freely; each write pauses for your approval.";
 
   return (
     <Ticket className="flex-1" aria-labelledby="task-heading">
@@ -176,10 +196,10 @@ function TaskTicket({
                   ? "One write is waiting for you."
                   : `${approvalCount} writes are waiting for you.`}
               </b>{" "}
-              Reads run freely; each write pauses for approval.
+              {writeRule}
             </>
           ) : (
-            "Reads run freely; each write pauses for your approval."
+            writeRule
           )
         }
         actions={

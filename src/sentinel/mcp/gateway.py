@@ -34,10 +34,14 @@ from sentinel.decision.engine import VERDICT_RISK_SCORES, VERDICT_TO_RISK_TIER
 from sentinel.integrations import AdapterSession, AdapterSessionError, AdapterSessionRegistry
 from sentinel.mcp.fixture import FixtureError, OperationBinding, SQLiteIssueFixture
 from sentinel.mcp.mediation import (
+    BUDGETED_WRITE_REASON,
+    BUDGET_EXHAUSTED_REASON,
     PROPOSAL_TOOL,
+    STANDING_READ_REASON,
     McpActionFacts,
     McpCanonicalizationError,
     McpDecision,
+    WriteBudgetState,
     canonicalize_mcp_call,
     canonicalize_task_proposal,
     decide_mcp_action,
@@ -47,6 +51,9 @@ from sentinel.supervision import SupervisionPolicyBinding
 
 ADAPTER_AGENT_ID = "cursor_mcp_adapter"
 ADAPTER_USER_ID = "adapter"
+# Placeholder task binding for reads the ceiling permits with no active task.
+# It is never a real task ID, so it can never match a contract or a budget.
+STANDING_READ_TASK_ID = "standing-read"
 LockFactory = Callable[[str], ContextManager[None]]
 
 
@@ -114,7 +121,18 @@ class McpMediator:
         record = self._active_record()
         decision = self._decide(facts, record)
         self._write_decision(request_id, payload, decision, facts=facts, record=record)
-        if decision.verdict == "block" or record is None:
+        if decision.verdict == "block":
+            if decision.reason_code == BUDGET_EXHAUSTED_REASON and record is not None:
+                # A retry of an attempt that already ran must report what
+                # happened to it, not a fresh block: the limit was reached
+                # *by* that write, and the agent needs the truthful outcome.
+                replay = self._replayed_terminal(request_id, payload, adapter, facts, record, decision)
+                if replay is not None:
+                    return replay
+            return self._blocked(request_id, payload, decision, coverage="mandatory")
+        if record is None and decision.reason_code != STANDING_READ_REASON:
+            # Only a standing read may proceed without a task; anything else
+            # that reached here without one is a logic error, so fail closed.
             return self._blocked(request_id, payload, decision, coverage="mandatory")
 
         binding = self._operation_binding(payload.attempt_id, adapter, facts, record)
@@ -128,10 +146,13 @@ class McpMediator:
         if operation.state in {"succeeded", "failed", "unknown", "applying"}:
             # `applying` means an earlier attempt crashed mid-effect and has not
             # been reconciled; treat it as unknown rather than re-admitting it.
+            # A replayed write reaches here before any budget is spent, so a
+            # retried attempt can never consume a second budgeted note.
             return self._terminal(request_id, payload, decision, operation.state, operation.result,
                                   duplicate=operation.state == "succeeded")
         if decision.verdict == "allow":
             return self._admit_and_apply(request_id, payload, decision, facts, record, binding, approval_id=None)
+        assert record is not None  # confirm_required is only reachable under an active task
         return self._request_or_report_approval(request_id, payload, decision, facts, record, binding)
 
     # -- agent task proposals -----------------------------------------------------------
@@ -279,6 +300,22 @@ class McpMediator:
             return None
         return self._contracts.get_active(self._supervision.session_id, now=self._now())
 
+    def _replayed_terminal(self, request_id: str, payload: McpCallRequest, adapter: AdapterSession,
+                           facts: McpActionFacts, record: ContractRecord, decision: McpDecision) -> McpCallResponse | None:
+        """If this attempt already ran under the task, report its real outcome; else None."""
+        existing = self._fixture.get(payload.attempt_id)
+        if existing is None or existing.state not in {"succeeded", "failed", "unknown", "applying"}:
+            return None
+        binding = self._operation_binding(payload.attempt_id, adapter, facts, record)
+        try:
+            operation = self._fixture.prepare(binding)
+        except FixtureError:
+            # Same attempt ID, different action: that is the reuse the fixture
+            # rejects, so the block stands.
+            return None
+        return self._terminal(request_id, payload, decision, operation.state, operation.result,
+                              duplicate=operation.state == "succeeded")
+
     def _decide(self, facts: McpActionFacts, record: ContractRecord | None) -> McpDecision:
         policy = self._policy_binding.policy
         ceiling = policy.classify(
@@ -286,22 +323,48 @@ class McpMediator:
             issue_id=facts.issue_id, environment=self._environment, note_bytes=facts.note_bytes,
         )
         match = None
+        budget = None
         if record is not None:
             match = match_action_to_contract(
                 record, facts.action, expected_contract_id=record.contract_id, expected_version=record.version,
                 session_id=self._supervision.session_id, active_task_id=record.task_id, now=self._now(),
             )
+            if ceiling.verdict == "budgetable":
+                # Spent count comes from the fixture's durable operation records
+                # for this task, read under the same session lock that will
+                # admit the write, so two calls cannot both see the last note.
+                budget = WriteBudgetState(
+                    granted=record.contract.write_budget,
+                    spent=self._fixture.count_spent_writes(
+                        supervision_session_id=self._supervision.session_id,
+                        task_id=record.task_id,
+                        operations=policy.budgetable_operations,
+                    ),
+                )
         proposal_pending = (
             record is None and self._proposals is not None and self._proposals.pending() is not None
         )
-        return decide_mcp_action(ceiling, match, proposal_pending=proposal_pending)
+        # Standing reads apply only when authority is healthy and the store
+        # itself says no task is active. A quarantined authority also yields
+        # `record is None`, but that state must stay fully fail-closed.
+        standing_read = (
+            record is None
+            and policy.standing_read
+            and facts.contract_operation == "read"
+            and self._authority.authority_available
+        )
+        return decide_mcp_action(
+            ceiling, match, proposal_pending=proposal_pending, standing_read=standing_read, budget=budget,
+        )
 
     def _operation_binding(self, attempt_id: str, adapter: AdapterSession, facts: McpActionFacts,
-                           record: ContractRecord) -> OperationBinding:
+                           record: ContractRecord | None) -> OperationBinding:
         return OperationBinding(
             attempt_id=attempt_id, adapter_session_id=adapter.adapter_session_id,
-            supervision_session_id=self._supervision.session_id, task_id=record.task_id,
-            contract_version=record.version, authority_epoch=str(record.authority_epoch),
+            supervision_session_id=self._supervision.session_id,
+            task_id=record.task_id if record is not None else STANDING_READ_TASK_ID,
+            contract_version=record.version if record is not None else 0,
+            authority_epoch=str(record.authority_epoch) if record is not None else STANDING_READ_TASK_ID,
             policy_sha256=self._policy_binding.content_sha256, tool=facts.tool,
             operation=facts.operation,  # type: ignore[arg-type]
             issue_id=facts.issue_id, note_body=facts.note_body,
@@ -317,8 +380,8 @@ class McpMediator:
             task_id=record.task_id, attempt_id=attempt_id,
         )
 
-    def _admit(self, request_id: str, attempt_id: str, facts: McpActionFacts, record: ContractRecord,
-               *, approval_id: str | None) -> None:
+    def _admit(self, request_id: str, attempt_id: str, facts: McpActionFacts, record: ContractRecord | None,
+               *, approval_id: str | None, decision: McpDecision | None = None) -> None:
         """Durable admission: required audit first, then the fixture's admitted state.
 
         The fixture state is checked before the audit row is written so a
@@ -331,26 +394,33 @@ class McpMediator:
             raise FixtureError("fixture:unknown_attempt")
         if current.state not in {"prepared", "admitted"}:
             raise FixtureError(f"fixture:cannot_admit_from_{current.state}")
+        reason_codes = ["mcp:admitted"]
+        if decision is not None and decision.reason_code in {BUDGETED_WRITE_REASON, STANDING_READ_REASON}:
+            reason_codes.append(decision.reason_code)
         self._audit.write_required(
             AuditEvent(
                 event_type="execution_admitted", request_id=request_id, agent_id=ADAPTER_AGENT_ID,
-                session_id=self._supervision.session_id, task_id=record.task_id,
-                contract_id=record.contract_id, contract_version=record.version,
+                session_id=self._supervision.session_id,
+                task_id=record.task_id if record is not None else None,
+                contract_id=record.contract_id if record is not None else None,
+                contract_version=record.version if record is not None else None,
                 environment=self._environment,  # type: ignore[arg-type]
-                verdict="allow", reason_codes=["mcp:admitted"],
+                verdict="allow", reason_codes=reason_codes,
                 details={"attempt_id": attempt_id, "tool": facts.tool, "operation": facts.operation,
                          "targets": [facts.issue_id], "payload_sha256": facts.action.payload_sha256,
-                         "authority_epoch": record.authority_epoch, "approval_id": approval_id,
+                         "authority_epoch": record.authority_epoch if record is not None else None,
+                         "approval_id": approval_id,
+                         "write_budget": record.contract.write_budget if record is not None else None,
                          "policy_sha256": self._policy_binding.content_sha256},
             )
         )
         self._fixture.admit(attempt_id)
 
     def _admit_and_apply(self, request_id: str, payload: McpCallRequest, decision: McpDecision,
-                         facts: McpActionFacts, record: ContractRecord, binding: OperationBinding,
+                         facts: McpActionFacts, record: ContractRecord | None, binding: OperationBinding,
                          *, approval_id: str | None) -> McpCallResponse:
         try:
-            self._admit(request_id, payload.attempt_id, facts, record, approval_id=approval_id)
+            self._admit(request_id, payload.attempt_id, facts, record, approval_id=approval_id, decision=decision)
         except AuditStoreError:
             problem = McpDecision("block", "audit:admission_failed",
                                   "Sentinel could not durably record admission; nothing was performed.",
@@ -390,12 +460,15 @@ class McpMediator:
 
     def _terminal(self, request_id: str, payload: McpCallRequest, decision: McpDecision, state: str,
                   result: dict[str, Any] | None, *, duplicate: bool) -> McpCallResponse:
+        guidance = "Start a new attempt if the user still wants this action."
         if state == "succeeded":
             reason_code = "mcp:already_applied" if duplicate else decision.reason_code
             reason = "Terminal result replayed; no new effect." if duplicate else decision.reason
             verdict = "allow"
             if duplicate and result is not None:
                 result = {**result, "note_added": False, "duplicate_suppressed": True}
+            if not duplicate and decision.guidance:
+                guidance = decision.guidance
         elif state == "failed":
             reason_code, reason, verdict = "mcp:attempt_failed", "This attempt was denied or failed; nothing more will happen.", "block"
         else:
@@ -403,7 +476,7 @@ class McpMediator:
             reason_code, reason, verdict = "mcp:outcome_unknown", "The outcome is unknown and will not be retried automatically.", "block"
         return McpCallResponse(
             request_id=request_id, verdict=verdict, reason_code=reason_code, reason=reason,
-            reason_codes=[reason_code], guidance="Start a new attempt if the user still wants this action.",
+            reason_codes=[reason_code], guidance=guidance,
             risk_score=VERDICT_RISK_SCORES[verdict], risk_tier=VERDICT_TO_RISK_TIER[verdict],
             attempt_id=payload.attempt_id, operation_state=state,
             result=result if verdict == "allow" else None, coverage_status="mandatory",
@@ -449,13 +522,15 @@ class McpMediator:
             pass  # Decision telemetry is optional; admission uses write_required.
 
     def _write_effect(self, request_id: str, attempt_id: str, facts: McpActionFacts,
-                      record: ContractRecord, state: str) -> None:
+                      record: ContractRecord | None, state: str) -> None:
         try:
             self._audit.write(
                 AuditEvent(
                     event_type="post_execution", request_id=request_id, agent_id=ADAPTER_AGENT_ID,
-                    session_id=self._supervision.session_id, task_id=record.task_id,
-                    contract_id=record.contract_id, contract_version=record.version,
+                    session_id=self._supervision.session_id,
+                    task_id=record.task_id if record is not None else None,
+                    contract_id=record.contract_id if record is not None else None,
+                    contract_version=record.version if record is not None else None,
                     environment=self._environment,  # type: ignore[arg-type]
                     verdict="allow" if state == "succeeded" else "block",
                     reason_codes=[f"fixture:{state}"],

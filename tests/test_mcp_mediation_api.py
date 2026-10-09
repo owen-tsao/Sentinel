@@ -62,7 +62,8 @@ def fixture_contract(*, targets: list[str] | None = None) -> ActionContract:
 
 
 @contextmanager
-def mediated_client(*, activate: bool = True) -> Iterator[dict[str, Any]]:
+def mediated_client(*, activate: bool = True, policy: Any = None,
+                    contract: ActionContract | None = None) -> Iterator[dict[str, Any]]:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         repository = root / "repository"
@@ -92,7 +93,7 @@ def mediated_client(*, activate: bool = True) -> Iterator[dict[str, Any]]:
                 now=now,
             )
             record = contracts.create_active(
-                fixture_contract(), session_id=supervision.session_id,
+                contract or fixture_contract(), session_id=supervision.session_id,
                 authorization_source="protected_local_ui", created_at=now, contract_id=contract_id,
                 expected_active_task_id=None, trusted_event=receipt,
             )
@@ -109,7 +110,8 @@ def mediated_client(*, activate: bool = True) -> Iterator[dict[str, Any]]:
                 load_model=False, load_policy=False, contract_store=contracts, audit_store=audit,
                 executor=DockerExecutor(workspace=repository, runner=Mock()),
                 execution_environment="sandbox", control_config=config,
-                control_binding_store=binding_store, supervision_policy=week12_fixture_policy(),
+                control_binding_store=binding_store,
+                supervision_policy=policy if policy is not None else week12_fixture_policy(),
                 mcp_fixture=fixture, adapter_registry=registry,
             )
             with TestClient(app, base_url=f"http://{API_HOST}") as client:
@@ -460,7 +462,10 @@ class McpMediationRouteTests(unittest.TestCase):
         self.assertEqual(activated.status_code, 200, activated.text)
         self.assertEqual(read["verdict"], "allow")
         self.assertEqual(other["verdict"], "block")
-        self.assertEqual(write["verdict"], "confirm_required")
+        # Week 14 (revised): a note inside the task runs; the manual form does
+        # not choose a count, the server stamps the ceiling's runaway limit.
+        self.assertEqual(proposed["contract"]["write_budget"], 50)
+        self.assertEqual((write["verdict"], write["reason_code"]), ("allow", "mcp:budgeted_write"))
 
     def test_evaluate_and_execute_routes_are_untouched_by_mcp_wiring(self) -> None:
         with mediated_client() as ctx:

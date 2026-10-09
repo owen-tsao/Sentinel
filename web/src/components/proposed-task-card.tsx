@@ -29,9 +29,10 @@ export function ProposedTaskCard({
   proposal: TaskProposalResponse;
 }) {
   const router = useRouter();
-  const { activeContract, refresh } = useControl();
+  const { activeContract, refresh, notificationError } = useControl();
   const [pending, setPending] = useState<"activate" | "adjust" | "dismiss" | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [localError, setError] = useState<string | null>(null);
+  const error = localError ?? notificationError;
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {

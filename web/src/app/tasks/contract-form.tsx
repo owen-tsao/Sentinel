@@ -198,7 +198,9 @@ export function ContractForm({
           }
           hint={
             fixture
-              ? "Reads are always included. Writes add one reviewed note per approval."
+              ? form.operation === "write"
+                ? "Reads are always included. Notes on these issues run inside the task; anything else is blocked."
+                : "Reads only. Any note on these issues is blocked until a write task is activated."
               : `Exact paths under ${workspaceRoot}. Pick from the list or type one; relative paths are placed under it.`
           }
         >

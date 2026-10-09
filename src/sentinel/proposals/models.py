@@ -50,11 +50,17 @@ class ProposalStateError(ProposalError):
 
 @dataclass(frozen=True)
 class ProposalFacts:
-    """The structured facts an agent may state. Nothing else is accepted."""
+    """The structured facts an agent may state, plus the server-derived budget.
+
+    `write_budget` is never an agent argument: the service derives it from the
+    ceiling and the listed targets, so it is part of the hash and the card but
+    not part of the tool's input.
+    """
 
     operation: ProposalOperation
     exact_targets: tuple[str, ...]
     task_duration_minutes: int
+    write_budget: int = 0
 
     def content_sha256(self, *, environment: str, policy_sha256: str) -> str:
         # Targets are sorted so two equivalent proposals hash identically; the
@@ -63,6 +69,7 @@ class ProposalFacts:
             "operation": self.operation,
             "exact_targets": sorted(self.exact_targets),
             "task_duration_minutes": self.task_duration_minutes,
+            "write_budget": self.write_budget,
             "environment": environment,
             "policy_sha256": policy_sha256,
         }
@@ -86,6 +93,7 @@ class TaskProposal:
     proposal_number: int
     created_at: datetime
     proposal_expires_at: datetime
+    write_budget: int = 0
     resolution: Optional[ProposalResolution] = None
     resolved_at: Optional[datetime] = None
     superseded_by: Optional[str] = None

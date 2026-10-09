@@ -1,7 +1,7 @@
 "use client";
 
 import { Bot, Search, ShieldCheck } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { AgentCoverage } from "@/components/agent-coverage";
 import { GitHubIcon, LinearIcon, SlackIcon } from "@/components/brand-icons";
@@ -9,6 +9,13 @@ import { useControl } from "@/components/control-provider";
 import { Input } from "@/components/ui/input";
 import { Eyebrow, PageHeader, Panel, StatusDot, type StatusTone } from "@/components/ui/layout";
 import type { IntegrationStatusResponse } from "@/lib/control-types";
+import {
+  notificationSupport,
+  notificationsWanted,
+  requestNotificationPermission,
+  setNotificationsWanted,
+  type NotificationSupport,
+} from "@/lib/notifications";
 import { cn } from "@/lib/utils";
 
 type SettingsSection = "general" | "connections" | "approvals" | "workspace";
@@ -250,7 +257,71 @@ function ApprovalsSection() {
         description="Every approval applies to one unchanged attempt"
         value="Required"
       />
+      <NotificationRow />
     </SettingsGroup>
+  );
+}
+
+function subscribeNever() {
+  return () => {};
+}
+
+/**
+ * Desktop notifications are opt-in and the browser asks for permission once.
+ * They are sent by this tab, so the tab must stay open (in the background is
+ * fine); nothing outside the browser is involved.
+ */
+function NotificationRow() {
+  // Browser-only facts, read after hydration so the server render stays stable.
+  const storedSupport = useSyncExternalStore(subscribeNever, notificationSupport, () => "unsupported" as NotificationSupport);
+  const storedWanted = useSyncExternalStore(subscribeNever, notificationsWanted, () => false);
+  // Once the person toggles, these overrides win over the stored values.
+  const [wanted, setWanted] = useState<boolean | null>(null);
+  const [permission, setPermission] = useState<NotificationSupport | null>(null);
+  const effectiveSupport = permission ?? storedSupport;
+  const effectiveWanted = wanted ?? storedWanted;
+
+  const on = effectiveWanted && effectiveSupport === "granted";
+
+  async function toggle() {
+    if (on) {
+      setNotificationsWanted(false);
+      setWanted(false);
+      return;
+    }
+    const granted = await requestNotificationPermission();
+    setPermission(granted);
+    if (granted === "granted") {
+      setNotificationsWanted(true);
+      setWanted(true);
+    }
+  }
+
+  const description =
+    effectiveSupport === "unsupported"
+      ? "This browser cannot show desktop notifications"
+      : effectiveSupport === "denied"
+        ? "Blocked in the browser; allow notifications for this site to turn them on"
+        : "Alert you here when your agent proposes a task or a write is waiting, while this tab is open";
+
+  return (
+    <div className="flex min-h-[56px] items-center justify-between gap-6 px-5 py-3">
+      <div>
+        <p className="text-[13px] font-medium">Desktop notifications</p>
+        <p className="mt-0.5 text-[12px] text-[var(--subtext)]">{description}</p>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        aria-label="Desktop notifications"
+        disabled={effectiveSupport === "unsupported" || effectiveSupport === "denied"}
+        onClick={() => void toggle()}
+        className="shrink-0 text-[12px] text-[var(--subtext)] underline decoration-[var(--accent)] decoration-2 underline-offset-4 disabled:no-underline disabled:opacity-60"
+      >
+        {on ? "On" : "Off"}
+      </button>
+    </div>
   );
 }
 

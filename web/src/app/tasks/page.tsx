@@ -388,6 +388,7 @@ export default function TasksPage() {
                   environment: form.environment,
                   targets: form.exactTargets,
                   expiresInMinutes: Number(form.expiresInMinutes) || null,
+                  notesRun: form.toolFamily === "sentinel_issue_fixture" && form.operation === "write",
                 }
               : null
           }

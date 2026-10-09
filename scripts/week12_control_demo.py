@@ -90,7 +90,10 @@ def run() -> None:
             ui_origin=UI_ORIGIN,
             demo_mode=True,
         ),
-        supervision_policy=week12_fixture_policy(),
+        # Week 14: the demo ceiling lets in-pattern reads run with no task; every
+        # write still needs an activated task, and in-scope notes run inside it
+        # without a card (the ceiling's cap is a silent runaway block).
+        supervision_policy=week12_fixture_policy(standing_read=True),
     )
     app.state.mcp_fixture.seed(FIXTURE_ISSUES)
     issued = app.state.adapter_registry.issue(

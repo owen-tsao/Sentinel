@@ -189,27 +189,38 @@ class ProposalIntakeTests(unittest.TestCase):
 
 
 class ProposalConfirmationTests(unittest.TestCase):
-    def test_one_click_confirms_reads_pass_and_write_still_waits(self) -> None:
+    def test_one_click_confirms_reads_pass_and_budgeted_write_runs_without_a_card(self) -> None:
+        """Week 14 shape of the Week 13 loop: one issue means a budget of one note.
+
+        Every in-scope note runs on the activation click alone (Week 14, revised):
+        the person is never asked per note, and no count is shown or chosen.
+        """
+
         with mediated_client(activate=False) as ctx:
             pair(ctx["client"])
             draft_id = propose(ctx, issue_ids=["SPIKE-1"], minutes=45).json()["result"]["draft_id"]
+            card = pending(ctx).json()["proposal"]
             confirmed = confirm(ctx, draft_id, {"expected_active_task_id": None})
             authority = active_authority(ctx)
             reads = [call(ctx, "sentinel_issue_read", {"issue_id": "SPIKE-1"}).json() for _ in range(3)]
             outside = call(ctx, "sentinel_issue_read", {"issue_id": "SPIKE-2"}).json()
             write = call(ctx, "sentinel_issue_add_note",
                          {"issue_id": "SPIKE-1", "body": "note"}, attempt_id="attempt-w13-1").json()
-            approved = approve(ctx, write["approval_id"]).json()
             retry = call(ctx, "sentinel_issue_add_note",
                          {"issue_id": "SPIKE-1", "body": "note"}, attempt_id="attempt-w13-1").json()
+            second = call(ctx, "sentinel_issue_add_note",
+                          {"issue_id": "SPIKE-1", "body": "second"}, attempt_id="attempt-w13-2").json()
+            approvals = ctx["client"].get("/control/approvals", headers={"Origin": UI_ORIGIN}).json()["approvals"]
             listed = pending(ctx).json()
             notes = ctx["fixture"].note_count()
             confirmed_events = ctx["audit"].query(event_type="task_proposal_confirmed")
+        self.assertEqual(card["write_budget"], 50, "the runaway limit is the ceiling's, not a per-task choice")
         self.assertEqual(confirmed.status_code, 200, confirmed.text)
         active = confirmed.json()["active_contract"]
         self.assertEqual(active["status"], "active")
         self.assertEqual(active["authorization_reference"], f"task-proposal:{draft_id}")
         self.assertEqual(active["contract"]["exact_targets"], ["SPIKE-1"])
+        self.assertEqual(active["contract"]["write_budget"], 50)
         self.assertEqual(sorted(active["contract"]["allowed_operations"]), ["read", "write"])
         self.assertEqual(sorted(active["contract"]["allowed_tools"]),
                          ["sentinel_issue_add_note", "sentinel_issue_read"])
@@ -221,12 +232,13 @@ class ProposalConfirmationTests(unittest.TestCase):
         for body in reads:
             self.assertEqual(body["verdict"], "allow", body)
         self.assertEqual(outside["verdict"], "block")
-        self.assertEqual(write["verdict"], "confirm_required")
-        self.assertEqual(approved["status"], "approved")
-        self.assertEqual(approved["retry"]["verdict"], "allow")
+        self.assertEqual(write["verdict"], "allow")
+        self.assertEqual(write["reason_code"], "mcp:budgeted_write")
         self.assertEqual(retry["verdict"], "allow")
         self.assertEqual(retry["reason_code"], "mcp:already_applied")
-        self.assertEqual(notes, 1)
+        self.assertEqual((second["verdict"], second["reason_code"]), ("allow", "mcp:budgeted_write"))
+        self.assertEqual(approvals, [], "no card is ever raised for an in-scope note")
+        self.assertEqual(notes, 2)
         self.assertIsNone(listed["proposal"])
         self.assertEqual(listed["recent"][0]["state"], "confirmed")
         self.assertEqual(listed["recent"][0]["confirmed_contract_id"], active["contract_id"])

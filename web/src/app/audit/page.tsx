@@ -453,6 +453,15 @@ function mcpToolSummary(event: AuditEvent) {
 }
 
 function friendlyReason(reason: string) {
+  if (reason.includes("write_budget_exhausted")) {
+    return "This task hit its runaway write limit, so the write was blocked and the agent was told to propose a fresh task.";
+  }
+  if (reason.includes("budgeted_write")) {
+    return "This note ran inside the task you activated; no per-note approval was needed.";
+  }
+  if (reason.includes("standing_read")) {
+    return "This read ran with no task because the Sentinel process allows in-pattern reads.";
+  }
   if (reason.includes("target_mismatch")) {
     return "The requested location was outside the active task.";
   }

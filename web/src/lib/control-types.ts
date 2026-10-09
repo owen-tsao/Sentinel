@@ -17,6 +17,7 @@ export type AcceptedContractDraft = {
   backup_required?: boolean;
   expires_in_minutes?: number;
   tool_family?: "shell" | "sentinel_issue_fixture";
+  write_budget?: number;
 };
 
 export type ActionContract = {
@@ -45,6 +46,7 @@ export type ActionContract = {
   authorization_reference: string;
   version?: number;
   expires_at: string;
+  write_budget?: number;
 };
 
 export type AgentConnectionResponse = {
@@ -93,6 +95,8 @@ export type CeilingStatusResponse = {
   policy_sha256: string;
   expires_at: string;
   expired: boolean;
+  max_write_budget?: number;
+  standing_read?: boolean;
 };
 
 export type ContractObligations = {
@@ -243,6 +247,7 @@ export type TaskProposalResponse = {
   environment: string;
   allowed_effects: Array<string>;
   task_duration_minutes: number;
+  write_budget?: number;
   content_sha256: string;
   proposal_number: number;
   created_at: string;

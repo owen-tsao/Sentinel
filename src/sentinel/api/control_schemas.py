@@ -87,6 +87,10 @@ class CeilingStatusResponse(StrictControlModel):
     policy_sha256: str
     expires_at: datetime
     expired: bool
+    # Week 14: what the ceiling lets a task be granted, so the form and the
+    # card can show the bound without asking the server to widen anything.
+    max_write_budget: int = 0
+    standing_read: bool = False
 
 
 class IntegrationStatusResponse(StrictControlModel):
@@ -170,6 +174,9 @@ class AcceptedContractDraft(StrictControlModel):
     backup_required: bool = False
     expires_in_minutes: int = Field(default=60, ge=1, le=1_440)
     tool_family: Literal["shell", "sentinel_issue_fixture"] = "shell"
+    # Week 14: how many notes may run without a per-note approval card. The
+    # server rejects any value the startup ceiling does not allow.
+    write_budget: int = Field(default=0, ge=0, le=1_000)
 
 
 class ContractDraftRequest(StrictControlModel):
@@ -247,6 +254,7 @@ class TaskProposalResponse(StrictControlModel):
     environment: str
     allowed_effects: list[str]
     task_duration_minutes: int
+    write_budget: int = Field(default=0, ge=0)
     content_sha256: str = Field(..., min_length=64, max_length=64)
     proposal_number: int = Field(..., ge=1)
     created_at: datetime

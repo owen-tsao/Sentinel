@@ -1,8 +1,9 @@
-# Week 13 Handover (draft; live trials pending)
+# Week 13 Handover
 
-Branch: `feature/week-13-task-preparation`. Written September 9, 2026, after
-the in-process build and verification. Sections marked **unverified** need
-the live Cursor run described below before Week 13 can be called done.
+Branch: `feature/week-13-task-preparation`, merged to `main`. Written
+September 9, 2026, after the in-process build and verification; the live
+trials below were completed September 10 and closed the kill condition.
+The remaining unverified items are measurements, not behaviour.
 
 ## Read this first if you are new
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import threading
 from collections import deque
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 from uuid import uuid4
@@ -160,13 +161,33 @@ class TaskProposalService:
                 guidance="Ask the user to restart Sentinel.",
             )
         fixture_operation = CONTRACT_TO_FIXTURE_OPERATION.get(facts.operation)
-        permitted = policy.ordinary_operations | policy.confirm_operations
-        if fixture_operation is None or fixture_operation in policy.forbidden_operations or fixture_operation not in permitted:
+        if fixture_operation is None or fixture_operation in policy.forbidden_operations or fixture_operation not in policy.permitted_operations:
             raise ProposalValidationError(
                 "supervision:operation_forbidden",
                 f"The startup ceiling does not allow tasks with operation {facts.operation!r}.",
                 guidance="Propose operation 'read' or 'write' only.", field="operation",
             )
+        if facts.write_budget < 0:
+            raise ProposalValidationError(
+                "proposal:budget_invalid", "A write budget cannot be negative.", field="write_budget",
+            )
+        if facts.write_budget > 0:
+            # A budget is only meaningful for a budgetable write operation. A
+            # confirm operation can never be budgeted; that is the tier's meaning.
+            if facts.operation != "write" or fixture_operation not in policy.budgetable_operations:
+                raise ProposalValidationError(
+                    "proposal:budget_not_allowed",
+                    "The startup ceiling does not allow a write budget for this operation.",
+                    guidance="Propose the task without a budget; each write will ask for approval.",
+                    field="write_budget",
+                )
+            if facts.write_budget > policy.max_write_budget:
+                raise ProposalValidationError(
+                    "proposal:budget_exceeds_ceiling",
+                    f"The startup ceiling caps write budgets at {policy.max_write_budget}.",
+                    guidance=f"Propose a write budget of at most {policy.max_write_budget}.",
+                    field="write_budget",
+                )
         if not facts.exact_targets:
             raise ProposalValidationError(
                 "proposal:targets_required", "At least one issue ID is required.",
@@ -199,9 +220,26 @@ class TaskProposalService:
                 guidance=f"Propose minutes <= {remaining_minutes}.", field="minutes",
             )
 
+    def default_write_budget(self, facts: ProposalFacts) -> int:
+        """The task's write limit: the ceiling's runaway cap for an in-scope write task.
+
+        This is not a consent knob the person is asked about. In-scope writes in
+        the ceiling's middle tier simply run; the cap only exists so a looping
+        agent is stopped and told to propose a fresh task. Derived from the
+        ceiling alone; the agent has no argument for it. Zero for read tasks and
+        whenever the ceiling does not place notes in that tier.
+        """
+
+        policy = self._policy_binding.policy
+        fixture_operation = CONTRACT_TO_FIXTURE_OPERATION.get(facts.operation)
+        if facts.operation != "write" or fixture_operation not in policy.budgetable_operations:
+            return 0
+        return policy.max_write_budget
+
     def propose(self, facts: ProposalFacts, *, request_id: str, adapter_session_id: str | None) -> tuple[TaskProposal, TaskProposal | None]:
         """Validate and store one proposal, superseding any pending one. Returns (new, superseded)."""
 
+        facts = replace(facts, write_budget=self.default_write_budget(facts))
         self.validate(facts)
         now = self._now()
         policy_sha256 = self._policy_binding.content_sha256
@@ -215,6 +253,7 @@ class TaskProposalService:
             exact_targets=tuple(facts.exact_targets),
             environment=self._environment,
             task_duration_minutes=facts.task_duration_minutes,
+            write_budget=facts.write_budget,
             content_sha256=facts.content_sha256(environment=self._environment, policy_sha256=policy_sha256),
             state="pending",
             proposal_number=self._store.next_number(self.session_id),
@@ -287,6 +326,7 @@ class TaskProposalService:
             "operation": proposal.operation,
             "targets": list(proposal.exact_targets),
             "task_duration_minutes": proposal.task_duration_minutes,
+            "write_budget": proposal.write_budget,
             "proposal_number": proposal.proposal_number,
             "state": proposal.state,
             "policy_sha256": proposal.policy_sha256,

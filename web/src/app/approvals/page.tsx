@@ -46,7 +46,7 @@ type LocalOutcome = {
  * nothing to review, one empty panel fills the space instead.
  */
 export default function ApprovalsPage() {
-  const { activeContract, refresh } = useControl();
+  const { activeContract, refresh, notificationError } = useControl();
   const [known, setKnown] = useState<Record<string, PendingApprovalResponse>>({});
   const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
   const [outcomes, setOutcomes] = useState<Record<string, LocalOutcome>>({});
@@ -163,6 +163,14 @@ export default function ApprovalsPage() {
           <CircleAlert aria-hidden="true" />
           <AlertTitle>Approval state unavailable</AlertTitle>
           <AlertDescription>{loadError}</AlertDescription>
+        </Alert>
+      ) : null}
+
+      {notificationError ? (
+        <Alert variant="destructive" className="mb-4">
+          <CircleAlert aria-hidden="true" />
+          <AlertTitle>Notification click did not complete</AlertTitle>
+          <AlertDescription>{notificationError}</AlertDescription>
         </Alert>
       ) : null}
 

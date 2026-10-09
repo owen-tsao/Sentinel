@@ -298,6 +298,37 @@ class SQLiteIssueFixture:
         with self._lock:
             return int(self._connection.execute("SELECT COUNT(*) FROM fixture_notes").fetchone()[0])
 
+    def count_spent_writes(
+        self,
+        *,
+        supervision_session_id: str,
+        task_id: str,
+        operations: frozenset[str] | set[str],
+    ) -> int:
+        """How much of a task's write budget is already gone, from durable operation records.
+
+        Counts every operation the task has admitted or applied, including ones
+        whose outcome is unknown after a crash: an unknown outcome may have
+        landed, so it must count as spent. Prepared (un-admitted) and failed
+        attempts cost nothing. Counting all versions of the task is deliberate;
+        an amendment can raise the budget but never refunds notes already written.
+        """
+
+        if not operations:
+            return 0
+        placeholders = ",".join("?" for _ in operations)
+        with self._lock:
+            row = self._connection.execute(
+                f"""
+                SELECT COUNT(*) FROM fixture_operations
+                WHERE supervision_session_id = ? AND task_id = ?
+                  AND operation IN ({placeholders})
+                  AND state IN ('admitted', 'applying', 'succeeded', 'unknown')
+                """,
+                (supervision_session_id, task_id, *sorted(operations)),
+            ).fetchone()
+            return int(row[0])
+
     def list_issue_ids(self, *, limit: int = 200) -> list[str]:
         """Seeded issue IDs, for the control UI's target picker. Read-only."""
 

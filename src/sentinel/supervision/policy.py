@@ -20,10 +20,12 @@ from typing import Literal, Protocol
 
 from sentinel.control.workspace import SupervisionBinding
 
-CeilingVerdict = Literal["ordinary", "confirm_required", "forbidden"]
+CeilingVerdict = Literal["ordinary", "budgetable", "confirm_required", "forbidden"]
 
 # Week 12 supports exactly one environment: the disposable local demo.
 SUPPORTED_ENVIRONMENTS = frozenset({"sandbox"})
+# Hard cap on any write budget a ceiling may offer, regardless of configuration.
+MAX_WRITE_BUDGET_CEILING = 100
 FORBIDDEN_BASELINE = frozenset(
     {
         "issue_delete",
@@ -52,7 +54,16 @@ class CeilingDecision:
 
 @dataclass(frozen=True)
 class SupervisionPolicy:
-    """Values fixed before startup; none can be selected by an HTTP request."""
+    """Values fixed before startup; none can be selected by an HTTP request.
+
+    Operations fall into three disjoint tiers. `ordinary` operations run under
+    any matching active task. `confirm_operations` always stop for exact human
+    approval. `budgetable_operations` (Week 14, revised) are in-scope writes
+    that run and are audited without a card under a matching active task, up
+    to `max_write_budget` writes per task; that number is a runaway limit that
+    blocks a looping agent, not a consent knob the person is asked about.
+    `standing_read` lets in-pattern reads run with no task.
+    """
 
     adapter_kind: str
     tool_family: str
@@ -60,6 +71,9 @@ class SupervisionPolicy:
     issue_id_pattern: str
     ordinary_operations: frozenset[str]
     confirm_operations: frozenset[str]
+    budgetable_operations: frozenset[str] = frozenset()
+    max_write_budget: int = 0
+    standing_read: bool = False
     environment: str = "sandbox"
     max_process_lifetime: timedelta = timedelta(hours=8)
     max_note_bytes: int = 2_000
@@ -76,16 +90,28 @@ class SupervisionPolicy:
             raise SupervisionPolicyError("supervision:invalid_lifetime")
         if self.max_note_bytes <= 0 or self.max_note_bytes > 65_536:
             raise SupervisionPolicyError("supervision:invalid_note_limit")
-        if not self.ordinary_operations and not self.confirm_operations:
+        if not self.ordinary_operations and not self.confirm_operations and not self.budgetable_operations:
             raise SupervisionPolicyError("supervision:no_operations")
+        tiers = (self.ordinary_operations, self.confirm_operations, self.budgetable_operations)
         if (
             self.ordinary_operations & self.confirm_operations
-            or self.ordinary_operations & self.forbidden_operations
-            or self.confirm_operations & self.forbidden_operations
+            or self.ordinary_operations & self.budgetable_operations
+            or self.confirm_operations & self.budgetable_operations
+            or any(tier & self.forbidden_operations for tier in tiers)
         ):
             raise SupervisionPolicyError("supervision:overlapping_operations")
         if not FORBIDDEN_BASELINE <= self.forbidden_operations:
             raise SupervisionPolicyError("supervision:forbidden_baseline_weakened")
+        if isinstance(self.max_write_budget, bool) or not isinstance(self.max_write_budget, int):
+            raise SupervisionPolicyError("supervision:invalid_write_budget")
+        if self.max_write_budget < 0 or self.max_write_budget > MAX_WRITE_BUDGET_CEILING:
+            raise SupervisionPolicyError("supervision:invalid_write_budget")
+        # A budgetable tier with no budget, or a budget with nothing to spend it
+        # on, is a misconfiguration rather than a quietly inert setting.
+        if bool(self.budgetable_operations) != (self.max_write_budget > 0):
+            raise SupervisionPolicyError("supervision:invalid_write_budget")
+        if not isinstance(self.standing_read, bool):
+            raise SupervisionPolicyError("supervision:invalid_standing_read")
         # The pattern must be anchored so a permissive prefix cannot widen scope.
         if not (self.issue_id_pattern.startswith("^") and self.issue_id_pattern.endswith("$")):
             raise SupervisionPolicyError("supervision:issue_pattern_unanchored")
@@ -100,6 +126,10 @@ class SupervisionPolicy:
     def content_sha256(self) -> str:
         return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
 
+    @property
+    def permitted_operations(self) -> frozenset[str]:
+        return self.ordinary_operations | self.confirm_operations | self.budgetable_operations
+
     def canonical_json(self) -> str:
         payload = {
             "adapter_kind": self.adapter_kind,
@@ -108,6 +138,9 @@ class SupervisionPolicy:
             "issue_id_pattern": self.issue_id_pattern,
             "ordinary_operations": sorted(self.ordinary_operations),
             "confirm_operations": sorted(self.confirm_operations),
+            "budgetable_operations": sorted(self.budgetable_operations),
+            "max_write_budget": self.max_write_budget,
+            "standing_read": self.standing_read,
             "forbidden_operations": sorted(self.forbidden_operations),
             "environment": self.environment,
             "max_process_lifetime_seconds": int(self.max_process_lifetime.total_seconds()),
@@ -136,9 +169,7 @@ class SupervisionPolicy:
         if environment != self.environment:
             return CeilingDecision("forbidden", "supervision:environment_mismatch",
                                    "The action targets an environment the ceiling does not cover.")
-        if operation in self.forbidden_operations or operation not in (
-            self.ordinary_operations | self.confirm_operations
-        ):
+        if operation in self.forbidden_operations or operation not in self.permitted_operations:
             return CeilingDecision("forbidden", "supervision:operation_forbidden",
                                    "The startup ceiling forbids this operation.")
         if not self.issue_in_scope(issue_id):
@@ -150,6 +181,10 @@ class SupervisionPolicy:
         if operation in self.confirm_operations:
             return CeilingDecision("confirm_required", "supervision:confirm_operation",
                                    "The ceiling requires exact human approval for this operation.")
+        if operation in self.budgetable_operations:
+            return CeilingDecision("budgetable", "supervision:budgetable_operation",
+                                   "The ceiling lets this operation run within a matching active task, "
+                                   "bounded by the task's runaway write limit.")
         return CeilingDecision("ordinary", "supervision:ordinary_operation",
                                "The ceiling permits an active task to authorize this operation.")
 
@@ -286,7 +321,14 @@ class SQLiteSupervisionPolicyStore:
 
 
 def week12_fixture_policy(**overrides: object) -> SupervisionPolicy:
-    """The one ceiling Week 12 ships: local issue fixture, read ordinary, note confirm."""
+    """The one ceiling Sentinel ships for the local issue fixture.
+
+    Reads are ordinary. Notes moved from `confirm_operations` to
+    `budgetable_operations` in Week 14: under an active task that lists the
+    issue, a note runs without a card. `max_write_budget` is the per-task
+    runaway limit; nothing about it is shown to or chosen by the person.
+    Standing reads stay off here; the demo launcher turns them on explicitly.
+    """
 
     values: dict[str, object] = {
         "adapter_kind": "cursor_mcp",
@@ -294,7 +336,9 @@ def week12_fixture_policy(**overrides: object) -> SupervisionPolicy:
         "fixture_project": "spike",
         "issue_id_pattern": r"^SPIKE-[1-9][0-9]{0,3}$",
         "ordinary_operations": frozenset({"issue_read"}),
-        "confirm_operations": frozenset({"issue_add_note"}),
+        "confirm_operations": frozenset(),
+        "budgetable_operations": frozenset({"issue_add_note"}),
+        "max_write_budget": 50,
     }
     values.update(overrides)
     return SupervisionPolicy(**values)  # type: ignore[arg-type]
