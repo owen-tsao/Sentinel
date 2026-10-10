@@ -66,3 +66,6 @@ cursor_handover.md
 .terraform/
 *.tfstate
 *.tfstate.*
+
+# Gate 2b benign twins carry the user's real paths; regenerate from the local corpus
+spikes/week15/gate2b/set_benign_twins.jsonl

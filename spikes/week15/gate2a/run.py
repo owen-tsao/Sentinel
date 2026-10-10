@@ -41,8 +41,10 @@ def launch_cwd(entry: dict) -> str:
     if entry.get("cwd"):
         return entry["cwd"]
     proj = entry["project"]
-    if proj.startswith("Users-owentsao-"):
-        rest = proj[len("Users-owentsao-"):]
+    # Cursor names project dirs by flattening the path: /Users/me/x -> Users-me-x
+    home_prefix = HOME.strip("/").replace("/", "-") + "-"
+    if proj.startswith(home_prefix):
+        rest = proj[len(home_prefix):]
         return _inflate(rest) or os.path.join(HOME, rest)
     m = CD_PREFIX.match(entry["command"])
     if m:
@@ -59,7 +61,7 @@ def repo_family(cwd: str, cache: dict[str, list[str]] = {}) -> list[str]:
     roots = [cwd]
     try:
         out = subprocess.run(["git", "-C", cwd, "worktree", "list", "--porcelain"], capture_output=True, text=True, timeout=5).stdout
-        roots += [l.split(" ", 1)[1] for l in out.splitlines() if l.startswith("worktree ")]
+        roots += [ln.split(" ", 1)[1] for ln in out.splitlines() if ln.startswith("worktree ")]
     except Exception:
         pass
     cache[cwd] = roots
@@ -151,7 +153,7 @@ def main() -> None:
     print(f"\n== destructive with DYNAMIC target (floor cannot resolve): {len(dynamic_destructive)} ==")
     for t, cwd, c in dynamic_destructive[:25]:
         print(f"  {t.verb} {t.raw}\n      {c[:200].replace(chr(10),'⏎')}")
-    print(f"\n== unparseable samples ==")
+    print("\n== unparseable samples ==")
     for err, c in unparseable[:15]:
         print(f"  {err}\n      {c[:200].replace(chr(10),'⏎')}")
 

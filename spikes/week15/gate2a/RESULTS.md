@@ -18,10 +18,16 @@ line. Every unparseable command is one of three `bashlex` gaps: `time cmd`
 
 | Bucket | Count | Share | Meaning for the floor |
 |---|---|---|---|
-| benign | 14,549 | 78.4% | no destructive verb visible; observe and allow |
-| opaque | 2,755 | 14.9% | real action is inside a string or stdin (`python3 -c`, `node -e`, heredoc program, `xargs`, `$VAR` executable); floor observes, cannot judge targets |
-| destructive, target resolved | 1,158 | 6.2% | the floor can judge inside/outside |
+| benign | 14,360 | 77.4% | no destructive verb visible; observe and allow |
+| opaque | 2,835 | 15.3% | real action is inside a string or stdin (`python3 -c`, `node -e`, heredoc program, `xargs`, `$VAR` executable); floor observes, cannot judge targets |
+| destructive, target resolved | 1,267 | 6.8% | the floor can judge inside/outside |
 | unparseable | 89 | 0.5% | parser gap; fail open with an `observe` audit row, not fail closed |
+
+Numbers above are from the October 9 rerun after the Gate 2b adversarial
+review taught the extractor to walk subshells, brace groups, `if`/`for`
+bodies, `pushd`, and wrapper commands (`command`, `nice -n 5`, `busybox`,
+`timeout 30`). That surfaced 109 more destructive commands that the first
+pass had silently skipped; the unparseable count did not move.
 
 ## What the corpus looks like (the shipped canonicalizer could not see it)
 
@@ -33,7 +39,7 @@ line. Every unparseable command is one of three `bashlex` gaps: `time cmd`
   `bashlex` failures). Stripping the body to `</dev/null` before parsing fixed
   all of them; the body is data, and the receiving command (`python3 -`,
   `psql`) is flagged opaque instead.
-- Destructive verbs, by frequency: `> redirect` 785, `rm` 758, `mv` 150,
+- Destructive verbs, by frequency: `> redirect` 930, `rm` 762, `mv` 152,
   `rmdir` 21, `git checkout --`/`restore` 31, `git reset --hard` 2,
   `git clean` 1, `git push --force` 1, `rsync --delete` 1.
 
@@ -41,10 +47,10 @@ line. Every unparseable command is one of three `bashlex` gaps: `time cmd`
 
 | zone | delete | write |
 |---|---|---|
-| inside cwd | 518 | 347 |
-| temp (`/tmp`, `/var/folders`) | 153 | 528 |
-| outside cwd (same user) | 132 | 60 |
-| dynamic (unresolvable) | 14 | 0 |
+| inside cwd | 509 | 349 |
+| temp (`/tmp`, `/var/folders`) | 157 | 635 |
+| outside cwd (same user) | 146 | 70 |
+| dynamic (unresolvable) | 9 | 28 |
 | home dir itself | 1 (cwd artifact) | 0 |
 | root / system / protected config / credential | 0 | 0 |
 
@@ -57,7 +63,7 @@ about. Keep it as an eval case.
 **Would confirm: 138** (132 deletes outside cwd + 6 remote file uploads).
 Naively that is 138 interruptions over months of work, which fails the "not
 louder than the host" rule. Two corrections, both from facts the hook already
-has, bring it to **28 distinct questions**:
+has, bring it to **30 distinct questions** (28 before the rerun; two more were inside subshells):
 
 1. **Worktree-aware boundary (35 absorbed).** `clad-core-eng*` directories are
    `git worktree`s of `clad-core`. "The containing repository" must mean the
@@ -67,7 +73,7 @@ has, bring it to **28 distinct questions**:
    /Applications/briefly.app` appeared 64 times during one app's development.
    One question is right; 64 is Sentinel being the loudest thing in the room.
 
-The 28 remaining are real cross-project edits (Sentinel session deleting
+The 30 remaining are real cross-project edits (Sentinel session deleting
 files in `clad-core`; `clad-core` session reshaping `buttercream-website`),
 a LaunchAgent plist, a sibling-folder `rsync --delete`. Each deserves one
 question.

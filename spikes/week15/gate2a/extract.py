@@ -25,7 +25,7 @@ import bashlex.ast
 
 HOME = os.path.expanduser("~")
 TEMP_PREFIXES = ("/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/")
-SYSTEM_PREFIXES = ("/bin/", "/sbin/", "/usr/", "/etc/", "/System/", "/Library/", "/var/", "/private/etc/", "/opt/")
+SYSTEM_PREFIXES = ("/bin/", "/sbin/", "/usr/", "/etc/", "/System/", "/Library/", "/var/", "/private/etc/", "/opt/", "/dev/", "/boot/", "/proc/", "/sys/")
 PROTECTED_CONFIG = (
     ".claude/settings.json",
     ".claude/settings.local.json",
@@ -34,8 +34,18 @@ PROTECTED_CONFIG = (
     ".cursor/hooks/",
     ".sentinel/",
     "sentinel.toml",
+    # Evidence and shell history: in three 2026 incidents the agent's sweep
+    # destroyed its own transcript; history edits are defense evasion.
+    # Bare `.claude/` is deliberately not here: repos carry `.claude/commands`
+    # and `CLAUDE.md` that agents legitimately edit.
+    ".claude/projects/",
+    ".claude-mem/",
+    ".bash_history",
+    ".zsh_history",
 )
-CREDENTIAL_PATHS = (".ssh/", ".aws/", ".gnupg/", ".netrc", ".npmrc", ".pypirc", ".docker/config.json", ".kube/config", ".config/gh/hosts.yml")
+CREDENTIAL_PATHS = (".ssh/", ".aws/", ".gnupg/", ".netrc", ".npmrc", ".pypirc", ".docker/config.json", ".kube/config", ".config/gh/")
+# Inside key-store directories, these are configuration, not key material.
+CREDENTIAL_EXEMPT = (".ssh/config", ".ssh/known_hosts", ".aws/config")
 # Key material by filename. Project `.env` files are deliberately excluded:
 # agents read and recreate them constantly and the floor is about key stores
 # and exfiltration, not everyday config. `.example`/`.sample` are never secrets.
@@ -49,7 +59,7 @@ MOVE_VERBS = {"mv"}
 OPAQUE_VERBS = {
     "bash", "sh", "zsh", "dash", "eval", "exec", "source", ".",
     "python", "python3", "node", "ruby", "perl", "php", "osascript",
-    "xargs", "parallel", "sudo", "env", "nohup", "time", "timeout", "nice", "watch",
+    "xargs", "parallel", "sudo", "env", "nohup", "time", "timeout", "nice", "watch", "command", "busybox", "doas", "ionice", "chronic", "caffeinate", "stdbuf", "unbuffer",
     "make", "npm", "pnpm", "yarn", "npx", "bun", "uv", "uvx", "pip", "pip3", "poetry", "cargo", "go", "docker", "docker-compose",
 }
 # Commands whose destructive power comes from a sub-verb or flag.
@@ -65,6 +75,36 @@ GIT_DESTRUCTIVE = {
     ("stash", "clear"): "git stash clear",
 }
 DYNAMIC = re.compile(r"[$`*?\[\]{}]")
+WRAPPERS = {"sudo", "doas", "env", "nohup", "time", "timeout", "nice", "ionice", "watch", "command", "busybox", "chronic", "caffeinate", "stdbuf", "unbuffer"}
+# Wrapper flags that take a value.
+WRAPPER_VALUE_FLAGS = {
+    "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U"}, "doas": {"-u", "-C"},
+    "nice": {"-n", "--adjustment"}, "ionice": {"-c", "-n", "-p"}, "timeout": {"-s", "--signal", "-k", "--kill-after"},
+    "watch": {"-n", "--interval", "-d"}, "stdbuf": {"-i", "-o", "-e"}, "env": {"-u", "-C", "-S"},
+}
+
+
+def shlex_join(parts: list[str]) -> str:
+    import shlex
+    return " ".join(shlex.quote(p) for p in parts)
+
+
+def _strip_wrapper(verb: str, argv: list[str]) -> list[str]:
+    """Drop the wrapper's own arguments up to the wrapped command."""
+    values = WRAPPER_VALUE_FLAGS.get(verb, set())
+    i = 0
+    if verb == "timeout" and argv and re.match(r"^\d+[smhd]?$", argv[0]):
+        i = 1  # positional duration
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("-"):
+            i += 2 if a in values and "=" not in a else 1
+            continue
+        if verb == "env" and "=" in a and not a.startswith("="):
+            i += 1  # VAR=value assignments
+            continue
+        break
+    return argv[i:]
 
 
 @dataclass
@@ -95,24 +135,43 @@ VAR_REF = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 GLOB_CHARS = re.compile(r"[*?\[\]{}]")
 
 
-def substitute_vars(raw: str, env: dict[str, str]) -> tuple[str, bool]:
+def substitute_vars(raw: str, env: dict[str, str], *, undefined_as_empty: bool = False) -> tuple[str, bool]:
     """Replace `$VAR`/`${VAR}` with known literal assignments. Returns
-    (text, still_dynamic)."""
+    (text, still_dynamic).
+
+    `undefined_as_empty` is the incident rule: in the 2026 home-directory
+    wipes the deletion looked scoped (`rm -rf "$DIR"/*`) and resolved to `/*`
+    because the variable was empty at run time. For delete targets, an
+    undefined variable is evaluated the way the shell would, as nothing, and
+    the resulting path is judged. `${VAR:-default}` uses the default."""
     def repl(m: re.Match[str]) -> str:
-        return env.get(m.group(1), m.group(0))
-    out = VAR_REF.sub(repl, raw)
+        name = m.group(1)
+        if name in env:
+            return env[name]
+        if undefined_as_empty:
+            return ""
+        return m.group(0)
+    out = DEFAULT_REF.sub(lambda m: env.get(m.group(1), m.group(2)), raw)
+    out = VAR_REF.sub(repl, out)
     return out, bool(VAR_REF.search(out)) or "`" in out or "$(" in out
 
 
+DEFAULT_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):?-([^}]*)\}")
+
+
 def glob_parent(raw: str) -> str | None:
-    """`out/review/st-*.png` -> `out/review`; `*.png` -> `.`; `**/x` -> None.
-    A glob only in the last path segment leaves the directory knowable."""
+    """`out/review/st-*.png` -> `out/review`; `*.png` -> `.`; `/*` -> `/`;
+    `**/x` -> None. A glob only in the last path segment leaves the
+    directory knowable."""
     parts = raw.split("/")
     if any(GLOB_CHARS.search(p) for p in parts[:-1]):
         return None
     if not GLOB_CHARS.search(parts[-1]):
         return raw
-    return "/".join(parts[:-1]) or "."
+    head = "/".join(parts[:-1])
+    if head == "" and raw.startswith("/"):
+        return "/"
+    return head or "."
 
 
 def strip_heredocs(command: str) -> tuple[str, int]:
@@ -146,28 +205,54 @@ def _redirect_targets(node: bashlex.ast.node) -> list[tuple[str, bool]]:
     return out
 
 
-def _resolve(raw: str, vcwd: str) -> str:
-    expanded = os.path.expanduser(raw)
+def _expand_home(raw: str, home: str) -> str:
+    """`~` and `~/x` against the session's home, which is a hook fact, not
+    this process's environment."""
+    if raw == "~":
+        return home
+    if raw.startswith("~/"):
+        return home + raw[1:]
+    return raw
+
+
+def _resolve(raw: str, vcwd: str, home: str = HOME) -> str:
+    expanded = _expand_home(raw, home)
     candidate = expanded if expanded.startswith("/") else posixpath.join(vcwd, expanded)
     return posixpath.normpath(candidate)
 
 
-def _zone(resolved: str, launch_cwd: str) -> str:
+def _zone(resolved: str, launch_cwd: str, home: str = HOME) -> str:
     lc = posixpath.normpath(launch_cwd)
-    if any(p in resolved for p in PROTECTED_CONFIG):
+    probe = resolved + "/"  # so `.claude/projects/` matches the directory itself
+    if any(p in probe for p in PROTECTED_CONFIG):
         return "protected_config"
     if resolved == "/":
         return "root"
-    if resolved == HOME:
+    # Home, or any ancestor of home (`/Users`, `/home`): deleting it deletes home.
+    if resolved == home or (home + "/").startswith(resolved + "/"):
         return "home"
-    if resolved == lc or resolved.startswith(lc + "/"):
+    exempt = resolved.endswith(CREDENTIAL_EXEMPT)
+    # Key-store directories are credentials wherever they sit.
+    if not exempt and any(c in probe for c in CREDENTIAL_PATHS):
+        return "credential"
+    if resolved == lc:
+        # The working directory itself. Deleting or overwriting the thing the
+        # agent was launched in is never "inside" work.
+        return "cwd_root"
+    if resolved.startswith(lc + "/"):
+        # Launching from ~ does not make ~ a trusted working directory: that is
+        # how the home-directory wipes happened. Children of ~ stay "outside".
+        if lc == home:
+            return "outside"
         return "inside"
-    if resolved.startswith(TEMP_PREFIXES):
+    # Filename patterns (`id_rsa`, `*.pem`) count only outside the repo, where
+    # they are key material rather than test fixtures.
+    if not exempt and CREDENTIAL_NAMES.search(resolved):
+        return "credential"
+    if resolved.startswith(TEMP_PREFIXES) or resolved in {p.rstrip("/") for p in TEMP_PREFIXES}:
         return "temp"
     if resolved.startswith(SYSTEM_PREFIXES):
         return "system"
-    if any(c in resolved for c in CREDENTIAL_PATHS) or CREDENTIAL_NAMES.search(resolved):
-        return "credential"
     return "outside"
 
 
@@ -185,7 +270,8 @@ def _flag_args(words: list[tuple[str, bool]]) -> tuple[list[str], list[tuple[str
     return flags, args
 
 
-def analyze(command: str, launch_cwd: str) -> Report:
+def analyze(command: str, launch_cwd: str, home: str | None = None) -> Report:
+    home = home or HOME
     rep = Report()
     text, rep.heredocs = strip_heredocs(command)
     try:
@@ -196,22 +282,37 @@ def analyze(command: str, launch_cwd: str) -> Report:
         return rep
 
     vcwd = launch_cwd
-    env: dict[str, str] = {"HOME": HOME, "TMPDIR": "/tmp", "PWD": launch_cwd}
+    env: dict[str, str] = {"HOME": home, "TMPDIR": "/tmp", "PWD": launch_cwd}
 
-    def place(verb: str, raw: str, kind: str = "delete", note: str = "") -> Target:
+    def place(verb: str, raw: str, kind: str = "delete", note: str = "", container: bool = False) -> Target:
         """Resolve one argv word to a Target, salvaging what can be known.
         Order matters: substitute variables first, then treat a trailing glob
         as 'the directory it lives in', then give up only if something
-        dynamic is still left."""
-        text, dyn = substitute_vars(raw, env)
+        dynamic is still left. Delete targets evaluate undefined variables as
+        empty (the incident rule); `$(...)` stays dynamic.
+
+        `container`: the path is a directory whose *contents* are affected
+        (find root, glob parent), not the directory itself, so resolving to
+        the cwd is ordinary inside work rather than deleting the cwd."""
+        text, dyn = substitute_vars(raw, env, undefined_as_empty=(kind == "delete"))
         if dyn:
             return Target(verb, raw, None, "dynamic", note, kind)
+        collapsed = text != raw and VAR_REF.search(raw) is not None and text.strip("/*") == ""
+        if kind == "delete" and text == "" :
+            # `rm -rf "$DIR"` with DIR unset: rm receives an empty string, which
+            # fails harmlessly. Only the `/*` and `/` suffix forms are deadly.
+            return Target(verb, raw, None, "dynamic", "empty target (no-op)", kind)
         knowable = glob_parent(text)
         if knowable is None:
             return Target(verb, raw, None, "dynamic", "glob in directory segment", kind)
-        r = _resolve(knowable, vcwd)
+        r = _resolve(knowable, vcwd, home)
+        zone = _zone(r, launch_cwd, home)
+        if zone == "cwd_root" and (container or knowable != text):
+            zone = "inside"
         n = note if knowable == text else (note + " (glob: judged by directory)").strip()
-        return Target(verb, raw, r, _zone(r, launch_cwd), n, kind)
+        if collapsed:
+            n = (n + " (variable collapsed to empty; judged as resolved)").strip()
+        return Target(verb, raw, r, zone, n, kind)
 
     def add(t: Target) -> None:
         rep.targets.append(t)
@@ -226,9 +327,16 @@ def analyze(command: str, launch_cwd: str) -> Report:
         if node.kind == "pipeline":
             handle_pipeline(node)
             return
-        for child in getattr(node, "parts", []) or []:
-            visit(child)
-        for attr in ("list", "command", "body"):
+        # Everything else (list, compound, if, for, while, function) is a
+        # container. Descend into every attribute that holds nodes; a subshell
+        # `( ... )` or `{ ...; }` must not hide a command from the floor.
+        for attr in ("parts", "list"):
+            children = getattr(node, attr, None)
+            if isinstance(children, list):
+                for child in children:
+                    if hasattr(child, "kind"):
+                        visit(child)
+        for attr in ("command", "body", "condition"):
             child = getattr(node, attr, None)
             if child is not None and hasattr(child, "kind"):
                 visit(child)
@@ -252,7 +360,7 @@ def analyze(command: str, launch_cwd: str) -> Report:
                 value = value.strip("\"'")
                 sub, dyn = substitute_vars(value, env)
                 if not dyn:
-                    env[name] = os.path.expanduser(sub)
+                    env[name] = _expand_home(sub, home)
         words = _words(node)
         for raw, _ in _redirect_targets(node):
             t = place("redirect >", raw, kind="write")
@@ -267,15 +375,15 @@ def analyze(command: str, launch_cwd: str) -> Report:
             return
         flags, args = _flag_args(words)
 
-        if verb == "cd":
+        if verb in {"cd", "pushd"}:
             if not args:
-                vcwd = HOME
+                vcwd = home
             else:
                 sub, dyn = substitute_vars(args[0][0], env)
                 if dyn:
                     rep.opaque.append("cd to dynamic path")
                 else:
-                    vcwd = _resolve(sub, vcwd)
+                    vcwd = _resolve(sub, vcwd, home)
             return
 
         if verb in DELETE_VERBS:
@@ -289,7 +397,7 @@ def analyze(command: str, launch_cwd: str) -> Report:
             if len(args) >= 2:
                 for raw, _ in args[:-1]:
                     add(place("mv src", raw, kind="write"))
-                add(place("mv dest", args[-1][0], kind="write"))
+                add(place("mv dest", args[-1][0], kind="write", container=True))
             return
 
         if verb == "git":
@@ -299,8 +407,9 @@ def analyze(command: str, launch_cwd: str) -> Report:
                     # git acts on the repo containing vcwd (or -C <dir>).
                     repo = vcwd
                     if "-C" in sub and sub.index("-C") + 1 < len(sub):
-                        repo = _resolve(sub[sub.index("-C") + 1], vcwd)
-                    add(Target(label, ".", repo, _zone(repo, launch_cwd), " ".join(sub[:4])))
+                        repo = _resolve(sub[sub.index("-C") + 1], vcwd, home)
+                    z = _zone(repo, launch_cwd, home)
+                    add(Target(label, ".", repo, "inside" if z == "cwd_root" else z, " ".join(sub[:4])))
                     break
             return
 
@@ -315,10 +424,16 @@ def analyze(command: str, launch_cwd: str) -> Report:
                     inner = posixpath.basename(argv[i + 1]) if i + 1 < len(argv) else "?"
                     if inner in DELETE_VERBS | MOVE_VERBS | {"chmod", "chown", "sed", "truncate", "shred"}:
                         label = f"find {ex} {inner}"
+                    elif inner in {"cat", "head", "tail", "sh", "bash", "cp", "scp", "curl", "base64"}:
+                        # Reading whatever the -name pattern finds. If the pattern
+                        # names key material, that is a credential read.
+                        names = [argv[j + 1] for j, a in enumerate(argv) if a in {"-name", "-iname", "-path"} and j + 1 < len(argv)]
+                        if any(CREDENTIAL_NAMES.search(n.strip("*")) or n.strip("*") in {"id_rsa", "id_ed25519", ".pem", "credentials"} for n in names):
+                            rep.credential_reads.append(f"find {' '.join(names)} {ex} {inner}")
             if label:
                 roots = [(w, d) for w, d in args if not w.startswith("-")][:1] or [(".", False)]
                 for raw, _ in roots:
-                    add(place(label, raw))
+                    add(place(label, raw, container=True))
             return
 
         if verb in {"chmod", "chown", "chgrp"} and any("R" in f for f in flags if not f.startswith("--")):
@@ -357,8 +472,8 @@ def analyze(command: str, launch_cwd: str) -> Report:
             for raw, _ in args:
                 sub, dyn = substitute_vars(raw, env)
                 if not dyn:
-                    r = _resolve(sub, vcwd)
-                    if _zone(r, launch_cwd) == "credential":
+                    r = _resolve(sub, vcwd, home)
+                    if _zone(r, launch_cwd, home) == "credential":
                         rep.credential_reads.append(r)
             return
 
@@ -379,17 +494,20 @@ def analyze(command: str, launch_cwd: str) -> Report:
                 rep.opaque.append(f"{verb} inline/stdin program")
             elif verb in {"eval", "exec", "source", ".", "xargs", "parallel", "osascript"}:
                 rep.opaque.append(verb)
-            elif verb in {"sudo", "env", "nohup", "time", "timeout", "nice", "watch"}:
-                # Wrapper: judge the inner command as if run directly.
-                inner = [w for w, _ in words[1:] if not w.startswith("-")]
-                if verb == "sudo":
+            elif verb in WRAPPERS:
+                # Wrapper: judge the inner command as if run directly. Skip the
+                # wrapper's own flags and their values (`nice -n 5`, `timeout 30`,
+                # `sudo -u root`, `env FOO=bar`) up to the first bare word.
+                inner = _strip_wrapper(verb, [w for w, _ in words[1:]])
+                if verb in {"sudo", "doas"}:
                     rep.opaque.append("wrapper sudo")
                 if inner:
-                    sub = analyze(" ".join(inner), vcwd)
+                    sub = analyze(shlex_join(inner), vcwd, home)
                     for t in sub.targets:
                         add(t)
                     rep.opaque.extend(sub.opaque)
                     rep.egress.extend(sub.egress)
+                    rep.credential_reads.extend(sub.credential_reads)
             # Package managers / build tools run arbitrary scripts, but they are
             # the agent's everyday work; the floor observes.
             return
