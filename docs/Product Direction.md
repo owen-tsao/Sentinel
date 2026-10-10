@@ -19,6 +19,12 @@ dangerous actions because it holds the host's hook, and it keeps a
 tamper-evident audit written before each action runs. The web app becomes
 the monitor and flight recorder, not a form to fill in before work.
 
+The coding floor (Weeks 15-18) is the first adapter and the proving ground,
+not the destination. The problem Sentinel is built to solve is the ambiguous
+one that no fact decides: did this Slack send, this email archive, this
+calendar edit match what the person meant? That layer, reached through an
+MCP proxy with inferred purpose and one-tap authority, is §10.
+
 ## 2. Why
 
 The contract model (Weeks 10-14) proved the enforcement seam works: a paired
@@ -273,8 +279,9 @@ classifies intent per action, while Sentinel's floor is a closed rule list.
   supervises agents the person started.
 - A phone or menu-bar app as a product. Verdicts go through existing relays
   (desktop notifications, ntfy-style push, host remote-control apps).
-- Monitoring closed consumer assistants (Grok, Meta AI, chat-app bots). No
-  hook, no claim.
+- Monitoring closed consumer assistants (Grok, Meta AI, chat-app bots) that
+  expose neither hooks nor MCP. No interception point, no claim. Agents that
+  reach Gmail, Slack, or calendars *through MCP* are in scope for §10.
 - Enterprise multi-tenant control, SIEM integration, or sales-led security
   platform features.
 - Claims of security against an adversarial agent that crafts retries using
@@ -323,7 +330,65 @@ load-bearing assumption) is obeyed:
 - **Week 18: validation and release decision**, unchanged in shape, with the
   evaluation numbers as the artifact.
 - **Next phase (after Week 18):** off-track detector, Cursor hook adapter,
-  hash-chained audit, web monitor view, Codex adapter, in that order.
+  hash-chained audit, web monitor view, Codex adapter, in that order, as the
+  on-ramp to §10.
+
+## 10. The destination: the ambiguous layer (decided October 9, 2026)
+
+The coding floor is the first adapter, not the product. The problem Sentinel
+exists to solve is the one the floor cannot touch:
+
+> Given one sentence from a person, decide whether a specific tool call
+> matches what they meant, with few enough wrong answers that the person does
+> not turn the supervisor off.
+
+The failures here are plausible, not catastrophic: a reply sent to the wrong
+Slack thread, the wrong emails archived, a message to forty people that was
+meant for one. No "outside the working directory" fact decides them. Intent
+is the only evidence, and the best production system found in the research
+runs at 0.4% false positives and 17% misses on routine traffic, which at
+fifty actions a session still interrupts one session in five wrongly.
+Nobody has solved this; the market has shipped around it.
+
+**What the market did instead (October 2026).** Clawvisor ("approve a task
+once; every request must match that purpose"), comail (per-agent Gmail
+slices by label), and AWP (time-limited Gmail permits) all sit between the
+agent and the service as an MCP proxy and require the person to configure
+the scope. Runtime and Salus sell infra-level allow/deny to teams and agent
+builders. The lesson is twofold: the task-scoped check that Sentinel's
+contract model attempted is what the market converged on; and the friction
+problem was the forms, not the idea.
+
+**Sentinel's position.** Infer the purpose instead of asking for it; show it
+as one line; one tap gives it authority. Host-agnostic, local-first, and
+backed by an evaluation discipline that the configuration-first products do
+not need and therefore do not have.
+
+**Mechanism.**
+
+- *Plug:* an MCP proxy for the services the agent reaches (Gmail, Slack,
+  calendar, GitHub, browser-over-MCP). The agent routes through Sentinel, so
+  there is no hook to tamper with and every call carries structured
+  arguments (recipient, audience, thread, label) instead of a shell string.
+  Hooks remain the plug for raw shell on coding hosts.
+- *Authority:* the inferred purpose is advisory until the person taps it,
+  exactly as in §3.1. After the tap it may `confirm`; it still never
+  silently `allow`s a floor action. The one-tap purpose is the smallest form
+  that can grant authority: one field, pre-filled, one gesture.
+- *Decision record:* must hold a service call (tool, audience size,
+  recipients, thread, purpose matched or not) in the same shape as a shell
+  decision (command, target, zone). Designed in Week 16 so the recorder and
+  the web app do not need a second schema later.
+- *Gate before building:* an intent-match evaluation set with labelled
+  (purpose, call, verdict) triples, including benign twins ("reply to Sarah"
+  where Sarah is in a 40-person thread). Kill condition to be set from the
+  false-positive budget in §3.2, not from recall. Gate 2b in Week 15 is the
+  first rep of this muscle on the easier problem.
+
+**Who pays, stated honestly.** The teams market (Runtime, Salus) pays today;
+the consumer agent-safety products look indie. This does not change the
+portfolio value of the problem; it informs the eventual pitch, which is to
+people and small teams who already let agents into their inbox and chat.
 
 ## Appendix: research summary (October 9, 2026)
 

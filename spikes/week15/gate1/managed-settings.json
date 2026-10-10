@@ -1,0 +1,34 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 /Users/owentsao/Sentinel/spikes/week15/gate1/hook.py", "timeout": 10 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit",
+        "hooks": [
+          { "type": "command", "command": "python3 /Users/owentsao/Sentinel/spikes/week15/gate1/hook.py", "timeout": 10 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 /Users/owentsao/Sentinel/spikes/week15/gate1/hook.py", "timeout": 10 }
+        ]
+      }
+    ],
+    "ConfigChange": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 /Users/owentsao/Sentinel/spikes/week15/gate1/hook.py", "timeout": 10 }
+        ]
+      }
+    ]
+  },
+  "allowManagedHooksOnly": true
+}
