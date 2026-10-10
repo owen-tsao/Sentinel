@@ -2,20 +2,23 @@
 
 This document is the source of truth for sequencing, milestones, dependencies, and outcomes. Stable product/security behavior belongs in `docs/Product Architecture.md`; implementation-level checklists belong only in the active week plan.
 
-Project Sentinel is a local-first authorization and supervision layer for AI
-agents. Users should work where their agents already run while Sentinel derives
-bounded task authority, mediates supported tools, interrupts unclear or
-sensitive changes, and records what happened. The web app is an agent command
-center for setup, oversight, approvals, coverage, and activity; manual contract
-editing is an advanced fallback.
+Project Sentinel is a local-first supervisor for AI coding agents. People
+keep working where their agents already run while Sentinel infers an advisory
+boundary from the prompt, tells the agent that boundary, watches every action
+through the host's hooks, blocks or confirms a deterministic floor of
+dangerous actions, surfaces stuck and off-track agents, and records every
+verdict before the action runs. The web app is the monitor and flight
+recorder. The direction decision of October 9, 2026 and its evidence are in
+[Product Direction](./Product%20Direction.md); it governs Weeks 15-18 below.
 
 This roadmap separates the work into two phases:
 
 - **Part 1: Local Product Proof (Weeks 1-18)** builds the guardrail engine,
   persistent task authority, local execution and audit, protected human review,
-  one mandatory MCP fixture path, low-friction task preparation, persistent
-  guardrails, a local agent command center, one conditional real-provider
-  validation, and a measured release-candidate decision.
+  one mandatory MCP fixture path, low-friction task preparation (Weeks 1-14),
+  then moves the proven seam onto Claude Code's hooks with a deterministic
+  floor, an inferred boundary, a stuck detector, and a published evaluation
+  (Weeks 15-18).
 - **Part 2: Hosted/Hybrid Expansion** adds organizations, enterprise identity,
   production credential brokering, regional or customer-hosted enforcement,
   observability integrations, and managed execution after the local product is
@@ -23,72 +26,58 @@ This roadmap separates the work into two phases:
 
 ## Product Thesis
 
-AI agents are becoming powerful enough to run shell commands, modify infrastructure, send external communications, and trigger production workflows. Enterprises will need a middleware layer that treats every agent action as untrusted until it is evaluated, policy-checked, scoped, and logged.
+AI agents are becoming powerful enough to run shell commands, modify infrastructure, send external communications, and trigger production workflows. Every vendor now ships a permission prompt and a phone relay for its own agent; none offers an independent second opinion that works across agents, can actually stop an action, surfaces stuck and off-track behaviour, and keeps a record the agent did not write.
 
-Sentinel's near-term wedge is not enterprise-wide agent discovery or a general
-prompt-writing assistant. The local product should prove that quiet supervision
-and mandatory enforcement work together:
+Sentinel's wedge is that independent second opinion for the individual
+developer. The local product should prove that quiet supervision and
+mandatory enforcement work together:
 
-- receive task instructions where the user already works;
-- prepare a bounded `ActionContract` from explicit facts without silently
-  changing user intent;
-- let an advisory but complete draft reach protected compact confirmation;
-  clarify or reject missing and ambiguous authority-bearing facts first;
-- keep one accepted task contract active across many compliant commands and tool calls,
-- let an authenticated host-attested direct-user event narrow, replace, or
-  clearly extend the current task without repeated approval; advisory host
-  prompts remain drafts until protected confirmation,
-- require separate approval only when a task adds sensitive authority such as production access, credentials, deployment, external sending, or broad deletion,
-- mediate only explicitly supported action families through a host adapter,
-  MCP gateway, or Sentinel-owned proxy and label every coverage gap;
-- deterministically compare each proposed action with the accepted contract,
-- use a PyTorch/ONNX model only for ambiguity or contract-overstep gray areas after evaluation is trustworthy,
-- apply deterministic policy rules and risk tiers,
-- require confirmation for high-risk but possibly legitimate actions,
-- run approved commands in a restricted Docker sandbox,
-- write audit logs to a local SQLite store,
-- expose the system through FastAPI and a protected local command center for
-  connections, agents, active work, guardrails, approval, audit, and health;
-- use host and MCP surfaces for task intake, protected tool mediation, compact
-  status, and links to exceptional review;
+- hear the prompt through the host's hook and infer an advisory boundary from
+  the working directory, its repository, and the launch environment, narrowing
+  on prompt facts and asking one question before widening;
+- tell the agent the boundary in one line of context, the single most
+  effective intervention measured in the literature;
+- block or confirm a deterministic floor of dangerous-by-facts actions on hook
+  facts alone, before the action runs;
+- let everything else run, with a stuck detector and an off-track detector
+  that warn or confirm within a per-boundary message budget and never block;
+- never treat the inferred boundary, agent suggestions, or content read from
+  tools, files, or messages as authority;
+- state enforcement coverage per host and per surface and claim nothing more;
+- reserve any model for gray areas after an evaluation set exists, able to
+  escalate but never to downgrade a floor decision;
+- run commands Sentinel owns in a restricted Docker sandbox;
+- write every verdict to a tamper-evident local SQLite store before the action;
+- publish dangerous recall, false-flag rate, messages per hour, latency, and
+  audit integrity against real incidents and benign twins;
+- expose the system through FastAPI, per-host hook adapters, and a protected
+  local web app for monitoring, approvals, and audit review;
 - defer public marketing until the measured local workflow is ready to explain
   honestly.
 
 ## Core Product Principles
 
 - **Context matters:** decisions depend on `context`, `command`, and `environment`, not command text alone.
-- **Prompt text is not authorization:** vague natural language must be clarified before it can authorize a high-impact action.
-- **Supervision should be quiet:** complete ordinary prompts should not require
-  users to fill out contracts. Sentinel should prepare the boundary, show the
-  smallest necessary review, and keep exact editing available on demand.
-- **Authority lasts for a task, not one command:** an active contract covers
-  multiple matching actions until a trusted authority event switches tasks, or
-  it is suspended, superseded, expired, or revoked.
-- **Only trusted authority events can expand authority:** authenticated
-  host-attested direct-user events and protected local authority actions may
-  grant permission. Agent suggestions and content read from tools, webpages,
-  messages, or files cannot.
-- **The contract is the boundary:** task identity, operation, exact target, environment, maximum scope, constraints, rollback requirements, authorization source, lifecycle, and approval state must be machine-checkable.
-- **Exact-action approval is exceptional:** one-time approval is reserved for sensitive actions and must not turn every ordinary command into a permission prompt.
-- **Learn convenience, never permission:** future saved templates and personalization may suggest familiar targets and safety steps, but only a fresh trusted instruction or protected approval can activate authority.
-- **Temporal context matters:** decisions should consider the recent action window for the agent session, not only the current command.
+- **Prompt text is not authorization:** a boundary inferred from the prompt is advisory; it may warn or confirm, never allow or block. Inference may only narrow; widening needs the person's answer.
+- **Supervision should be quiet:** people should never fill out a boundary. Sentinel infers it, tells the agent, and speaks only at the edges, within a per-boundary message budget. If Sentinel is louder than the host's own prompts, it has failed.
+- **The floor is deterministic and uses hook facts alone:** destructive operations whose target escapes the working directory, credential reads, exfiltration, production deletion, defense evasion, and writes to hook or Sentinel configuration block or confirm before the action runs, regardless of what the prompt said.
+- **Only trusted authority events can expand authority:** the person answering a question or approving an exact action may grant permission. Agent suggestions, inferred boundaries, and content read from tools, webpages, messages, or files cannot.
+- **Exact-action approval is exceptional:** one-time approval is reserved for the floor and must not turn every ordinary command into a permission prompt.
+- **Learn convenience, never permission:** templates and personalization may suggest safer defaults, but only a fresh trusted answer or protected approval can grant authority.
+- **Temporal context matters:** decisions should consider the recent action window for the agent session, not only the current command; the stuck detector is built on it.
 - **Malicious is different from destructive:** authorized destructive work may be allowed or require confirmation; malicious or agent-gone-haywire actions should block.
-- **Deterministic policy comes first:** critical allow/block rules and environment policy short-circuit before ML inference whenever possible.
-- **ML handles gray areas conservatively:** ONNX inference is reserved for ambiguity and contract-overstep signals and may deny/escalate, never independently approve high-impact work.
-- **ML cannot broaden permission:** a model score can never downgrade a contract mismatch, environment restriction, deterministic block, missing trusted authority, or incomplete enforcement path.
+- **Deterministic policy comes first:** the floor decides before any detector; detectors decide before any model.
+- **A model handles gray areas conservatively, later:** no model runs in Weeks 15-18. When one exists it may escalate, never downgrade a floor decision, and never sends prompt content off the machine.
+- **Coverage is per host and per surface:** mandatory only where the hook can deny and the configuration is locked against the agent; advisory where it can only observe or the agent can edit the hook; unsupported where there is no hook.
 - **MCP alone is not enforcement:** an MCP tool is advisory unless the host or a proxy guarantees complete mediation of protected actions.
 - **Docker is not a production security boundary:** local Docker is acceptable
   for the local product proof; enterprise execution requires stronger
   isolation such as managed orchestration, microVMs, or hardened Kubernetes
   controls.
-- **Audit everything:** allowed, blocked, warned, and confirmation-required requests must all be logged.
+- **Audit everything, before the action:** every verdict is written durably before the action runs, hash-chained so tampering is evident, and the hook fails closed if the write fails. Prompt text is not stored; the boundary and the prompt's hash are.
 - **Local-first security:** teams should be able to test policies and commands locally before using hosted infrastructure.
-- **Web app is the command center:** connections, agents, sessions, guardrails,
-  approvals, enforcement coverage, and mediated activity belong in the local
-  control center. It should not become a required form before every task.
-- **Integrate where work happens:** Cursor, Codex, MCP, and similar surfaces
-  should provide task intake and compact status. Mandatory tool calls run
-  through Sentinel; exceptional review routes to the protected web app.
+- **Web app is the monitor and flight recorder:** active agents, boundaries, decisions with reasons, detector signals, approvals, and audit belong there. It is never a form before work.
+- **Integrate where work happens:** Claude Code, Cursor, Codex, and MCP provide the hooks. Verdicts travel through existing notification channels; exceptional review routes to the protected web app.
 - **Scale without replacing the core:** a future hosted control plane may manage organizations, identity, policy, and audit indexing while enforcement remains local, regional, or customer-hosted.
 
 ## Part 1: Local Product Proof (Weeks 1-18)
@@ -98,37 +87,30 @@ and mandatory enforcement work together:
 The local product proof is complete when Sentinel can:
 
 - Accept command-evaluation requests through a FastAPI service.
-- Prepare an ordinary task from a supported agent prompt without manual
-  contract field entry.
-- Activate an advisory but complete task draft through protected compact
-  confirmation; clarify or reject missing and ambiguous authority-bearing
-  facts first.
-- Keep an accepted task contract active across multiple compliant canonical actions.
-- Version, replace, narrow, expire, and revoke task authority while preserving its trusted source.
-- Let authenticated host-attested direct-user events move to a different
-  ordinary task without stale-contract blocks; advisory prompts require
-  protected confirmation, and sensitive capability expansion always requires
-  review.
-- Bind one-use exact-action approvals to a specific contract version and canonical action.
-- Evaluate requests using deterministic contract/rule enforcement, with ONNX scoring only if it proves value beyond the rules-only baseline.
+- Hear a prompt through Claude Code's hooks, infer an advisory boundary that
+  narrows from the working directory, repository, and launch environment, and
+  ask one question before any widening.
+- Tell the agent that boundary as one line of context it then sees.
+- Block or confirm a deterministic floor of dangerous-by-facts actions through
+  the hook, on hook facts alone, before the action runs, under managed
+  settings the agent cannot edit.
+- Classify real shell commands (compound, globbed, interpreted) for the floor
+  without failing closed on benign work.
+- Surface stuck agents in `warn` within a per-boundary message budget.
+- Bind one-use exact-action approvals to a floor rule, canonical action,
+  working directory, and session.
 - Return structured verdicts: `allow`, `warn`, `confirm_required`, or `block`.
-- Run approved commands in a restricted local Docker executor.
-- Record audit events in a local SQLite store with a JSONL export/debug format.
-- Mandatorily mediate at least one useful local MCP tool family and honestly
-  measure every tested bypass.
-- Manage local agent sessions, task status, tool/data access, coverage gaps,
-  approvals, and activity in one command center.
-- Validate one narrow real-provider path only after credential and metadata
-  assumptions pass a disposable spike.
-- Keep LLM suggestions out of the release path until a later shadow evaluation;
-  evaluation may enable draft assistance but never authority.
-- Make a release-candidate decision only after the supervision workflow is
-  measured and reviewable.
+- Run commands Sentinel owns in a restricted local Docker executor.
+- Write every hook-path verdict durably before the action and fail closed if
+  it cannot; record audit events in a local SQLite store with a JSONL export.
+- Keep the MCP fixture path mandatory as a regression bench.
+- State enforcement coverage per host and per surface honestly.
+- Publish dangerous recall on real incidents and held-out cases, false-flag
+  rate per benign session, messages per hour against the host's own prompts,
+  decision latency at the hook, and audit integrity under deletion.
+- Make a release-candidate decision only after those numbers are measured and
+  reviewed.
 - Keep any CLI limited to non-blocking health, fixture evaluation, and CI diagnostics.
-- Produce system metrics: contract-overstep recall, compliant-action false
-  interruption rate, enforcement coverage, approval bypass rate, p50/p95
-  decision latency, model inference latency only when a model is enabled,
-  sandbox latency, and audit logging success rate.
 
 ### Local Product Architecture
 
@@ -704,267 +686,166 @@ fixture's exact-ticket scope was a
 proof of the narrowest boundary, not the scope model for real tools. Both
 points feed the Week 15 scope decision below.
 
-### Week 15: Scope Decision, Standing Permissions, and Guardrails
+### Week 15: Gates for the Hook-Based Supervisor
 
-**Goal:** Decide what Sentinel actually protects and for whom, then turn the
-startup ceiling into user-set standing permissions so routine work needs no
-activation click and only dangerous actions prompt.
+**Direction change, October 9, 2026.** The Week 15 standing-permissions plan
+and scope decision drafted on September 11 are superseded; both documents are
+kept for the record and marked as such. The reasons and evidence are in
+[Product Direction](./Product%20Direction.md). In short: authoring a boundary
+was the friction, not the boundary itself; prompt-inferred scope cannot be
+authority; and the enforcement seam exists only in coding agents' hooks.
 
-**Plan:** [Week 15 Plan](./Week%2015%20Plan.md) and the
-[Week 15 Scope Decision](./Week%2015%20Scope%20Decision.md), both drafted
-September 11 (evening) and awaiting the user's review. The plan narrows this
-entry in three places, each with a stated reason: Codex is coverage-mapped as
-advisory rather than parity-checked; no Slack write is attempted this week;
-and the build is tiered so the authority ships before the screens.
+**Goal:** Verify the three load-bearing assumptions the new direction rests
+on, and write no adapter code until they pass. This week contains gates only,
+per the project's own de-risking rule.
 
-**Reordered September 11, 2026 (user decision):** the scope decision moves
-ahead of everything else this week, and the one-day security deep review
-follows it rather than preceding it, because a threat model written against
-the fake tracker would protect the wrong thing. Transition drafts (the
-original Week 15 headline) are deferred to whichever later week the scope
-decision makes them relevant.
+**Gate 1: Claude Code hooks (half a day).** On the user's machine, with the
+Claude Code version recorded: install a `PreToolUse` hook under
+`managed-settings.json` that denies one floor action (`rm -rf` of a path
+outside the working directory) and confirm the agent cannot perform it or edit
+the hook away; confirm `UserPromptSubmit` can attach one line of context the
+agent then sees; check whether the `Stop` transcript exposes the host's own
+permission prompts. **Kill condition:** deny or injection fails under managed
+settings → Claude Code is advisory and the hook work pauses until a host
+passes.
 
-**Part 1: scope decision (first, about half a day plus one spike).** A short
-written decision, reviewed by the user before any Week 15 code, answering:
+**Gate 2a: target extraction on real shell (one to two days).** The shipped
+canonicalizer knows fourteen commands and rejects compound commands, pipes,
+globs, and interpreters. A Bash hook delivers everything. Capture at least two
+hundred real `Bash` arguments from the user's own sessions and measure how many
+a floor-oriented extraction pass can classify (target, destructive or not,
+inside or outside the working directory) without failing closed. **Kill
+condition:** more than one in twenty benign commands unclassifiable → the floor
+cannot ship on Bash and the direction is revisited before any adapter.
 
-- **Where integrations live.** Sentinel is the MCP server the agent talks to.
-  *Owned* mode: Sentinel holds the OAuth connection (email, calendar, Slack)
-  and calls the provider, so enforcement is complete because the agent never
-  holds a credential. *Proxy* mode: Sentinel forwards to a user-connected MCP
-  server for long-tail tools, labelled "mandatory only when Sentinel is the
-  sole configured route." Owned mode is where enforcement lives; this means
-  Sentinel needs OAuth and a real Connections page.
-- **First providers.** Communications first (email, calendar, Slack), because
-  a plain verb splits sharply into safe and unsafe there and the roadmap's
-  domain gate already starts there. "Dangerous" is decided from provider
-  facts (external recipient, public channel, member count, reversibility),
-  not from a model.
-- **Agent hosts.** MCP is the common denominator across Cursor, Claude Code,
-  Codex, and (to verify) Hermes. The deciding question per host is whether it
-  can be configured so a provider is reachable *only* through Sentinel. Prove
-  on Cursor, check config parity on Claude Code and Codex, label the rest
-  "mandatory only if MCP-only, otherwise advisory." Native shell, file, and
-  browser tools stay advisory on every host.
-- **What "scope" means.** Two axes, not one. *Exposure*: which resources the
-  agent may touch at all, reads included, because a customer thread or an
-  external channel is confidential even though reading it is reversible.
-  *Damage*: which operations on those resources ask, based on reversibility,
-  breadth, and whether the effect leaves the boundary. Scope is therefore
-  resource-shaped (this repo; these channels; this inbox minus these labels),
-  never "the whole account" by default and never exact record IDs by default.
+**Gate 2b: the floor against reality (one to two days).** Build the evaluation
+set: the 2026 incidents (Replit production wipe, Antigravity `rmdir d:\`,
+three Claude Code home-directory wipes, Cursor YOLO), held-out dangerous
+commands from BashArena and Terminal-Bench that the rules were not written
+against, and at least one hundred benign twins (`rm -rf node_modules`, an
+intentional migration, `git clean -fdx` inside the repo). Run the floor rules.
+**Kill condition:** below 100% on the incidents, below 90% on held-out
+dangerous cases, or more than one in twenty benign twins flagged → the list is
+fixed before anything else is built.
 
-**Riskiest assumption (unverified) and the spike:** one real provider with a
-throwaway account (a disposable Gmail or Slack workspace), fronted by Sentinel,
-driven from Cursor and from Claude Code. Confirm (a) the host can be locked to
-Sentinel as the only route and (b) Sentinel receives the full canonical
-arguments (recipient, channel, body) needed to decide. **Kill condition:** if
-a host lets the agent add its own MCP servers and the user cannot lock that
-down, the coverage claim for that host drops to "mandatory only when
-configured" and the decision says so up front.
+**Also this week:** decide whether the manual form, proposal card, and budget
+UI are deleted or kept as the fixture regression bench (one day either way,
+scheduled in Week 16); design ceiling v2 (floor list, detector thresholds,
+message budget, environments beyond `sandbox`) and its state-database
+migration message.
 
-**Part 2: security deep review (one day, after Part 1).** Threat model v2 for
-the whole local product as scoped by Part 1 (agent-side: prompt injection via
-content, replay, time-of-check races, proposal floods; host-side: same-user
-process, cookie and Origin assumptions, the service worker; human-side:
-mis-clicks, stale views, notification fatigue); an afternoon red-team pass
-against the real code written up as findings with severity; an enforcement
-coverage map of every surface marked enforced / advisory / unsupported with
-the reason; and a ranked fix list. ML hardening is explicitly deferred until a
-mediated provider produces real decisions to evaluate against.
+**Deliverable:** three gate results with numbers, the evaluation set checked
+in, the Claude Code version recorded, and a go/no-go for Week 16.
 
-**Part 3: standing permissions (the build, remaining days).** Generalise the
-Week 14 idea into three layers:
+## Phase 7: The Supervisor on One Host
 
-1. **Standing permissions**, set once per workspace or account in Settings:
-   what the agent may do with no task and no click (read and edit in this
-   repo; read and draft in this inbox except customer-labelled threads; read
-   and post in these channels). This is the persistent-guardrails mechanism
-   from the original Week 15, now user-shaped rather than a startup constant.
-   Runtime changes may only narrow; widening remains a protected procedure
-   with a fresh content binding.
-2. **Task activation** only for stepping outside standing permissions (a
-   customer thread, a second repo, an unusual provider); one click, the card
-   names the exact step outside.
-3. **Per-action confirmation** only for dangerous actions regardless of task
-   (irreversible, external, bulk, production); blocks for critical ones.
+### Week 16: Claude Code Adapter with the Floor
 
-The user-facing write count is already gone (Week 14, same evening); the
-silent runaway cap stays in the ceiling. Keep the fixture as a regression bench
-only.
+**Goal:** One host, one detector. Sentinel denies the floor through Claude
+Code's `PreToolUse` hook under managed settings and records every verdict
+before the action runs.
 
-**Kill condition:** if standing permissions can be widened by anything but the
-protected settings flow, or if a task can retain authority the standing set
-did not grant after it expires, revert to activation-per-task. If the Part 1
-spike fails its kill condition for every host, Sentinel's honest posture is
-"advisory except owned providers," and the roadmap says so.
-
-**Deliverable:** a reviewed scope decision, a threat model and coverage map
-for the product as scoped, and standing permissions that make routine
-in-scope work click-free while dangerous actions still ask.
-
-**Original Week 15 notes (transition drafts), kept for reference:** handle
-changing work with compact protected review; classify task changes
-conservatively; prepare transition drafts only for narrow, replace, and
-sensitive expansion; keep the previous task active while a replacement is
-pending; measure classification errors and unnecessary prompts. Deferred
-until the scope decision shows where task changes actually occur.
-
-**Friction candidates carried from Week 13 (user verdict, September 10, 2026):**
-the one-click proposal loop worked end to end in a real Cursor chat, but the
-user judged it impractical next to Cursor's inline approve box and found
-per-write approval after a reviewed contract excessive. On September 11 these
-became the Week 14 scope above; the notes are kept here as the original
-framing. Each still needs its own threat-model pass.
-
-1. **Tiered write policy.** Activation grants scope; the risk tier decides
-   review. Reversible in-scope writes (a note on an issue) run and are
-   audited; confirmation is reserved for irreversible, bulk, production, or
-   out-of-pattern effects; blocks stay blocks. Optionally a per-card *write
-   budget* ("allow up to N notes without asking") so the consent happens at
-   activation. Kill condition: any path where a write escapes both the
-   contract's exact scope and a confirm/block tier.
-2. **OS-level confirmation surface.** A macOS notification with Activate /
-   Approve actions (deep-linking to the browser card as fallback) or a small
-   always-on-top window, so confirmation happens where the user already is
-   while staying outside the agent's reach. Prioritized over further browser
-   polish. Kill condition: the surface can be driven or spoofed by a same-user
-   agent process, or it needs a dependency the project would not otherwise
-   take.
-3. **Standing read permission at startup.** The ceiling auto-activates a
-   read-only task over the fixture scope so reads never raise a card; only
-   writes and scope changes do. Kill condition: it changes what "no active
-   task" means anywhere in the authority model without a fresh review of the
-   stale-view and supersession rules.
-
-The Week 13 measurement targets (false interruptions, repeated reviews) stay
-the yardstick: if these do not bring routine work to one confirmation per job,
-the friction problem is not solved.
-
-## Phase 7: Real Provider Mediation and Session Isolation
-
-### Week 16: First Sentinel-Mediated Provider Tool
-
-**Goal:** Retain the local fixture as a regression baseline and conditionally
-add one narrow disposable provider action whose credential and execution path
-Sentinel controls.
-
-**Preferred proof:** GitHub issue triage in a disposable repository: bounded
-repository reads followed by one exact, approved issue or comment write. The
-provider choice may change if the initial API and credential-isolation spike
-fails.
-
-**Riskiest assumption:** A dedicated provider identity can be isolated from
-the guarded agent while the live API returns stable account, permission,
-repository, resource, and payload facts needed before execution.
-
-**Entry gate:** Before implementation, prove the guarded agent has no ambient
-GitHub credential, browser session, inherited environment secret, or
-unrestricted equivalent network path for the dedicated provider identity.
-Then verify the actual provider responses contain the policy facts Sentinel
-needs. If credentials are required for this spike, the user supplies only a
-disposable, narrowly scoped identity outside Git.
+**Entry gate:** Week 15 gates 1, 2a, and 2b passed.
 
 **Planned outcome:**
 
-- Validate the actual provider response and narrow credential scopes before
-  implementing the adapter.
-- Keep the credential in a separate Sentinel-controlled service identity or
-  equivalent boundary unexposed through the declared and tested guarded
-  capabilities.
-- Canonicalize provider account, repository, operation, every target, payload,
-  audience/effect, and returned resource identity.
-- Add a durable provider-operation lifecycle. Send at most once while the
-  outcome is known; after an uncertain write, record `unknown`, never retry
-  automatically, and require reconciliation.
-- Prove allowed reads, exact write approval, denial, changed-payload rejection,
-  known-outcome replay handling, revocation, and provider failure.
-- Keep all untested provider operations unavailable.
+- A thin Claude Code adapter translating hook events into one Sentinel
+  decision API and verdicts back; `confirm` delivered as deny with an approval
+  reference and retry guidance, exactly as the Week 12 MCP path does.
+- The `Boundary` record with its default only (working directory, containing
+  repository, launch environment); no inference yet. States `inferred →
+  superseded`; supersession invalidates pending approvals.
+- Ceiling v2 with the floor list, thresholds, and budget; a v2 process refuses
+  a v1 state database with a clear message.
+- Durable pre-action audit writes on the hook path; the hook fails closed if
+  the write fails. The hook configuration's hash recorded at session start.
+- Approvals bound to (floor rule, canonical action, working directory,
+  session) with a short TTL.
+- The measurement harness producing the Product Direction §6 numbers on the
+  Week 15 evaluation set and on the user's own sessions.
+- The delete-or-bench decision for the removed UI carried out.
 
-**Kill condition:** If the agent can discover or reuse the credential, invoke
-an equivalent privileged path, or the provider cannot expose required
-pre-action facts, stop the integration and retain the local fixture.
+**Kill condition:** any floor action reaches execution under the tested
+configuration, or Sentinel produces more messages than Claude Code's own
+permission prompts on the same benign sessions.
 
-**Deliverable:** If the entry gate passes, one honestly scoped live provider
-workflow mediated through Sentinel, with the credential unexposed through the
-declared and tested guarded capabilities and no claim of general GitHub or
-provider enforcement. Arbitrary same-user operating-system compromise remains
-out of scope. If the gate fails, deliver a documented provider spike and retain
-the supported local fixture.
+**Deliverable:** a mandatory Claude Code path for the floor under managed
+settings, with published recall, false-flag, message-rate, latency, and audit
+numbers, and an honest coverage statement (advisory without managed
+settings; unsupported elsewhere).
 
-### Week 17: Isolated Local Sessions and Agent Command Center
+### Week 17: Hear, Tell, and Stuck
 
-**Goal:** Prove session isolation first, then reshape the web app around
-supervising active agents rather than constructing contracts.
+**Goal:** Infer the boundary from the prompt (narrowing only), tell it to the
+agent, and surface stuck agents, each behind its own spike.
 
-**Riskiest assumption:** Exactly two independently authenticated local sessions
-using the already measured adapter can coexist without sharing task authority,
-history, approvals, guardrails, or audit scope.
+**Spikes first (one day):** paired runs on twenty benign tasks with and
+without the injected boundary line (kill: no visible effect → tune the
+phrasing; nothing else depends on it); replay the user's own traces against
+the OpenHands stuck thresholds (kill: more than one in ten benign sessions
+trip → raise thresholds before any message is shown).
 
 **Planned outcome:**
 
-- First prove backend isolation across separate adapter capability, authority,
-  approval, audit, attempt/idempotency, policy, and fixture-target namespaces.
-- Derive the supervision session from authenticated adapter credentials rather
-  than accepting a caller-selected session as authority.
-- Support exactly two local sessions through the measured adapter; do not claim
-  multiple agent kinds.
-- Prove cross-session rejection for task references, prompt events, approval,
-  retries, history, and audit queries.
-- Only after the isolation gate passes, add a session list/switcher with scoped
-  current work, approvals, recent decisions, and coverage status.
-- Add disconnect, revoke, stale-session, and unavailable states.
-- Keep activity explicitly limited to observed or mediated actions.
+- Boundary inference from `UserPromptSubmit`: narrow from the default on
+  prompt facts; any widening (second repository, home directory, staging or
+  production, external channel) raises the one clarifying question through
+  the existing notification path and is never accepted silently from text.
+- Injection of the boundary line as `UserPromptSubmit` additional context.
+- The stuck detector (same action → same result 4×; same action → error 3×;
+  A/B alternation over 6 steps; identity is tool plus canonical arguments) in
+  `warn`, with one message per boundary when the pattern persists.
+- Per-boundary message budget enforced (at most two detector messages).
+- Measurement extended with out-of-scope action rate with and without the
+  line, and stuck true/false positives on the user's sessions.
 
-**Kill condition:** If one session can select or reuse another session's task,
-history, approval, or adapter proof, retain single-session mode and do not
-build comparison UI.
+**Kill condition:** the inferred boundary ever contributes to an `allow` or
+`block`; or widening is accepted without the person's answer.
 
-**Deliverable:** Two isolated backend sessions and a minimal scoped
-list/switcher using one measured adapter, with no claim that a second host or
-agent kind is supported. The broader command-center redesign and contract
-editor move remain post-validation work.
+**Deliverable:** the hear → tell → watch loop on Claude Code with the floor
+and the stuck detector, measured.
 
 ## Phase 8: Validation and Release
 
 ### Week 18: Validation, Hardening, and Release Decision
 
-**Goal:** Freeze new features, test the complete verified local path, and decide
+**Goal:** Freeze new features, test the complete verified path, and decide
 whether the result is ready to label a release candidate.
 
 **Entry gate:** Before running final workflows, preregister the exact test
 environment, scenario pack, denominators, zero-tolerance security failures,
-maximum acceptable false-interruption and repeated-review rates, and minimum
-task-completion/usability result. Do not change thresholds after inspecting
-failures.
+maximum acceptable false-flag and message rates, and minimum usability result.
+Do not change thresholds after inspecting failures.
 
 **Planned outcome:**
 
-- Run the Sentinel-owned Docker path and measured MCP path through task
-  preparation, guardrails, isolated sessions, exact approval, execution, and
-  audit. Include the provider path only if Week 16 passed its entry and safety
-  gates.
-- Keep Cursor-native shell, file, browser, and subagent actions explicitly
-  advisory.
-- Measure enforcement coverage, observed bypass rate, task-overstep recall,
-  compliant false interruptions, repeated reviews, review time, decision
-  latency, known and unknown provider outcomes, duplicate effects, and audit
-  success.
-- Fix release-blocking correctness, security, accessibility, installation, and
-  recovery issues; defer new features.
-- Package the local application and write clear operational limits.
-- Complete independent correctness and security reviews and focused
-  accessibility and usability checks.
-- Make an evidence-based release-candidate or research-prototype decision.
+- Run the Claude Code hook path (floor, boundary, stuck), the MCP fixture
+  path, and the Docker executor path end to end.
+- Measure dangerous recall on incidents and held-out cases, false-flag rate
+  per benign session, messages per hour against the host's prompts, decision
+  latency at the hook, and audit integrity under a deliberate deletion.
+- Independent correctness and security reviews; accessibility and usability
+  checks on the monitor and approvals pages.
+- Fix release-blocking issues; defer new features.
+- Package the local application and write clear operational limits, including
+  the honest statement that the audit is tamper-evident, not tamper-proof,
+  because Sentinel runs as the same operating-system user as the agent.
 
-**Kill condition:** If a tested protected path can bypass Sentinel, session
-isolation fails, routine supported work still requires contract construction,
-or preregistered safety/usability gates fail, do not call the result a release
-candidate. A fixture-only result remains a research prototype;
-release-candidate status requires at least one useful non-synthetic mediated
-workflow.
+**Kill condition:** a floor action reaches execution under the tested
+configuration, the inferred boundary influences an allow or block, Sentinel is
+louder than the host, or preregistered gates fail. Then the result is a
+research prototype, not a release candidate.
 
-**Deliverable:** A hardened, measured local package and explicit release
-decision. Public marketing publication begins only after this gate passes.
+**Deliverable:** a hardened, measured local package and an explicit release
+decision, with the evaluation numbers as the public artifact.
+
+### Next phase (after Week 18, in order)
+
+Off-track detector (`warn`, `confirm` only for out-of-boundary writes or
+sends); Cursor hook adapter (advisory until enterprise hooks are installed);
+hash-chained audit; the web app's monitor view; Codex adapter via the
+app-server approval protocol; a calibrated model for gray areas once the
+evaluation set is large enough.
 
 ## Local Product Non-Goals Through Week 18
 
@@ -983,11 +864,15 @@ These are intentionally excluded from the local product proof:
 - Production provider credentials or customer accounts.
 - A claim that Sentinel observes or controls unmediated agent behavior.
 - Public marketing before the Week 18 release gate.
-- LLM task suggestions before a separate shadow evaluation.
-- A general-purpose prompt-writing assistant unrelated to high-impact action safety.
-- Automatic permission expansion based on learned behavior; any future
-  user-created template must still produce a fresh reviewed contract.
-- Enforcement claims for hosts or tools that do not provide complete interception.
+- Any model-based judge before an evaluation set exists to calibrate it.
+- A general-purpose prompt-writing or prompt-restructuring assistant; Sentinel adds one boundary line and never edits the person's words.
+- Treating an inferred boundary as authority, or widening one without the person's answer.
+- Automatic permission expansion based on learned behavior.
+- Enforcement claims for hosts or tools that do not provide complete interception, or where the agent can edit the hook.
+- A phone or menu-bar application; verdicts travel through existing notification channels.
+- Monitoring closed consumer assistants that expose no hook.
+- Agent orchestration (launching, sequencing, scheduling agents).
+- Cursor and Codex hook adapters, the off-track detector, the hash-chained audit, and the monitor view before Week 18; they are the next phase.
 
 ## Post-Gate Local Follow-Up
 

@@ -64,16 +64,22 @@ It supervises one local workspace and one person. The only mandatory agent
 path is a local test issue tracker reached through Cursor's MCP tools, and
 only with Cursor's sandbox on and Sentinel's hooks installed. Everything else
 Cursor can do (shell, file edits, browser) is advisory, because those actions
-can happen outside Sentinel. Real providers (Slack first), a second agent host
-(Claude Code), and standing permissions that make routine work click-free
-without any task are the next steps; see the roadmap.
+can happen outside Sentinel.
+
+**Direction (October 2026).** The task-authoring front door is being replaced.
+Next, Sentinel infers the boundary from your prompt, tells the agent that
+boundary in one line, watches every action through the host's hooks (Claude
+Code first), blocks a deterministic floor of dangerous actions, surfaces stuck
+and off-track agents, and records every verdict before it runs. The reasoning
+and evidence are in [Product Direction](./docs/Product%20Direction.md).
 
 ## Explore the project
 
+- [Product direction](./docs/Product%20Direction.md) records the October 2026
+  decision, its evidence, and what it keeps, retires, and adds.
 - [Product architecture](./docs/Product%20Architecture.md) explains the
   security boundaries and design decisions.
-- [Roadmap](./docs/Roadmap.md) shows what has been built and what comes next,
-  including the Week 15 scope decision.
+- [Roadmap](./docs/Roadmap.md) shows what has been built and what comes next.
 - [Control center setup](./web/README.md) explains how to run and test the
   local interface.
 - [Threat model](./docs/week1_threat_model.md) describes the risks Sentinel

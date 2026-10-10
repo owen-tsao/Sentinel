@@ -1,5 +1,12 @@
 # Week 15 Scope Decision (draft for your review)
 
+> **Superseded on October 9, 2026.** The user judged the contract-authored
+> scope model too much friction for work whose boundary shifts constantly.
+> The replacement, an inferred boundary with a deterministic floor, is in
+> [Product Direction](./Product%20Direction.md). Q4 (exposure vs damage, which
+> facts make an action dangerous) is carried over as floor-rule analysis; Q1-Q3
+> (owned integrations, Slack first, host parity) are dropped as builds.
+
 Status: **draft, September 11, 2026, evening; revised the same evening after
 an adversarial review.** This is the written decision the Roadmap's Week 15
 Part 1 asks for. Nothing in it is built. You review it, change what you

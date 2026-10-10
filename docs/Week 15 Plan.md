@@ -1,5 +1,11 @@
 # Week 15 Plan: Scope Decision, Threat Model v2, and Standing Permissions
 
+> **Superseded on October 9, 2026.** This plan was never approved or started.
+> The direction changed to a hook-based supervisor with an inferred boundary;
+> see [Product Direction](./Product%20Direction.md) and the Week 15-18
+> entries in the [Roadmap](./Roadmap.md). Kept for the record: the analysis of
+> what makes an action dangerous feeds the new floor rules.
+
 Status: **proposed on September 11, 2026 (evening); revised the same evening
 after an adversarial review.** Starts from
 [Week 14 Handover](./Week%2014%20Handover.md) and the

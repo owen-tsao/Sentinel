@@ -1,9 +1,9 @@
 # Cursor Rules for Project Sentinel
 
 ## Project Intent
-- Sentinel is a local-first task-authorization and enforcement backend for AI-agent actions; its local UI supports clarification and approval rather than acting as a standalone website.
-- Follow `docs/Product Architecture.md` for architecture decisions and `docs/Roadmap.md` for implementation order.
-- Optimize for a strong summer portfolio project: measurable behavior, clear explanations, and focused scope.
+- Sentinel is a local-first supervisor for AI coding agents: it infers a task boundary from the user's prompt, tells the agent that boundary, watches every action through the host's hooks, and speaks only when an action is unsafe, the agent is stuck, or it has gone off-track. Its local web app is a monitor and flight recorder, not a form before work.
+- Follow `docs/Product Direction.md` for the current direction, `docs/Product Architecture.md` for architecture invariants and verified implementation, and `docs/Roadmap.md` for implementation order. Where Architecture and Direction conflict, Direction wins and Architecture should be updated.
+- Optimize for a strong portfolio project: measurable behavior, clear explanations, and focused scope.
 
 ## Working Style
 - When generating complex code, explain the underlying logic in chat so the user can learn and catch mistakes.
@@ -31,13 +31,16 @@
 
 ## Core Product Rules
 - Always distinguish malicious behavior from destructive but authorized behavior.
-- Target decisions must use the server-resolved active contract, server-owned recent history, canonical action with every affected target/effect, environment, and adapter enforcement coverage. Caller-provided context or history is not authority.
+- Block and allow decisions use only server-owned facts: the deterministic floor, server-owned recent history, the canonical action with every affected target/effect, the working directory and environment the process was launched in, and adapter enforcement coverage. Caller-provided context or history is not authority.
+- A boundary inferred from a host-delivered prompt is an advisory signal with no authenticated provenance. It may raise `warn` or `confirm`, never `allow` or `block`. Inference may only narrow the default boundary (working directory, containing repository, launch environment); any widening requires the person to answer a clarifying question.
 - Use risk tiers: `allow`, `warn`, `confirm_required`, and `block`.
 - High-risk but possibly legitimate actions should require confirmation instead of being blindly allowed or permanently blocked.
-- Critical actions such as root deletion, credential theft, exfiltration, broad production deletion, or defense evasion should block.
+- Critical actions such as destructive operations whose target escapes the working directory (or hits home, root, or system paths), credential theft, exfiltration, broad production deletion, defense evasion, or writes to hook and Sentinel configuration files should block.
 - Block/confirm responses should include clear reasons and agent-facing guidance so well-behaved agents can recover instead of retrying the same mistake.
-- Deterministic rules and environment policy should short-circuit obvious allow/block decisions before model inference; invoke ONNX only for gray-area requests.
-- Saved templates and learned preferences may suggest safer task defaults, but they never grant authority or weaken deterministic policy.
+- Deterministic rules and environment policy decide first; detectors run only when the floor did not decide. Any model is reserved for gray-area requests after an evaluation set exists, may escalate but never downgrade a floor decision, and never sends prompt content off the machine.
+- Every interruption spends the person's attention. Detectors have a per-boundary message budget; the floor does not. If Sentinel is louder than the host's own prompts, it has failed.
+- Saved templates, learned preferences, and inferred boundaries may suggest safer defaults, but they never grant authority or weaken deterministic policy.
+- Enforcement claims are per host and per surface: mandatory only where the hook can deny and the configuration is locked against the agent; advisory where it can only observe or the agent can edit the hook; unsupported where there is no hook.
 
 ## Python/API Standards
 - Use Python 3.11+, type hints, and Pydantic models for API schemas.
