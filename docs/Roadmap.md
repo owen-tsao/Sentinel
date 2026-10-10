@@ -737,6 +737,15 @@ migration message.
 **Deliverable:** three gate results with numbers, the evaluation set checked
 in, the Claude Code version recorded, and a go/no-go for Week 16.
 
+**Outcome (October 10, 2026): go.** Gate 1 passed on Claude Code 2.1.296;
+Gate 2a measured 0.5% unparseable on 18,551 real commands; Gate 2b caught
+14/14 incidents and 26/26 held-out cases with 0/120 benign twins flagged.
+Decisions: the Week 14 UI is kept as a `/bench` route (deleted at Week 18 if
+unused); ceiling v2 adds `version`, `floor_rules`, four environments,
+detector thresholds, the message budget, and a parser-gap policy, with no
+automatic v1 migration. Details, the adversarial-review findings, and the
+honest limits are in [Week 15 Handover](./Week%2015%20Handover.md).
+
 ## Phase 7: The Supervisor on One Host
 
 ### Week 16: Claude Code Adapter with the Floor
