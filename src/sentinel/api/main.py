@@ -123,6 +123,10 @@ from sentinel.integrations import AdapterSessionError, AdapterSessionRegistry
 from sentinel.integrations.hooks import inspect_hooks_profile
 from sentinel.mcp import SQLiteIssueFixture
 from sentinel.mcp.gateway import McpMediator
+from sentinel.hosts.claude_code.routes import MAX_HOOK_BODY_BYTES, PREFIX as CLAUDE_CODE_HOOK_PREFIX, build_claude_code_router
+from sentinel.hosts.claude_code.service import ClaudeCodeHookService
+from sentinel.hosts.cursor.routes import PREFIX as CURSOR_HOOK_PREFIX, build_cursor_router
+from sentinel.hosts.cursor.service import CursorHookService
 from sentinel.proposals import (
     InMemoryTaskProposalStore,
     ProposalStateError,
@@ -303,6 +307,9 @@ def create_app(
     supervision_policy_store: SupervisionPolicyStore | None = None,
     mcp_fixture: SQLiteIssueFixture | None = None,
     adapter_registry: AdapterSessionRegistry | None = None,
+    claude_code_service: ClaudeCodeHookService | None = None,
+    cursor_service: CursorHookService | None = None,
+    hook_api_host: str | None = None,
 ) -> FastAPI:
     """Build an app with injectable stores and fail-closed empty defaults."""
 
@@ -637,6 +644,16 @@ def create_app(
             )
         )
 
+    app.state.claude_code_service = claude_code_service
+    app.state.cursor_service = cursor_service
+    resolved_hook_host = hook_api_host or (control_config.api_host if control_config is not None else "127.0.0.1:8000")
+    if claude_code_service is not None:
+        # Hook routes need no pairing: the host calls them from the loopback
+        # with no cookie, and the route itself rejects any other caller.
+        app.include_router(build_claude_code_router(service=claude_code_service, api_host=resolved_hook_host))
+    if cursor_service is not None:
+        app.include_router(build_cursor_router(service=cursor_service, api_host=resolved_hook_host))
+
     if app.state.risk_model is None and load_model:
         try:
             app.state.risk_model = OnnxRiskModel()
@@ -650,13 +667,21 @@ def create_app(
 
     @app.middleware("http")
     async def reject_oversized_bodies(request: Request, call_next: Any) -> Any:
+        # Hook payloads carry whole file contents for Write; the hook routes
+        # never read that content but must not 413 on it (a non-2xx blocks the
+        # tool call under onFailure=block, which would stop large writes).
+        limit = (
+            MAX_HOOK_BODY_BYTES
+            if request.url.path.startswith((CLAUDE_CODE_HOOK_PREFIX, CURSOR_HOOK_PREFIX))
+            else MAX_REQUEST_BODY_BYTES
+        )
         raw_length = request.headers.get("content-length")
         if raw_length:
             try:
-                if int(raw_length) > MAX_REQUEST_BODY_BYTES:
+                if int(raw_length) > limit:
                     return JSONResponse(
                         status_code=413,
-                        content={"detail": "Request body exceeds 65536 bytes."},
+                        content={"detail": f"Request body exceeds {limit} bytes."},
                     )
             except ValueError:
                 return JSONResponse(
@@ -672,7 +697,7 @@ def create_app(
             message = await original_receive()
             if message.get("type") == "http.request":
                 received += len(message.get("body", b""))
-                if received > MAX_REQUEST_BODY_BYTES:
+                if received > limit:
                     too_large = True
                     return {
                         "type": "http.request",
@@ -686,7 +711,7 @@ def create_app(
         if too_large:
             return JSONResponse(
                 status_code=413,
-                content={"detail": "Request body exceeds 65536 bytes."},
+                content={"detail": f"Request body exceeds {limit} bytes."},
             )
         return response
 

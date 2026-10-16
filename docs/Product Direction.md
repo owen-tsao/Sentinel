@@ -75,7 +75,11 @@ Four verbs, in order, every time the person sends a prompt:
    hears from Sentinel only for the verdicts below, delivered as a desktop
    notification or in the web app, and can approve or deny from there. A
    hook waits a bounded time for an answer (five seconds under the shipped
-   Cursor configuration, up to sixty on Claude Code), so a `confirm` is
+   Cursor configuration, up to sixty on Claude Code). Where the host can
+   render a hook-supplied question, a `confirm` is delivered as the host's
+   own permission prompt carrying Sentinel's reason (Claude Code's
+   `permissionDecision: "ask"`, Week 16); the person answers in the host and
+   Sentinel never holds the approval. Where it cannot, a `confirm` is
    delivered as a deny with an approval reference and retry guidance, exactly
    as the Week 12 MCP path does today; the agent retries unchanged once the
    person has answered. Phone delivery is notification-only until a paired
@@ -94,6 +98,19 @@ MCP path keeps it as a regression bench.
 action, the verdict, and the reason. Not the prompt text, which keeps the
 Week 11 invariant that unnecessary prompt content is never persisted. Opt-in
 text retention for debugging, with a stated TTL, is a later decision.
+
+> **Amendment (Week 17, October 12).** In Week 17 the clarifying question is
+> delivered as agent context, not as a direct message to the person: the
+> prompt is never held back, the agent is told the named location is outside
+> the boundary and to ask before touching it, and the person hears the
+> question only if the agent asks. A person's in-chat answer does not widen
+> the boundary; Sentinel has no authenticated channel for it yet, and the
+> agent acting on such an answer is governed by the floor alone. Rows are
+> tagged `caution` so the gap is measurable. Direct delivery and an
+> authenticated widening answer arrive with the monitor. Reason: the first
+> design blocked the prompt and accepted `include <path>` from the next
+> prompt, which review showed was forgeable from Bash and dead in `-p` mode
+> (`docs/Week 17 Plan.md` §10).
 
 ### 3.1 Authority: a mandatory floor and an observed middle
 
@@ -131,6 +148,45 @@ Decision order per action, fixed: **floor block → floor confirm → stuck
 (warn) → off-track (warn or confirm) → allow.** The floor runs on hook facts
 alone; the detectors run only after the floor did not decide.
 
+> **Amendment (Week 18, October 14): four floor rules the corpus showed are
+> denying ordinary work.** The gates tested the dangerous cases and passed.
+> The person's corpus (62,320 tool calls) and the published evidence show
+> that on Cursor, where a file-tool `confirm` is delivered as a deny, the
+> benign-but-outside cases dominate and some rules deny them wholesale.
+> Reproduced in-process against the real payload shapes:
+>
+> 1. **`.cursor/` is split.** `~/.cursor/hooks.json`, `~/.cursor/hooks/`,
+>    `~/.cursor/mcp.json`, and `~/.cursor/rules/` stay `block`
+>    (`F1.write_protected_config` / `F1.write_home`): they are the agent's own
+>    guardrails. `~/.cursor/plans/`, `~/.cursor/projects/`, and
+>    `~/.cursor/canvases/` are Cursor's artefact stores for the agent's own
+>    output (156 plan writes in the corpus; a canvas write was blocked live on
+>    October 14) and are zone `home`, not a carve-out, so they `allow`.
+>    Same treatment for `.claude/` once its artefact folders are enumerated.
+> 2. **Credential taint decays and is only set by reads that happened.** A
+>    *blocked* credential read (`F3.credential_read` → deny) leaks nothing and
+>    sets no history fact. An *allowed* read of a credential path sets the
+>    fact for 30 minutes, not the session. Reason: one blocked gate test muted
+>    `WebSearch`/`WebFetch` for seven hours in a working chat, and the rule's
+>    own text ("ask the user") had no channel through which the answer could
+>    arrive. `F4.web_egress_after_credential_read` otherwise unchanged.
+> 3. **`ApplyPatch` is parsed, not opaque.** Its input is a raw patch string
+>    with `*** Update File:` / `*** Add File:` / `*** Delete File:` headers;
+>    each path is judged exactly as `Write` / `Delete` would be. Until it is
+>    parsed it is `confirm_required F5.opaque_write`, which on Cursor denies
+>    every edit for a model that patches (1,759 calls, 11 chats, 676 in one).
+>    A patch whose headers cannot be parsed stays `F5.opaque_write`.
+> 4. **The undeclared sibling-repository write stays a `confirm`.** The corpus
+>    showed many writes under home outside the workspace, and a `warn` zone for
+>    sibling repositories was proposed. Published evidence says deliberate
+>    multi-repository work launches from a parent folder (covered by the
+>    default) and that the vendor's own tiering sends out-of-project writes to
+>    review. Decision: no rule change until the corpus split (sibling repo vs
+>    `~/.cursor` vs scratch) is measured; the confirm is made tolerable by the
+>    asynchronous approval below rather than removed. Kill condition for the
+>    `warn` proposal: if most sibling writes come from chats launched in a
+>    parent folder, it is dropped.
+
 **Inference may only narrow.** The default boundary is the working
 directory, the repository that contains it, and the environment the process
 was launched in. A prompt may narrow that (one subdirectory) silently. Any
@@ -139,6 +195,36 @@ environment, an external channel) requires the one clarifying question in
 "Hear", answered by the person, never silently accepted from prompt text.
 This is what stops pasted issue text or file contents from steering the
 boundary.
+
+> **Amendment (Week 18, October 14): the boundary is the launch directory;
+> a named folder is a focus hint, not a narrower boundary.** The authority
+> rule above stands unchanged: nothing a prompt says can move the boundary
+> past the launch directory, its repository, or its environment. What changes
+> is silent narrowing. Week 17 made a prompt that named a subdirectory narrow
+> the boundary to it for the rest of the session, and widening back needed a
+> question that was never built. Two live gates and the person's own corpus
+> (`spikes/week18/prompt_corpus/`, 144 chats, 5,782 prompts) showed this is
+> wrong in practice, not just unbuilt: a Cursor chat is a workstream (median
+> 8.5 prompts over 21 hours, p90 105 prompts), 79% of prompts name no path,
+> and of the 1,052 later prompts that did name one after a narrowing, 1,052
+> pointed outside the narrowed folder. 98% of the agent's writes in those chats
+> landed outside the first-named folder. A sticky narrowed boundary predicts
+> the next prompt 2% of the time and tells the agent to ask before touching
+> the file it was just asked to edit.
+>
+> New rule: the boundary **is** the launch directory (plus repository and
+> environment) for the life of the session, and it is what the off-track
+> detector and the record use. A folder named in a prompt is attached to the
+> context line as a **focus hint** for that prompt only ("this prompt points
+> at `src/sentinel/boundary`") and is recorded on the `boundary` row; it
+> resets nothing and persists to no later prompt. Cautions for paths outside
+> the launch directory are unchanged. The "widening question" is therefore
+> moot inside the launch directory and remains required past it. Published
+> evidence (`spikes/week18/prompt_corpus/OUTSIDE_EVIDENCE.md` §3) agrees that
+> one agent, one directory, one task is the modal pattern and that deliberate
+> multi-repository work launches from a parent folder, which the default
+> already covers. The corpus is a power-user sample; the mechanism cost of
+> this change is near zero either way, since it removes code.
 
 ### 3.2 The detectors
 
@@ -152,10 +238,17 @@ Cost-based stuck signals (spend with no progress) need data the hooks do not
 deliver and are out of scope for Weeks 15-18.
 
 False positives compound across a session: at 2% per action, a 50-action
-session has a 64% chance of at least one flag. The message budget is per
-boundary: at most two messages from the detectors (stuck and off-track
-together) per boundary; after that, detectors tag the record and stay
-silent. The floor has no budget; it speaks every time.
+session has a 64% chance of at least one flag. The message budget is a rate
+per boundary: at most two person-facing advisory messages (cautions and
+detector messages together) in any rolling 30-minute window under one
+boundary; once two have been sent, detectors tag the record and stay silent
+until the window moves on. The floor has no budget; it speaks every time.
+(Amended Week 18: the budget was "two per boundary, refilled only when the
+boundary narrows". On Cursor the boundary is the workspace root for the whole
+conversation, so a six-hour session went permanently silent after two
+cautions and withheld a real stuck popup at gate C-H5. Attention is a rate,
+not a lifetime count; the window is a guess and moves if C-H6 ever shows a
+second popup on a benign 20-minute task.)
 
 ### 3.3 Hosts and the "buddy deployed with the agent"
 
@@ -174,8 +267,18 @@ verdict back. First version, in order:
    existing mandatory MCP fixture path, and the existing sandbox. Project
    hooks live in `.cursor/hooks.json`, which the agent can edit, so Cursor's
    hook path is **advisory** unless enterprise or MDM hooks are installed;
-   only the MCP fixture path is mandatory today. Not built in Weeks 15-18
-   beyond keeping the fixture path green.
+   only the MCP fixture path is mandatory today. Built in Week 18 as a
+   translation layer over the Claude Code service (`docs/Week 18 Plan.md`),
+   after Spike C1 verified that `additional_context` reaches the agent on
+   prompt submit and tool events. Host amendments: Cursor shows no
+   person-facing text on an allowed action, so the one budgeted stuck
+   message is delivered as Cursor's own `ask` popup (`confirm` tier, which a
+   detector may raise), never as a downgrade of a floor verdict; and Cursor
+   enforces `ask` only on `beforeShellExecution` and `beforeMCPExecution`,
+   not `preToolUse` (Spike C2, October 13), so confirms for shell and MCP are
+   delivered there and confirms for file tools (`Write`, `StrReplace`,
+   `Delete`, `ApplyPatch`) are delivered as a deny that tells the agent to
+   ask the person in chat. A confirm the person never sees is an allow.
 3. **Codex**: parity hooks and the strongest lock (`requirements.toml`);
    its app-server protocol would let Sentinel act as the approval client in
    headless runs. Not in Weeks 15-18; listed so the adapter shape is designed
@@ -212,6 +315,44 @@ In three of the 2026 incidents the agent deleted its own transcript and no
 cause could be established; a detectable gap in Sentinel's chain is still
 evidence.
 
+> **Amendment (Week 18, October 14): the product is floor + asynchronous
+> approval + after-action report. The web app is not a live monitor.** Both
+> the person's corpus and the published measurements say the person is not
+> watching: median Cursor chat 21 hours of wall time for 8.5 prompts; 93% of
+> Claude Code permission prompts approved; auto-approve rising to over 40% of
+> sessions with tenure; the vendor's own conclusion that approving every
+> action "will create friction without necessarily producing safety
+> benefits". A dashboard assumes an audience. What unattended use needs is:
+>
+> - **A floor that holds with nobody there.** Built and gated. Blocks offer no
+>   Allow button: a block with a click is an ask with extra steps, and three
+>   documented incidents (Replit, Gemini CLI, the DataTalks Terraform destroy)
+>   are the person clicking approve on the fatal step.
+> - **Confirm becomes asynchronous.** A `confirm` the host cannot show, or
+>   that nobody is present to answer, is delivered as a deny **that creates a
+>   one-use pending approval** bound to the exact action, rule, working
+>   directory, and session, and the deny text carries its review link. The
+>   agent is told to finish what does not depend on it and hand off clearly.
+>   The person approves from the link (laptop, or phone through the paired
+>   tab), re-prompts, and the floor sees the matching approval. Sentinel does
+>   not resume the agent; whether a host SDK can is a later spike. On Cursor
+>   file tools this is the *only* form a confirm can take, so it is not
+>   optional there.
+> - **Everything denied is visible in three places from one record:** the
+>   deny text in the chat (immediate, with the link), the approvals page
+>   (actionable), and an **after-action summary** when the person returns
+>   ("while you were away: 47 files written, 3 outside the repo, 1 blocked,
+>   1 stuck loop stopped"), pushed as a notification where one is paired.
+>   Same `DecisionRecord` behind all three.
+>
+> The live path tree considered on October 14 (every path touched, by zone,
+> with its verdict) survives as the *content* of the summary and the
+> approvals page, not as a page someone is expected to keep open. The
+> message budget keeps its bar, now with a number from the field: Cursor's own
+> cards plus a 5–9% human interrupt rate is what Sentinel must stay under.
+> Headless and cloud agents are the fastest-growing surface and the least
+> measured; they stay out of scope and are named as the largest gap.
+
 ## 4. What survives, what is removed, what is added
 
 | Layer | Fate |
@@ -227,7 +368,8 @@ evidence.
 | Week 15 standing permissions, Slack provider build, scope matrix as user input | **Dropped as builds**; the analysis of what makes an action dangerous becomes floor rules |
 | Claude Code hook adapter | **Added**, Weeks 15-16 |
 | Boundary inference and injection; stuck detector | **Added**, Week 17, each behind its own spike |
-| Off-track detector, Cursor hook adapter, hash-chained audit, web monitor view, Codex adapter | **Deferred past Week 18** unless Weeks 15-17 finish early; listed in the roadmap as the next phase |
+| Cursor hook adapter | **Added**, Week 18 (October 13), as a translation layer over the Claude Code service; `enforcement: advisory` because the user-level hooks file is agent-writable |
+| Off-track detector, hash-chained audit, web monitor view, Codex adapter | **Deferred past Week 19**; listed in the roadmap as the next phase |
 | Incident-derived evaluation set | **Added** in Week 15; the project's proof |
 
 ## 5. Assumptions, verified and not
@@ -238,9 +380,11 @@ evidence.
 | The floor's target-extraction can be computed for compound shell, globs, interpreters, and `cd` prefixes without failing closed on benign compound commands | Unverified; today's canonicalizer cannot | Week 15 gate 2a: run extraction over real `Bash` arguments captured from the user's own sessions (at least 200 commands); count uncanonicalizable commands | If more than 1 in 20 benign commands cannot be classified, the floor cannot ship on Bash and the direction is revisited before any adapter is built |
 | The floor rules catch the real 2026 incidents and held-out dangerous cases without flagging benign look-alikes | Unverified | Week 15 gate 2b: an evaluation set of the incidents, held-out dangerous commands from BashArena and Terminal-Bench the rules were not written against, and at least 100 benign twins (`rm -rf node_modules`, an intentional migration, `git clean -fdx` inside the repo) | Below 100% recall on the incidents, below 90% on held-out dangerous cases, or more than 1 in 20 benign twins flagged: the list is fixed before anything else is built |
 | Claude Code's transcript exposes the host's own permission prompts, so "Sentinel messages vs host prompts" is computable | Unverified | Checked inside gate 1 | If not, the comparison is dropped and only Sentinel's own message rate is reported |
-| One injected boundary line measurably reduces out-of-scope actions | Verified in the literature, unverified for Sentinel's phrasing | Week 17, before injection ships: paired runs on 20 benign tasks, with and without the line | If the effect is not visible, the line is tuned; nothing else depends on it |
-| OpenHands stuck thresholds transfer to Claude Code traces without flooding on legitimate retries | Unverified | Week 17, before the detector speaks: replay the user's own traces | If more than 1 in 10 benign sessions trip it, thresholds rise before any message is shown |
-| Off-track detection reaches roughly 85-90% recall at 2-5% per-action false flags | Plausible with caveats (published numbers) | Deferred past Week 18 with the detector | If below, the detector stays `warn`-only and the claim is "surfaces", never "prevents" |
+| One injected boundary line measurably reduces out-of-scope actions | Verified in the literature; for Sentinel's phrasing, live anecdotes only (Gate 1: 2 of 3; Week 17 H3: the agent honoured a negation and disclosed the line's hook origin) | Week 19 evaluation pack: paired runs on 20 benign tasks with the pre-registered pass line from `docs/Week 17 Plan.md` | If the effect is not visible, the line is tuned; nothing else depends on it |
+| OpenHands stuck thresholds transfer to Claude Code traces without flooding on legitimate retries | **Verified** (October 12): 3.7% of 164 real sessions trip the repeat signal under an upper bound that assumes identical results; live loop nudged at the 3rd failure and messaged once | Week 19 (carried from Week 17 H6): a twenty-minute benign task with zero advisory messages, now on Cursor | If more than 1 in 10 benign sessions trip it, thresholds rise before any message is shown |
+| Off-track detection reaches roughly 85-90% recall at 2-5% per-action false flags | Plausible with caveats (published numbers) | Deferred past Week 19 with the detector | If below, the detector stays `warn`-only and the claim is "surfaces", never "prevents" |
+| Cursor hooks can deny a tool call and inject `additional_context`; a stopped Sentinel fails closed on gating events | Deny and injection **verified** (Spike C1, October 13, Cursor 3.24.12); fail-closed **verified live** (gate C-H0b, October 13) | Week 18 live gates C-H0 to C-H6 | A stopped Sentinel letting a Cursor action through, or a verdict differing from the Claude Code path, kills the adapter |
+| Cursor can put Sentinel's confirm in front of the person | **Falsified for `preToolUse`, verified for `beforeShellExecution`/`beforeMCPExecution`** (gate C-H3 and Spike C2, October 13): a Delete under `ask` ran with no popup; the shell event's `ask` shows the popup in all three Run Modes | Rerun of C-H3 and C-H5 after the fix; Week 19 counts `ask_undelivered` rows | If the capable event fails to fire for a judged shell call in real work, shell confirms also become deny-with-guidance |
 | Cursor cloud agents execute repo-committed `.cursor/hooks.json`; Codex headless `ask` degrades to deny | Unverified | Ten-minute checks when those hosts are scheduled | Cloud and headless stay "observed, not enforced" |
 
 Per the project rules, no implementation starts on an item while its
@@ -327,11 +471,14 @@ load-bearing assumption) is obeyed:
 - **Week 17: hear and tell, and stuck.** Boundary inference (narrow-only),
   the clarifying question, injection through `UserPromptSubmit`, and the
   stuck detector in `warn`, each gated by the spikes in §5.
-- **Week 18: validation and release decision**, unchanged in shape, with the
+- **Week 18: Sentinel on Cursor.** The same floor, boundary line, and stuck
+  detector through Cursor's hooks, via a translation layer over the Claude
+  Code service; built October 13, live gates pending. Inserted because the
+  person who must live with Sentinel for a week lives in Cursor.
+- **Week 19: validation and release decision**, unchanged in shape, with the
   evaluation numbers as the artifact.
-- **Next phase (after Week 18):** off-track detector, Cursor hook adapter,
-  hash-chained audit, web monitor view, Codex adapter, in that order, as the
-  on-ramp to §10.
+- **Next phase (after Week 19):** off-track detector, hash-chained audit,
+  web monitor view, Codex adapter, in that order, as the on-ramp to §10.
 
 ## 10. The destination: the ambiguous layer (decided October 9, 2026)
 

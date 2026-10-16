@@ -6,9 +6,11 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, root_validator
 
-AuditVerdict = Literal["allow", "warn", "confirm_required", "block"]
+from sentinel.decisions.models import DecisionRecord, Verdict, Zone
+
+AuditVerdict = Verdict
 AuditEnvironment = Literal["sandbox", "dev", "staging", "production"]
 
 
@@ -44,6 +46,19 @@ class AuditEvent(StrictModel):
     verdict: Optional[AuditVerdict] = None
     reason_codes: list[str] = Field(default_factory=list)
     details: dict[str, Any] = Field(default_factory=dict)
+    decision: Optional[DecisionRecord] = None
+
+    @root_validator(skip_on_failure=True)
+    def _verdict_matches_decision(cls, values: dict[str, Any]) -> dict[str, Any]:
+        decision = values.get("decision")
+        if decision is None:
+            return values
+        recorded = decision.judgment.verdict
+        if values.get("verdict") is None:
+            values["verdict"] = recorded
+        elif values["verdict"] != recorded:
+            raise ValueError("AuditEvent.verdict must equal decision.judgment.verdict")
+        return values
 
 
 class AuditQuery(StrictModel):
@@ -56,6 +71,8 @@ class AuditQuery(StrictModel):
     session_id: Optional[str] = None
     task_id: Optional[str] = None
     contract_id: Optional[str] = None
+    rule_id: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    zone: Optional[Zone] = None
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
     limit: Optional[int] = Field(default=None, ge=1, le=10_000)

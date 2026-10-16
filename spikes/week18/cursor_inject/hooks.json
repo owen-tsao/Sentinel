@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {"command": "python3 .cursor/hooks/probe_hook.py", "timeout": 5}
+    ],
+    "beforeSubmitPrompt": [
+      {"command": "python3 .cursor/hooks/probe_hook.py", "timeout": 5}
+    ],
+    "preToolUse": [
+      {"command": "python3 .cursor/hooks/probe_hook.py", "timeout": 5}
+    ],
+    "postToolUse": [
+      {"command": "python3 .cursor/hooks/probe_hook.py", "timeout": 5}
+    ],
+    "postToolUseFailure": [
+      {"command": "python3 .cursor/hooks/probe_hook.py", "timeout": 5}
+    ],
+    "beforeShellExecution": [
+      {"command": "python3 .cursor/hooks/probe_hook.py", "timeout": 5}
+    ],
+    "afterShellExecution": [
+      {"command": "python3 .cursor/hooks/probe_hook.py", "timeout": 5}
+    ]
+  }
+}

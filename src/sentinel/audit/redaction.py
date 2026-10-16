@@ -21,7 +21,10 @@ _SENSITIVE_KEY_PARTS = {
     "token",
 }
 _ENV_CONTENT_KEYS = {"content", "raw", "text", "value"}
-_SAFE_STRUCTURED_KEYS = {"authorizationsource"}
+# Structured flags whose names contain a sensitive word but whose values never
+# do. `credential_read_executed` is a boolean on `post_execution` rows; redacting
+# it to "[REDACTED]" (truthy) would make every restart arm the F4 taint.
+_SAFE_STRUCTURED_KEYS = {"authorizationsource", "credentialreadexecuted"}
 _PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----.*?-----END(?: [A-Z0-9]+)? PRIVATE KEY-----",
     re.DOTALL,
@@ -34,8 +37,13 @@ _KNOWN_TOKEN_RE = re.compile(
     r"xox[a-z0-9.]*-[A-Za-z0-9._-]{10,}|"
     r"ya29\.[A-Za-z0-9._-]{10,})\b"
 )
+# `[ \t]*`, not `\s*`: `\s` eats newlines, so every line start re-scanned to the
+# end of the text (31k blank lines took 12 s inside the audit write; review
+# finding, October 15). The value is one shell word (quoted or up to whitespace
+# / `;` / `&` / `|`), so `TOKEN=x rm -rf ~` keeps `rm -rf ~` in the record.
 _ASSIGNMENT_RE = re.compile(
-    r"(?m)^(\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*)([^\r\n]*)$"
+    r"(?m)^([ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=[ \t]*)"
+    r"(\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s;&|]*)"
 )
 
 

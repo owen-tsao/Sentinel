@@ -43,6 +43,7 @@ from sentinel.control.approvals import (
 from sentinel.control.config import ControlConfig
 from sentinel.control.pairing import PairingError, PairingService
 from sentinel.control.workspace import SupervisionBinding
+from sentinel.decisions.models import Zone
 
 
 def build_control_router(
@@ -335,6 +336,8 @@ def build_control_router(
         verdict: Optional[
             Literal["allow", "warn", "confirm_required", "block"]
         ] = None,
+        rule_id: Optional[str] = Query(default=None, min_length=1, max_length=100),
+        zone: Optional[Zone] = None,
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
         limit: int = Query(default=200, ge=1, le=1_000),
@@ -345,6 +348,8 @@ def build_control_router(
             task_id=task_id,
             event_type=event_type,
             verdict=verdict,
+            rule_id=rule_id,
+            zone=zone,
             start_time=start_time,
             end_time=end_time,
             limit=limit,

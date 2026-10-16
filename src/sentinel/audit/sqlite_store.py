@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO, Union, cast
 
+from pydantic import ValidationError
+
 from .base import AuditFallbackFullError, AuditStoreError
 from .models import AuditEvent, AuditHealth, AuditQuery
 from .redaction import redact
@@ -224,6 +226,7 @@ class SQLiteAuditStore:
                     connection.execute("DROP TABLE audit_events_legacy")
             else:
                 self._create_events_table(connection)
+            self._add_decision_columns(connection)
             for column in (
                 "event_type",
                 "verdict",
@@ -232,10 +235,41 @@ class SQLiteAuditStore:
                 "contract_id",
                 "timestamp",
                 "sequence_id",
+                "decision_rule_id",
             ):
                 connection.execute(
                     f"CREATE INDEX IF NOT EXISTS idx_audit_events_{column} ON audit_events ({column})"
                 )
+            # Session rebuilds query by session_id on every first-seen session
+            # while holding the registry guard; without a SQL filter that was a
+            # full-table scan plus a pydantic parse of every row (review
+            # finding, October 15). An expression index needs no migration.
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_events_session_id "
+                "ON audit_events (json_extract(event_json, '$.session_id'))"
+            )
+
+    @staticmethod
+    def _add_decision_columns(connection: sqlite3.Connection) -> None:
+        """Add the decision columns to a database created before they existed.
+
+        Two processes (two hook invocations) may open the same database at the
+        same moment and both see the column missing. ALTER TABLE is autocommit
+        DDL, so the second one fails with "duplicate column name"; that is the
+        other process having won, not a fault, and must not put this store
+        into degraded mode.
+        """
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info('audit_events')").fetchall()
+        }
+        for column in ("decision_rule_id", "decision_zones"):
+            if column in columns:
+                continue
+            try:
+                connection.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
     @staticmethod
     def _create_events_table(connection: sqlite3.Connection) -> None:
@@ -250,7 +284,9 @@ class SQLiteAuditStore:
                 environment TEXT,
                 agent_id TEXT,
                 contract_id TEXT,
-                event_json TEXT NOT NULL
+                event_json TEXT NOT NULL,
+                decision_rule_id TEXT,
+                decision_zones TEXT
             )
             """
         )
@@ -267,6 +303,8 @@ class SQLiteAuditStore:
                 event.agent_id,
                 event.contract_id,
                 json.dumps(_event_json_dict(event), sort_keys=True, ensure_ascii=False),
+                event.decision.judgment.rule_id if event.decision is not None else None,
+                json.dumps(event.decision.action.zones) if event.decision is not None else None,
             )
             for event in events
         ]
@@ -275,8 +313,8 @@ class SQLiteAuditStore:
                 """
                 INSERT INTO audit_events (
                     event_id, event_type, timestamp, verdict, environment,
-                    agent_id, contract_id, event_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    agent_id, contract_id, event_json, decision_rule_id, decision_zones
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -293,6 +331,20 @@ class SQLiteAuditStore:
             if value is not None:
                 clauses.append(f"{column} = ?")
                 parameters.append(value)
+        if filters.rule_id is not None:
+            clauses.append("decision_rule_id = ?")
+            parameters.append(filters.rule_id)
+        if filters.session_id is not None:
+            clauses.append("json_extract(event_json, '$.session_id') = ?")
+            parameters.append(filters.session_id)
+        if filters.zone is not None:
+            # json_each(NULL) yields no rows, so legacy rows without a decision
+            # are excluded. Full scan over non-null decision_zones; fine locally.
+            clauses.append(
+                "json_valid(audit_events.decision_zones) AND EXISTS "
+                "(SELECT 1 FROM json_each(audit_events.decision_zones) WHERE json_each.value = ?)"
+            )
+            parameters.append(filters.zone)
         if filters.start_time is not None:
             clauses.append("timestamp >= ?")
             parameters.append(_timestamp_text(filters.start_time))
@@ -309,7 +361,7 @@ class SQLiteAuditStore:
         for row in rows:
             payload = json.loads(row["event_json"])
             payload["sequence_id"] = row["sequence_id"]
-            events.append(AuditEvent(**payload))
+            events.append(_event_from_payload(payload))
         matching = [event for event in events if _matches(event, filters)]
         if filters.limit is not None:
             return matching[-filters.limit :]
@@ -321,10 +373,69 @@ class SQLiteAuditStore:
         return self._connection
 
 
+def _event_from_payload(payload: dict[str, Any]) -> AuditEvent:
+    """Rebuild a stored row. A decision block this version cannot validate (a
+    newer schema, a hand-edited row) must not make the whole query fail; the
+    row comes back with decision=None, the raw block kept as evidence, and the
+    demotion itself recorded so it is visible rather than silent."""
+    try:
+        return AuditEvent(**payload)
+    except ValidationError as exc:
+        if payload.get("decision") is None:
+            raise
+        lenient = dict(payload)
+        unparsed = lenient.pop("decision")
+        details = dict(lenient.get("details") or {})
+        details["decision_unparsed"] = unparsed
+        details["decision_unparsed_error"] = str(exc)[:500]
+        lenient["details"] = details
+        return AuditEvent(**lenient)
+
+
+def _clamp_too_long(payload: dict[str, Any], errors: list[dict[str, Any]]) -> bool:
+    """Redaction can grow a string (`TOKEN=x` -> `TOKEN=[REDACTED]`) past a
+    field's max_length. Truncate exactly the fields pydantic says are too long,
+    using its own error locations, so no hand-kept list can fall behind."""
+    clamped = False
+    for error in errors:
+        if error.get("type") != "string_too_long":
+            continue
+        limit = (error.get("ctx") or {}).get("max_length")
+        location = error.get("loc") or ()
+        if not isinstance(limit, int) or not location:
+            continue
+        node: Any = payload
+        for key in location[:-1]:
+            if isinstance(node, dict) and key in node:
+                node = node[key]
+            elif isinstance(node, list) and isinstance(key, int) and key < len(node):
+                node = node[key]
+            else:
+                node = None
+                break
+        leaf = location[-1]
+        if isinstance(node, dict) and isinstance(node.get(leaf), str):
+            node[leaf] = node[leaf][:limit]
+            clamped = True
+        elif isinstance(node, list) and isinstance(leaf, int) and leaf < len(node) and isinstance(node[leaf], str):
+            node[leaf] = node[leaf][:limit]
+            clamped = True
+    return clamped
+
+
 def _redacted_event(event: AuditEvent) -> AuditEvent:
     payload = redact(_event_json_dict(event))
     payload["sequence_id"] = None
-    return AuditEvent(**payload)
+    try:
+        return AuditEvent(**payload)
+    except ValidationError as exc:
+        # Redaction only changes string values. Length overflows are clamped
+        # and retried; anything else degrades the row (visibly), never the write.
+        if _clamp_too_long(payload, exc.errors()):
+            return _event_from_payload(payload)
+        if payload.get("decision") is None:
+            raise
+        return _event_from_payload(payload)
 
 
 def _event_json_dict(event: AuditEvent) -> dict[str, Any]:
@@ -357,6 +468,12 @@ def _matches(event: AuditEvent, filters: AuditQuery) -> bool:
     for field in (*_FILTER_COLUMNS, "session_id", "task_id"):
         expected = getattr(filters, field)
         if expected is not None and getattr(event, field) != expected:
+            return False
+    if filters.rule_id is not None:
+        if event.decision is None or event.decision.judgment.rule_id != filters.rule_id:
+            return False
+    if filters.zone is not None:
+        if event.decision is None or filters.zone not in event.decision.action.zones:
             return False
     event_time = event.timestamp
     if event_time.tzinfo is None:

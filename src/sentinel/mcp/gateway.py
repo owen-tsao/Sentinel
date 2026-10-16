@@ -30,8 +30,15 @@ from sentinel.contracts import ContractRecord
 from sentinel.control.approvals import ApprovalExecutionEnvelope, InMemoryApprovalCoordinator
 from sentinel.control.workspace import SupervisionBinding
 from sentinel.decision.contract_policy import match_action_to_contract
+from sentinel.decisions.models import (
+    ActionDescription,
+    DecisionRecord,
+    Judgment,
+    ResolvedTarget,
+    ResourceFacts,
+)
 from sentinel.decision.engine import VERDICT_RISK_SCORES, VERDICT_TO_RISK_TIER
-from sentinel.integrations import AdapterSession, AdapterSessionError, AdapterSessionRegistry
+from sentinel.integrations import AdapterSession, AdapterSessionRegistry
 from sentinel.mcp.fixture import FixtureError, OperationBinding, SQLiteIssueFixture
 from sentinel.mcp.mediation import (
     BUDGETED_WRITE_REASON,
@@ -50,6 +57,14 @@ from sentinel.proposals import ProposalError, TaskProposalService
 from sentinel.supervision import SupervisionPolicyBinding
 
 ADAPTER_AGENT_ID = "cursor_mcp_adapter"
+# Contract operations -> what the decision record calls the effect on a target.
+_TARGET_KIND = {
+    "read": "read", "write": "write", "delete": "delete", "execute": "execute",
+    "network": "network", "external_communication": "send", "credential_access": "read",
+}
+# Gateway coverage status -> the enforcement claim on the record.
+_ENFORCEMENT = {"mandatory": "mandatory", "advisory": "advisory", "unsupported": "unsupported",
+                "unavailable": "unsupported"}
 ADAPTER_USER_ID = "adapter"
 # Placeholder task binding for reads the ceiling permits with no active task.
 # It is never a real task ID, so it can never match a contract or a budget.
@@ -115,7 +130,7 @@ class McpMediator:
             coverage = "unsupported" if exc.reason_code == "mcp:unsupported_tool" else "mandatory"
             problem = McpDecision("block", exc.reason_code, exc.reason, (exc.reason_code,),
                                   "Use only the declared fixture tools with exactly their documented arguments.")
-            self._write_decision(request_id, payload, problem, facts=None, record=None)
+            self._write_decision(request_id, payload, problem, facts=None, record=None, coverage=coverage)
             return self._blocked(request_id, payload, problem, coverage=coverage)
 
         record = self._active_record()
@@ -161,7 +176,7 @@ class McpMediator:
         if self._proposals is None:
             problem = McpDecision("block", "mcp:unsupported_tool", "Task proposals are not enabled in this process.",
                                   ("mcp:unsupported_tool",), "Ask the user to create the task in the Sentinel control center.")
-            self._write_decision(request_id, payload, problem, facts=None, record=None)
+            self._write_decision(request_id, payload, problem, facts=None, record=None, coverage="unsupported")
             return self._blocked(request_id, payload, problem, coverage="unsupported")
         try:
             facts = canonicalize_task_proposal(payload.arguments)
@@ -502,7 +517,15 @@ class McpMediator:
         )
 
     def _write_decision(self, request_id: str, payload: McpCallRequest, decision: McpDecision,
-                        *, facts: McpActionFacts | None, record: ContractRecord | None) -> None:
+                        *, facts: McpActionFacts | None, record: ContractRecord | None,
+                        coverage: str = "mandatory") -> None:
+        # Decision telemetry is optional; admission uses write_required. Nothing
+        # in here may raise past this method. A record that cannot be built
+        # degrades to the legacy details-only row, never to no row.
+        try:
+            decision_record = self._decision_record(payload, decision, facts, coverage)
+        except Exception:  # noqa: BLE001 - see above
+            decision_record = None
         try:
             self._audit.write(
                 AuditEvent(
@@ -516,10 +539,40 @@ class McpMediator:
                     details={"attempt_id": payload.attempt_id, "tool": payload.tool, "family": "mcp",
                              "targets": [facts.issue_id] if facts else [],
                              "payload_sha256": facts.action.payload_sha256 if facts else None},
+                    decision=decision_record,
                 )
             )
-        except AuditStoreError:
-            pass  # Decision telemetry is optional; admission uses write_required.
+        except Exception:  # noqa: BLE001 - telemetry must never affect admission
+            pass
+
+    @staticmethod
+    def _decision_record(payload: McpCallRequest, decision: McpDecision, facts: McpActionFacts | None,
+                         coverage: str) -> DecisionRecord | None:
+        """The typed form of this verdict (docs/Decision Record.md). None when
+        it cannot be built; the caller keeps the legacy row."""
+        try:
+            targets: list[ResolvedTarget] = []
+            if facts is not None:
+                targets.append(ResolvedTarget(
+                    raw=facts.issue_id, kind=_TARGET_KIND.get(facts.contract_operation, "read"),
+                    surface="resource",
+                    resource=ResourceFacts(resource_type="issue", resource_id=facts.issue_id),
+                ))
+            return DecisionRecord(
+                action=ActionDescription(
+                    family="mcp", host="mcp_gateway", tool=payload.tool,
+                    payload_sha256=facts.action.payload_sha256 if facts is not None else None,
+                    parse_status="not_applicable", targets=targets,
+                ),
+                judgment=Judgment(
+                    verdict=decision.verdict, decided_by="ceiling", rule_id=decision.reason_code,
+                    ceiling_version=1, enforcement=_ENFORCEMENT.get(coverage, "unsupported"),
+                    reason=decision.reason, agent_guidance=decision.guidance or None,
+                    message="sent" if decision.verdict == "confirm_required" else "none",
+                ),
+            )
+        except Exception:  # noqa: BLE001 - see _write_decision
+            return None
 
     def _write_effect(self, request_id: str, attempt_id: str, facts: McpActionFacts,
                       record: ContractRecord | None, state: str) -> None:

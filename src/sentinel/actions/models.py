@@ -5,14 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
-from typing import Any, Literal, Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field, validator
 
 from sentinel.contracts import ActionOperation, ContractEnvironment
+from sentinel.decisions.models import ActionFamily
 from sentinel.platforms import ResolvedActionEvidence
-
-ActionFamily = Literal["shell", "file", "mcp", "git", "database", "cloud", "deployment"]
 
 
 class StrictModel(BaseModel):

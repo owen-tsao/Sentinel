@@ -69,3 +69,7 @@ cursor_handover.md
 
 # Gate 2b benign twins carry the user's real paths; regenerate from the local corpus
 spikes/week15/gate2b/set_benign_twins.jsonl
+
+# Unrelated projects that live under this repo's .cursor/ on one machine; each has its own .git
+.cursor/Class/
+.cursor/Portfolio/

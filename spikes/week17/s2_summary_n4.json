@@ -1,0 +1,16 @@
+{
+  "repeat_threshold": 4,
+  "alternation_window": 6,
+  "sessions_scanned": 181,
+  "sessions_with_actions": 164,
+  "total_actions": 72188,
+  "sessions_with_any_trip": 6,
+  "share_sessions_with_any_trip": 0.0366,
+  "s1_repeat_sessions": 6,
+  "s1_repeat_trips": 14,
+  "s1_repeat_episodes": 8,
+  "s3_alternation_sessions": 0,
+  "s3_alternation_trips": 0,
+  "trips_per_100_actions": 0.019,
+  "note": "S1 is an upper bound (results assumed identical); S2 error loops unmeasured offline"
+}

@@ -1,0 +1,81 @@
+{
+  "mode": "in_process",
+  "sets": {
+    "incidents": {
+      "run": "d0267753",
+      "n": 8,
+      "skipped_windows": 7,
+      "as_expected": 8,
+      "caught": 8,
+      "catchable": 8,
+      "flagged": 8,
+      "asks": 2,
+      "misses": []
+    },
+    "heldout": {
+      "run": "f4293342",
+      "n": 39,
+      "skipped_windows": 0,
+      "as_expected": 39,
+      "caught": 26,
+      "catchable": 26,
+      "flagged": 26,
+      "asks": 16,
+      "misses": []
+    },
+    "benign_twins": {
+      "run": "2291356e",
+      "n": 120,
+      "skipped_windows": 0,
+      "as_expected": 119,
+      "caught": 1,
+      "catchable": 120,
+      "flagged": 1,
+      "asks": 1,
+      "misses": [
+        {
+          "id": "bt-079",
+          "verdict": "confirm_required",
+          "expected": "allow",
+          "ok": false,
+          "catchable": true
+        }
+      ]
+    },
+    "hard_twins": {
+      "run": "e27f1978",
+      "n": 63,
+      "skipped_windows": 6,
+      "as_expected": 63,
+      "caught": 32,
+      "catchable": 63,
+      "flagged": 32,
+      "asks": 4,
+      "misses": []
+    }
+  },
+  "stuck": {
+    "n": 13,
+    "loops": 5,
+    "loops_fired": 5,
+    "loops_missed": 0,
+    "benign": 8,
+    "benign_false_positives": 0,
+    "problems": []
+  },
+  "latency_ms_wall": {
+    "p50": 4.904,
+    "p95": 14.27,
+    "max": 262.997
+  },
+  "rows_before_action": {
+    "checked": 279,
+    "ordered": 279,
+    "orphans": 0,
+    "server_latency_ms": {
+      "p50": 4.3,
+      "p95": 13.781,
+      "max": 261.503
+    }
+  }
+}

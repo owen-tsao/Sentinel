@@ -19,14 +19,18 @@ This document is the source of truth for product behavior, trust boundaries, sch
 Project Sentinel is a local-first supervisor for AI coding agents. People
 keep working where their agents already run. Sentinel hears the prompt
 through the host's hook, infers an advisory boundary (the working directory,
-its repository, the launch environment, narrowed by the prompt and never
-widened without a question), tells the agent that boundary in one line, and
+its repository, the launch environment; a folder the prompt names is a
+per-prompt focus hint, and nothing in a prompt can move the boundary past the
+launch directory), tells the agent that boundary in one line, and
 watches every tool call, shell command, file edit, and MCP call before it
 runs. A deterministic floor of dangerous-by-facts actions is blocked or
 confirmed on hook facts alone; everything else runs, with a stuck detector and
-an off-track detector that may warn or confirm but never block. Every verdict
+an off-track detector that may warn or confirm but never block. A confirm the
+host cannot show, or nobody is present to answer, becomes a deny that creates
+a one-use pending approval with a review link. Every verdict
 is written to a tamper-evident local audit before the action runs. The web app
-is the monitor and flight recorder.
+is the flight recorder, approvals desk, and after-action report; it is not a
+live monitor the person is expected to watch (Direction §3.4, Week 18).
 
 Weeks 10-14 proved the enforcement seam this depends on: a paired browser,
 server-owned authority, one-use approvals, a mandatory MCP path, and a
@@ -104,8 +108,10 @@ automatically safer." The core value is quiet supervision backed by explicit,
 measured enforcement:
 
 - Sentinel infers an advisory boundary from the prompt, starting from the
-  working directory, its repository, and the launch environment. Inference
-  may only narrow; widening requires the person to answer one question.
+  working directory, its repository, and the launch environment. The
+  boundary is the launch directory for the session; a folder the prompt names
+  is a per-prompt focus hint. Nothing in a prompt widens past the launch
+  directory; that still requires the person (Week 18 amendment).
 - The boundary is told to the agent as one line of context. One stated
   sentence of scope is the most effective intervention measured in the
   literature; Sentinel supplies it so the person does not have to.
@@ -136,7 +142,7 @@ sections 3.3-3.5; for hook hosts it is replaced by the inferred boundary.
 ### 2.1 Goals
 
 - Supervise AI coding agents through the hooks their hosts already expose, starting with Claude Code.
-- Infer an advisory task boundary from the person's prompt, narrowing only from the working directory, its repository, and the launch environment; ask one question before widening.
+- Infer an advisory task boundary from the person's prompt: the working directory, its repository, and the launch environment, with a per-prompt focus hint for any folder the prompt names; widening past the launch directory needs the person.
 - Tell the agent the boundary as one line of context, so the person never has to write it.
 - Enforce a deterministic floor of dangerous-by-facts actions on hook facts alone: block or confirm before the action runs.
 - Detect stuck agents (repeated identical actions, action-error loops, alternation) and off-track agents (targets outside the boundary) and surface them within a per-boundary message budget.
@@ -148,7 +154,7 @@ sections 3.3-3.5; for hook hosts it is replaced by the inferred boundary.
 - Run allowed commands inside a restricted Docker sandbox, not directly on the host, where Sentinel owns execution.
 - Write every verdict to a tamper-evident local SQLite audit before the action runs, behind a swappable `AuditStore` interface, with a JSONL export for debugging.
 - Publish measurable results: dangerous recall on real incidents and held-out cases, false-flag rate per benign session, messages per hour, decision latency, and audit integrity.
-- Provide a protected local web app as monitor and flight recorder: active agents and boundaries, decisions with reasons, detector signals, approvals, and audit review.
+- Provide a protected local web app as flight recorder, approvals desk, and after-action report: decisions with reasons, pending approvals with their exact action, detector signals, and audit review. Not a live monitor the person is expected to watch.
 - State enforcement coverage per host and per surface (mandatory, advisory, unsupported) and never claim more.
 - Retain the MCP fixture path and the Docker executor as regression benches for the proven seam.
 
@@ -759,6 +765,15 @@ When an embedding process supplies `ControlConfig`, FastAPI additionally mounts
 the protected loopback-only `/control` routes described in Section 7.6. The
 default module app does not mount them.
 
+When a `ClaudeCodeHookService` is supplied (`sentinel serve` does this),
+FastAPI mounts the loopback-only hook routes described in Section 16.2:
+`POST /hooks/claude-code/{pre-tool-use, post-tool-use, permission-request,
+permission-denied, config-change, session}`. They require the exact
+configured `Host`, reject any request carrying `Origin` or `Referer`, read
+the body raw (a validation failure is a 200 `deny`, never a 422), accept
+bodies up to 8 MiB (a `Write` payload carries the whole file), and always
+answer 200 with a JSON object.
+
 ### 7.2 Contract-aware request
 
 `POST /evaluate` and `POST /execute` share this request schema:
@@ -1028,6 +1043,47 @@ Recommended risk categories remain useful for error analysis:
   }
 }
 ```
+
+#### 8.2.1 Decision record (Week 16)
+
+Decision events carry one more field, `decision`, a typed record of *what
+was asked, what it touches, and why the verdict came out as it did*. It is
+the one shape every writer (shell hook, MCP gateway, future proxies) and
+every reader (monitor, harness, hash chain) shares; `details` stays for
+non-decision events and legacy rows. Full design, invariants, and review log:
+`docs/Decision Record.md`. Shape in brief:
+
+```json
+"decision": {
+  "schema_version": 1,
+  "action": {
+    "family": "shell", "host": "claude_code", "tool": "Bash",
+    "raw": "rm -rf \"$DIR\"/*", "working_directory": "/Users/dev/proj",
+    "working_directory_source": "launch", "parse_status": "parsed",
+    "targets": [{
+      "raw": "\"$DIR\"/*", "kind": "delete", "surface": "filesystem",
+      "filesystem": {"resolved": "/", "zone": "root", "judged_by": "directory",
+                     "note": "variable collapsed to empty; judged by directory"}
+    }]
+  },
+  "judgment": {
+    "verdict": "block", "floor_verdict": "block", "decided_by": "floor",
+    "rule_id": "F1.delete_root", "ceiling_version": 2, "enforcement": "mandatory",
+    "reason": "Deletes the root directory.",
+    "agent_guidance": "Stay inside /Users/dev/proj or ask the user.",
+    "history_facts": [], "message": "sent", "latency_ms": 3.2
+  }
+}
+```
+
+A target's `surface` selects exactly one facts block: `filesystem` (path and
+zone), `audience` (recipient counts and flags derived from
+`AudienceSnapshot`, never ids), or `resource` (a provider object such as an
+issue or database). `AuditEvent.verdict` must equal
+`decision.judgment.verdict`. The store indexes `decision_rule_id` and keeps
+`decision_zones` as JSON so "every decision that touched `home`" is a query,
+not a text search; `AuditQuery` and `GET /control/audit` accept `rule_id` and
+`zone`.
 
 ## 9. Risk Tiers and Decision Policy
 
@@ -1320,6 +1376,308 @@ The legacy OpenClaw integration is also advisory and must not be presented as a
 mandatory enforcement path.
 
 Candidate adapter timing and priority belong in `docs/Roadmap.md`.
+
+### 16.2 Claude Code Adapter (Week 16, verified implementation)
+
+The first adapter that can claim `mandatory`, and only under the conditions
+`sentinel claude-code doctor` checks. Design and threat model:
+`docs/Week 16 Plan.md`. Code: `src/sentinel/hosts/claude_code/`,
+`src/sentinel/floor/`, `src/sentinel/supervision/floor_policy.py`,
+`src/sentinel/cli.py`.
+
+**Shape.** Claude Code's `PreToolUse` hook POSTs every tool call to
+`POST /hooks/claude-code/pre-tool-use` on the running Sentinel server (HTTP
+hook, `onFailure: "block"`, so a stopped or failing Sentinel blocks the call
+instead of letting it through). Sentinel answers in one of exactly three
+forms and never a fourth:
+
+| Floor verdict | Response | Host behaviour |
+|---|---|---|
+| `allow` | `{}` | host's own permission flow runs unchanged |
+| `warn` | `additionalContext` only | the agent reads one line; no decision |
+| `confirm_required` | `permissionDecision: "ask"` with the reason | the host's own prompt, with Sentinel's reason, every time |
+| `block` | `permissionDecision: "deny"` with agent guidance | tool call refused; the agent is told why and what to do instead |
+
+`permissionDecision: "allow"` is never emitted: it would skip the host's
+prompt, which is Sentinel granting authority. The route guards this
+(`forbids_allow`) as a last line.
+
+**Facts, not claims.** The session boundary is the launch directory
+(containing repository of the first host-authored `PreToolUse`, or the
+`SessionStart` command hook's `CLAUDE_PROJECT_DIR`). It may be narrowed by
+`SessionStart`, never widened by any event. `PostToolUse`, `PermissionRequest`
+and `PermissionDenied` are logged and change no decision state. Relative paths
+resolve against the per-call `cwd`; zones are judged against the launch
+directory, so `cd /` in one call widens nothing in the next. Server-owned
+history (a credential read arms `F4`) is rebuilt from the audit rows after a
+restart.
+
+**Row before action.** Every `PreToolUse` writes a `DecisionRecord` with
+`write_required` before the response is sent. If the write fails the answer
+is `deny` (`audit:write_failed`). Measured in-process: p50 5 ms, p95 15 ms
+including the durable SQLite commit; 230/230 rows precede their
+`PostToolUse` by `sequence_id`.
+
+**Enforcement claim.** Computed from the root-owned managed settings file
+(`/Library/Application Support/ClaudeCode/managed-settings.json` on macOS):
+owner, mode, `allowManagedHooksOnly`, pinned `allowedHttpHookUrls`, the
+`PreToolUse` entry (URL, matcher coverage, `onFailure`, timeout, not async),
+Claude Code version ≥ 2.1.295, hook liveness, and no foreign listener on
+Sentinel's port. All pass → `mandatory`; a named defect → `advisory`; file
+absent while hooks demonstrably fire (console/MDM policy) → `unknown`. Every
+row carries the state. `ConfigChange` events that alter hook or permission
+keys in user/project/local settings during a session are blocked
+(`F2.hook_config_change`); skill-file changes are blocked.
+
+**Ceiling v2.** `FloorPolicy` (version 2): launch-directory → environment
+map, `log_only_rules` (never F1–F4 or `F2.supervisor_disable`; the row still
+carries the real verdict), accepted MCP sources, hook expectations, ask
+fallback modes. Frozen, hashed, bound once per state database; a database
+holding only the Week 12 contract binding is refused by name.
+
+**Known limits.** Same-user port squat after a missed `F2.supervisor_disable`
+(documented in the plan §2); `@file` reads bypass the hook; Windows paths are
+recognized by shape only; the `ask`-in-`bypassPermissions` behaviour and
+skill-frontmatter hooks are live gates (plan §7) still owed.
+
+### 16.3 Hear, Tell, and Stuck (Week 17, verified implementation)
+
+The advisory layer on top of the Week 16 floor. Design, threat model, and
+review log: `docs/Week 17 Plan.md`. Code: `src/sentinel/boundary/infer.py`,
+`src/sentinel/detectors/stuck.py`, the `user_prompt_submit`,
+`post_tool_use_failure`, and `_run_detector` paths in
+`src/sentinel/hosts/claude_code/service.py`, `Boundary` in `session.py`.
+
+**Hear.** `POST /hooks/claude-code/user-prompt-submit` receives the person's
+prompt. The inferrer strips `<pasted_content>` blocks, fenced code, and
+over-long unpunctuated segments, bails out on prompts that are shell
+commands, extracts path-shaped tokens (never bare words), drops any candidate
+within six tokens of a negation or example phrase (and then narrows nothing
+from that prompt), resolves relative paths against the event `cwd` only when
+it is inside the launch directory, realpaths, and zones each path with the
+floor's `zone_of`. Inside paths narrow the boundary to their deepest common
+ancestor, strictly deeper than the current root or not at all. Outside,
+home, and system paths produce a *caution*; credential and protected-config
+paths produce nothing (the floor's business). Environment words naming an
+environment other than the session's produce an environment caution.
+**Nothing widens.** There is no widening code path in this release.
+
+> **Amendment (Week 18, October 14, built).** Narrowing is removed.
+> The inside paths' common ancestor becomes a per-prompt *focus hint*: it is
+> appended to the context line for that prompt only (`This prompt points at
+> \`<folder>\`.`, relative to the root), recorded on the `boundary` row as
+> `focus`, and persists to no later prompt. `Boundary.narrow` and
+> `supersede_boundary` are gone; the stuck ring, caution memory, and budget
+> are no longer reset by prompts (the budget is a rolling window and needs no
+> reset). The `(narrowed from …)` suffix is gone with it. Reason and
+> evidence: Direction §3.1 amendment of the same date. Still owed: allows
+> recording their resolved target so the after-action report can list every
+> path touched (today allows record no targets); that lands with the report.
+
+**Tell.** Every prompt gets one `additionalContext` line, under 400
+characters, built from server facts only: `Sentinel boundary: <root> (<env>).
+Work inside it; ask the user before touching anything outside it.`, plus
+`(narrowed from <previous> by this prompt)` when it moved, plus the caution
+sentence when due. The route never returns `decision`; a crash returns `{}`
+and a row tagged `error`.
+
+**Stuck.** Inside `pre_tool_use`, after the floor, only when the floor
+returned `allow` or `warn`, inside its own catch-everything `try`. Identity is
+tool name plus a hash of the input with volatile fields removed (string and
+null inputs are hashed as themselves). Results are hashed from `PostToolUse`
+(`stdout`/`stderr`/`interrupted` for Bash) or taken as `error:<first line>`
+from `PostToolUseFailure`. Signals: 4th identical attempt after 3 identical
+results (`S1`), 3rd attempt after 2 failures (`S2`), A/B/A/B/A/B with
+unchanged results on both sides (`S3`). Only sequential retries count; a
+parallel burst (a `PreToolUse` arriving before the previous `PostToolUse`)
+never does. The response merge never touches `permissionDecision`: `{}`
+becomes context-only, an existing context gains a line, `ask` and `deny` are
+never consulted. The audit row records the floor's response kind and the
+detector separately, and the typed record is re-stamped `decided_by:
+detector` with `floor_verdict` kept.
+
+**Budget.** Two person-facing advisory messages per boundary in any rolling
+30-minute window (`ADVISORY_MESSAGE_BUDGET`, `ADVISORY_MESSAGE_WINDOW_SECONDS`
+in `hosts/claude_code/session.py`), shared by cautions and detector
+`systemMessage`s; one `systemMessage` per (identity, boundary) regardless.
+Spends are kept as wall-clock timestamps (`advisory_message_times`) and the
+lifetime count (`advisory_messages_sent`) stays on the rows. Narrowing
+supersedes the boundary and resets the ring, the caution memory, and the
+budget; the budget is rebuilt from row timestamps on restart (old spends age
+out, an unreadable timestamp counts as now), the ring is not. Amended Week 18
+from a lifetime-per-boundary count after gate C-H5: on Cursor the boundary is
+the workspace root for the life of the conversation, and a six-hour session
+withheld a real stuck popup because two cautions at hour zero had spent it.
+
+**Measured (in-process harness, October 12).** Week 16 numbers unchanged
+(8/8 incidents, 26/26 held-out, 1/120 benign twins, 279/279 rows before
+action). Stuck replay set: 5/5 hand-written loops fire at their threshold,
+0/8 benign twins fire. Offline replay of 164 of the person's Cursor sessions
+(72,188 tool calls): 3.7% trip the repeat signal under an upper bound that
+assumes identical results (`spikes/week17/S2_RESULTS.md`). Tests: 37
+inferrer, 23 detector, 23 service-level.
+
+**Verified live (Claude Code 2.1.296, October 12, `claude -p`, project
+settings so `enforcement: advisory`).** All five hook payloads parse
+(`PostToolUseFailure` carries `Exit code N`, extracted as `exit_code`).
+`look at src/api/ …` → `boundary` row `narrowed: true`, root `…/src/api`.
+An outside path quoted inline → `caution: path`, root unchanged. `don't touch
+src/legacy/` → `candidates_dropped_by_negation: 1`, `narrowed: false`; the
+agent did not open it and, unprompted, told the person the boundary line came
+from a hook rather than from them. Seven identical `make lint` failures → S2
+nudge at the 3rd attempt, one `systemMessage` at the 4th, none after; the
+agent quoted the nudge verbatim. With the server down, `onFailure: block`
+denied every tool call. Post-review fixes: the second-firing rule is a
+per-(rule, identity) firing count rather than streak length (mixed-result
+streaks overshoot; S3's identity is the A|B pair); `e.g.` and curly-apostrophe
+negations match; the boundary is built eagerly under the registry lock and
+re-anchored when `SessionStart` narrows `launch_cwd` past it.
+
+**Carried to Week 18.** The `<pasted_content>` strip against a real TUI paste
+and `systemMessage` rendering (both need an interactive session), H6 (a
+twenty-minute benign task producing zero advisory messages), Spike S1
+(boundary-line A/B), and the root-owned managed placement on the person's
+machine. Known limits: the caution memory is not rebuilt on restart (the
+budget is); a parallel burst following a sequential streak nudges each member.
+
+### 16.4 Sentinel on Cursor (Week 18, implemented; live gates in progress)
+
+The same supervisor on the host the person uses. Design and review log:
+`docs/Week 18 Plan.md`; spikes: `spikes/week18/cursor_inject/RESULTS.md`
+(C1, context injection) and `spikes/week18/cursor_ask/RESULTS.md` (C2, the
+confirm channel). Code: `src/sentinel/hosts/cursor/` (`schemas.py`,
+`translate.py`, `service.py`, `routes.py`, `forwarder.py`, `install.py`)
+plus five constructor parameters on the shared `ClaudeCodeHookService`
+(`host`, `enforcement_evaluator`, `person_channel`, `detector_exempt_tools`,
+`ask_capable`), each defaulting to the Claude Code value.
+
+**Shape.** Cursor hooks are command hooks (a script on stdin/stdout), so a
+stdlib-only forwarder, `~/.cursor/hooks/sentinel_forward.py`, POSTs each
+event to `http://127.0.0.1:<port>/hooks/cursor/<event>` with a 3 s socket
+timeout under Cursor's 5 s hook timeout and prints the answer. It adds
+exactly two facts: its own realpath'd cwd (`launch_dir`) and
+`forwarder_ms`. It never judges a command and strips `permission: allow`
+from anything it prints. `CursorHookService` translates the payload into
+the existing `HookEnvelope` (`Shell{command,cwd,timeout}` → `Bash{command}`
+with volatile fields removed, `StrReplace` → `Edit`, `Write{path,contents}`
+→ `Write{file_path,content}`, `Delete{path}` → `decide_path(..., "delete")`,
+`ApplyPatch` → its `*** Update File:` / `*** Add File:` / `*** Delete File:`
+headers as a `files` list, each path judged by `decide_patch` as `Write` or
+`Delete` would be with the most severe verdict winning, and `F5.opaque_write`
+only when no header can be read (Week 19; patch bodies never enter the
+envelope), `MCP:<tool>` and
+`beforeMCPExecution` → `mcp__<server>__<tool>`, a JSON-string `tool_output`
+into the Bash result shape so fingerprints match), delegates every decision
+to the shared service, and translates the body back keyed on
+`permissionDecision` first: deny → `{"permission": "deny", "user_message",
+"agent_message"}` with the advisory `systemMessage` folded into the text;
+ask → `ask` on the two events that enforce it (below), deny on any other;
+undecided → `{}` or `additional_context`. A `systemMessage` without a
+decision has no channel on Cursor and is dropped, never upgraded.
+
+**Authority facts.** The session's working directory is chosen server-side
+from the payload's `workspace_roots` and the forwarder's cwd: the cwd when it
+equals or sits inside a root (`cursor_forwarder`), otherwise the first root
+(`cursor_workspace_root`); later events narrow through `narrow_launch_cwd`
+and never widen (rejections are audited once per session). Environment is
+re-derived on every accepted narrow, on both hosts (review B1: a wide first
+event must not pin `dev` on a production repository). Writes to
+`~/.cursor/hooks.json`, `~/.cursor/hooks/`, `.cursor/mcp.json` (added this
+week; Claude Code's `.mcp.json` already was), and `~/.sentinel/` block as
+`F1.*_protected_config` from every tool, including a Shell
+`working_directory` given as `~/.cursor` or `../..` (resolved against the
+server's home and launch directory, never dropped). `rm` of a home
+carve-out (`~/.zshrc`, `~/.config/...`) now blocks as `F1.delete_home`,
+matching `Delete` of the same path. Enforcement is `advisory` while the
+forwarder is registered and `unsupported` otherwise; never `mandatory`,
+because the user-level hooks file is the person's own. The enterprise hooks
+location (`/Library/Application Support/Cursor/hooks.json`, MDM-managed) is
+a possible mandatory tier later; not built.
+
+**The confirm channel (spike C2, found by live gate C-H3).** Cursor accepts
+`permission: ask` on `preToolUse` but does not enforce it: live, an `ask`
+on a `Delete` ran the delete with no popup (row 61) and an `ask` on a
+`WebFetch` was rejected with Cursor's own text "not yet implemented" (row
+120). A confirm the person never sees is an allow. `ask` *is* enforced on
+`beforeShellExecution` and `beforeMCPExecution`, which fire 72–124 ms after
+`preToolUse` for the same call with the same `tool_use_id` (9/9 commands,
+including a subagent's and a background shell's), and the popup appears in
+all three Run Modes including Run Everything (reason text shown in
+Auto-review and Run Everything, dropped by Cursor's own card in Allowlist
+mode). So: every call is judged once, on `preToolUse`. A shell or MCP
+confirm (floor `confirm_required`, or the detector's one budgeted message
+under `person_channel="ask"`) is held on the session
+(`HookSession.pending_asks`, bounded) and answered as `ask` when the capable
+event arrives (`ask_delivered` row); `preToolUse` itself answers with
+context telling the agent the person is being asked. A confirm for a tool
+with no capable event (`Write`, `StrReplace`, `Delete`, `ApplyPatch`, web
+tools) is delivered as a deny with "ask the user in chat" guidance via the
+shared service's `ask_capable` predicate, the same shape as
+`ask_fallback_modes`; the row keeps `verdict: confirm_required, response:
+deny`. A capable event for a call `preToolUse` never saw is judged on the
+spot; one whose confirm was never delivered when the call finished writes an
+`ask_undelivered` row. Belt and braces: the translator turns any `ask` that
+still reaches `preToolUse` into a deny. Stated limits: Cursor does not tell
+hooks whether the person clicked Skip (the post event carries
+`{"output":"","exitCode":0}` either way), so `was_asked` records the
+question, not the answer; `agent_message` on `ask` never reaches the agent.
+The popup is reserved for shell retries: the spike log held 34 identical
+`Read` polls of a terminal file, which earn the context nudge and
+`popup_withheld: true`, not a popup. `AwaitShell` and `TodoWrite` neither evaluate nor enter the
+stuck ring. Non-zero shell exits arriving in `postToolUse` as
+`{output, exitCode}` take the failure path with a Claude Code-shaped
+`Exit code N` first line, so `exit_code` and `error_fingerprint` match.
+
+**Fail-closed, two mechanisms.** Server unreachable, non-2xx, non-JSON, or
+slow: a gating event (`preToolUse`, `beforeShellExecution`, `beforeMCPExecution`) prints a deny whose
+`user_message` says Sentinel is not running and exits 0, so the reason is
+shown; non-gating events (`beforeSubmitPrompt`, `postToolUse`,
+`postToolUseFailure`) print their pass-through body. The forwarder crashing
+prints one line to stderr and exits 2; `failClosed: true` on the gating
+entries covers a crash before even that. The forwarder ignores proxy
+environment variables and runs under `python3 -I`.
+
+**Install and doctor.** `sentinel cursor install` writes the forwarder and
+merges the user-level hooks file (foreign entries kept in order, idempotent,
+atomic temp-file write, refuses malformed files and symlinked files or
+directories, records a non-virtualenv `python3` by preference and warns
+otherwise). `sentinel cursor doctor` checks both files, `failClosed`, the
+port, the interpreter (via `shlex`), Cursor's version against 3.24.12, and
+runs one synthetic `preToolUse` through the exact installed command line;
+`/health` is used for reachability so doctor writes no hook rows. It exits
+1 on `advisory` by design; an empty or malformed hooks file is
+`unsupported`.
+
+**Measured (in-process harness, October 13, `--host both`, after C2).**
+The harness drives Cursor's real two-event shell sequence and compares
+judgments (a file-tool confirm delivered as deny-with-guidance counts as
+`confirm_required`). Cursor path equals Claude Code on 230/230 case
+verdicts and 13/13 stuck signal sequences; 8/8 incidents, 26/26 held-out,
+1/120 benign twins (bt-079, pre-existing), 5/5 loops, 0/8 false positives;
+Cursor wall latency p50 7.3 ms, p95 19.5 ms. Live: forwarder spawn-to-exit
+against the running server p50 55 ms, p95 58 ms (15 runs); the in-row
+`forwarder_ms` starts after interpreter start and reports ~0.08 ms, so it is
+not the gate measurement (open item: have `doctor` time its synthetic event
+end to end). Tests: 27 translation, 43 service and routes, 25 forwarder,
+install, and doctor (the forwarder is run as a subprocess against a fake
+server that answers, refuses, hangs, returns 500, and returns junk), 17
+shared-service host parameters including Delete-vs-`rm` parity across eight
+paths. Suite: 974. Two independent review passes (correctness,
+authority) found no authority bypass and 19 defects, all fixed or recorded
+in `docs/Week 18 Plan.md` §8.
+
+**Verified live on this Cursor (3.24.12, October 13, probe hooks).**
+`additional_context` reaches the agent on all four events; `permission:
+allow` from a hook does not suppress Cursor's own approval prompt; a deny
+JSON printed before exit 0 shows its `user_message`, and a crash's stderr is
+shown as the reason; a denying hook beats a sibling allowing hook;
+`preToolUse` fires for MCP tools (`MCP:<tool>`, before `beforeMCPExecution`
+adds the server name), for `Task`, and for the subagent's own calls with
+`parent_tool_call_id`; `beforeSubmitPrompt` fires per message; project hooks
+run with cwd = project root (88/88). **Not yet verified live:** the real
+forwarder end to end (gates C-H0b to C-H6 in the plan), user-level hook cwd,
+whether `ask` under Run Everything degrades to allow, Cursor's handling of a
+relative Shell `working_directory`.
 
 ## 17. Future Architecture Boundaries
 

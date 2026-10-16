@@ -1,0 +1,188 @@
+{
+  "chats": 144,
+  "prompts": 5782,
+  "projects_skipped": 487,
+  "workspaces": {
+    "Users-owentsao-BPDEMOFIX": "~/BRANCHPOINT 2/branchpoint",
+    "Users-owentsao-Coreweave-Hacks": "~/Coreweave Hacks",
+    "Users-owentsao-Dep-Graph-Composio": "~/Dep Graph Composio",
+    "Users-owentsao-Downloads-Pytorch-Learning": "~/Downloads",
+    "Users-owentsao-KeyStroke-ID": "~/KeyStroke-ID",
+    "Users-owentsao-Learning-Misc": "~/Learning:Misc",
+    "Users-owentsao-NeetCode": "~/NeetCode",
+    "Users-owentsao-Sentinel": "~/Sentinel",
+    "Users-owentsao-Sentinel-cursor-Class": "~/Downloads",
+    "Users-owentsao-Sentinel-cursor-Portfolio": "~/Sentinel/.cursor",
+    "Users-owentsao-Ticket-Finder": "~/Ticket Finder",
+    "Users-owentsao-Zetamac": "~/Zetamac",
+    "Users-owentsao-agent-control-room": "~/agent-control-room",
+    "Users-owentsao-briefly": "~/briefly/src",
+    "Users-owentsao-cheating-daddy": "~/IPrep",
+    "Users-owentsao-clad-core": "~/clad-core",
+    "Users-owentsao-clad-core-eng-279": "~/clad-core-eng-279",
+    "Users-owentsao-hs2-software-design": "~/hs2-software-design",
+    "Users-owentsao-variant-explorer": "~/variant-explorer"
+  },
+  "prompts_per_chat": {
+    "n": 144,
+    "p50": 8.5,
+    "p90": 105,
+    "max": 505
+  },
+  "chat_minutes": {
+    "n": 123,
+    "p50": 1263.0,
+    "p90": 48197.0,
+    "max": 139732.0
+  },
+  "prompt_words": {
+    "n": 5782,
+    "p50": 21.0,
+    "p90": 104,
+    "max": 95409
+  },
+  "command_prompts": 30,
+  "prompts_with_path": 1243,
+  "prompts_without_path": 4539,
+  "chats_that_narrow": 90,
+  "narrow_depth": {
+    "n": 90,
+    "p50": 2.0,
+    "p90": 2,
+    "max": 5
+  },
+  "chats_narrowed_then_wider_prompt": 70,
+  "later_prompts_after_narrowing": {
+    "deeper": 0,
+    "same": 23,
+    "elsewhere": 1052,
+    "elsewhere_union_is_workspace_root": 1051
+  },
+  "widen_phrase_prompts": 586,
+  "widen_phrase_without_path": 318,
+  "widen_phrases_top": [
+    [
+      "everything",
+      408
+    ],
+    [
+      "entire",
+      163
+    ],
+    [
+      "whole",
+      96
+    ],
+    [
+      "deep review",
+      91
+    ],
+    [
+      "across the",
+      44
+    ],
+    [
+      "the rest of",
+      31
+    ],
+    [
+      "all of the",
+      21
+    ],
+    [
+      "everywhere",
+      16
+    ],
+    [
+      "review all",
+      10
+    ],
+    [
+      "review everything",
+      6
+    ],
+    [
+      "all of it",
+      5
+    ],
+    [
+      "full repo",
+      1
+    ]
+  ],
+  "tool_calls": 62320,
+  "tools_top": [
+    [
+      "Shell",
+      19277
+    ],
+    [
+      "StrReplace",
+      11865
+    ],
+    [
+      "Read",
+      9362
+    ],
+    [
+      "Grep",
+      3662
+    ],
+    [
+      "CallDynamicTool",
+      3505
+    ],
+    [
+      "ReadFile",
+      2300
+    ],
+    [
+      "Write",
+      2116
+    ],
+    [
+      "ApplyPatch",
+      1759
+    ],
+    [
+      "TodoWrite",
+      1637
+    ],
+    [
+      "AwaitShell",
+      1199
+    ],
+    [
+      "rg",
+      777
+    ],
+    [
+      "CallMcpTool",
+      748
+    ],
+    [
+      "WebSearch",
+      669
+    ],
+    [
+      "Glob",
+      552
+    ]
+  ],
+  "path_calls_by_zone": {
+    "read:home": 4785,
+    "read:workspace": 6721,
+    "write:workspace": 7861,
+    "write:home": 5988,
+    "write:other": 116,
+    "read:other": 1360
+  },
+  "path_calls_vs_first_named_folder": {
+    "read:inside": 222,
+    "read:outside": 5827,
+    "write:outside": 7279,
+    "write:inside": 120
+  },
+  "shell_test_or_build": 4268,
+  "shell_git": 2837
+}

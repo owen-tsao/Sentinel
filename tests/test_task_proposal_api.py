@@ -20,7 +20,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_mcp_mediation_api import (  # noqa: E402
     UI_ORIGIN,
-    approve,
     call,
     mediated_client,
     pair,

@@ -49,6 +49,19 @@ export type ActionContract = {
   write_budget?: number;
 };
 
+export type ActionDescription = {
+  family: "shell" | "file" | "mcp" | "git" | "database" | "cloud" | "deployment" | "web";
+  host: string;
+  tool: string;
+  raw?: string | null;
+  payload_sha256?: string | null;
+  working_directory?: string | null;
+  working_directory_source?: "launch" | "hook_payload" | "cursor_forwarder" | "cursor_workspace_root" | null;
+  parse_status?: "parsed" | "unparseable" | "not_applicable";
+  opaque?: Array<string>;
+  targets?: Array<ResolvedTarget>;
+};
+
 export type AgentConnectionResponse = {
   host: string;
   status: "never_connected" | "connected" | "disconnected";
@@ -58,6 +71,19 @@ export type AgentConnectionResponse = {
   mediated_calls?: number;
   rejected_calls?: number;
   adapter_session_expires_at?: string | null;
+};
+
+export type AudienceFacts = {
+  resource_id: string;
+  canonical_target: string;
+  kind: "channel" | "direct_message" | "group_message" | "email" | "calendar_event" | "file";
+  recipient_count: number;
+  external_recipient_count?: number;
+  guest_recipient_count?: number;
+  is_public?: boolean;
+  is_external_shared?: boolean;
+  is_broadcast?: boolean;
+  resolution_complete?: boolean;
 };
 
 export type AudiencePolicy = {
@@ -87,6 +113,7 @@ export type AuditEvent = {
   verdict?: "allow" | "warn" | "confirm_required" | "block" | null;
   reason_codes?: Array<string>;
   details?: Record<string, unknown>;
+  decision?: DecisionRecord | null;
 };
 
 export type CeilingStatusResponse = {
@@ -148,6 +175,12 @@ export type ControlWorkspaceResponse = {
   identity_sha256: string;
 };
 
+export type DecisionRecord = {
+  schema_version?: 1;
+  action: ActionDescription;
+  judgment: Judgment;
+};
+
 export type DraftQuestionResponse = {
   question_id: string;
   field: string;
@@ -194,6 +227,13 @@ export type FamilyCoverageResponse = {
   known_bypasses?: Array<string>;
 };
 
+export type FilesystemFacts = {
+  resolved?: string | null;
+  zone: "inside" | "cwd_root" | "outside" | "temp" | "home" | "root" | "system" | "protected_config" | "credential" | "host_artifact" | "dynamic";
+  judged_by?: "parser" | "directory" | "literal" | "windows_recognizer";
+  note?: string | null;
+};
+
 export type IntegrationStatusResponse = {
   gateway: ControlCheckResponse;
   hooks: ControlCheckResponse;
@@ -201,6 +241,21 @@ export type IntegrationStatusResponse = {
   ceiling: CeilingStatusResponse;
   agent: AgentConnectionResponse;
   coverage: Array<FamilyCoverageResponse>;
+};
+
+export type Judgment = {
+  verdict: "allow" | "warn" | "confirm_required" | "block";
+  floor_verdict?: "allow" | "warn" | "confirm_required" | "block" | null;
+  decided_by?: "floor" | "ceiling" | "detector" | "model";
+  rule_id?: string | null;
+  ceiling_version: number;
+  enforcement: "mandatory" | "advisory" | "unsupported" | "unknown";
+  reason: string;
+  agent_guidance?: string | null;
+  history_facts?: Array<string>;
+  approval_reference?: string | null;
+  message?: "none" | "sent" | "suppressed_budget";
+  latency_ms?: number | null;
 };
 
 export type PendingApprovalResponse = {
@@ -230,6 +285,21 @@ export type ProviderScope = {
   credential_principal_id: string;
   actor_id?: string | null;
   adapter_id: string;
+};
+
+export type ResolvedTarget = {
+  raw: string;
+  kind: "read" | "write" | "delete" | "execute" | "send" | "network";
+  surface: "filesystem" | "audience" | "resource";
+  filesystem?: FilesystemFacts | null;
+  audience?: AudienceFacts | null;
+  resource?: ResourceFacts | null;
+};
+
+export type ResourceFacts = {
+  provider?: "slack" | "gmail" | "google_calendar" | "google_drive" | null;
+  resource_type: string;
+  resource_id: string;
 };
 
 export type TargetSuggestion = {

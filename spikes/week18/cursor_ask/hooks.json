@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [
+      {"command": "python3 .cursor/hooks/ask_probe.py", "timeout": 5}
+    ],
+    "preToolUse": [
+      {"command": "python3 .cursor/hooks/ask_probe.py", "timeout": 5}
+    ],
+    "beforeShellExecution": [
+      {"command": "python3 .cursor/hooks/ask_probe.py", "timeout": 5}
+    ],
+    "afterShellExecution": [
+      {"command": "python3 .cursor/hooks/ask_probe.py", "timeout": 5}
+    ],
+    "postToolUse": [
+      {"command": "python3 .cursor/hooks/ask_probe.py", "timeout": 5}
+    ],
+    "postToolUseFailure": [
+      {"command": "python3 .cursor/hooks/ask_probe.py", "timeout": 5}
+    ],
+    "subagentStart": [
+      {"command": "python3 .cursor/hooks/ask_probe.py", "timeout": 5}
+    ],
+    "subagentStop": [
+      {"command": "python3 .cursor/hooks/ask_probe.py", "timeout": 5}
+    ]
+  }
+}

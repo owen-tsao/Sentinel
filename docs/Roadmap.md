@@ -758,9 +758,54 @@ before the action runs.
 
 **Planned outcome:**
 
+- **Done (part 1, October 10):** the decision record, one typed shape for
+  every verdict Sentinel writes (`docs/Decision Record.md`). Carries resolved
+  targets with zones for shell, audience counts for sends, resources for
+  everything else, and a judgment with rule, floor verdict, enforcement claim,
+  guidance, message outcome, and latency. Wired into `AuditEvent`, the SQLite
+  store (queryable by `rule_id` and `zone`), the control API, the web types,
+  and the MCP gateway. Every Gate 2b incident and hard twin fits it.
+- **Done (part 2, October 11; live gates owed):** the Claude Code hook
+  adapter (`docs/Week 16 Plan.md`; Architecture §16.2). The Week 15 floor
+  ported to `src/sentinel/floor/` with three new rules
+  (`F2.supervisor_disable`, `F2.session_escape`, `F5.symlink_escape`), the
+  home carve-outs, `tee`/`cp` destinations, command-substitution walking,
+  and a file-tool path floor; 15/15 incidents, 26/26 held-out, 0/69 hard
+  twins, 1/120 benign twins (the nested `claude -p` the new rule exists
+  for). `FloorPolicy` (ceiling v2) frozen, hashed, bound to the state
+  database, v1 database refused by name. HTTP hook routes that always answer
+  200, never emit `permissionDecision: "allow"`, write the row with
+  `write_required` before answering, and fail closed on every error path.
+  Sessions keyed by the host's `session_id` with a narrow-only launch
+  directory and history rebuilt from rows on restart. `sentinel serve`,
+  `sentinel claude-code install | doctor | launchd`; stdlib `SessionStart`
+  hook; `scripts/hook_harness.py`. In-process: p50 5 ms, p95 15 ms with the
+  durable write; 230/230 rows before action. Two independent review passes
+  and a security review; findings fixed with regression tests (fake heredoc
+  opener hiding later lines, boundary re-derived after restart, session-escape
+  prefixes, `cp` into home).
+- **Changed from the plan above:** `confirm` is delivered as the host's own
+  `ask` prompt carrying Sentinel's reason, every time, rather than a deny
+  with an approval reference; the person answers in Claude Code, so no
+  Sentinel-side approval binding or TTL exists on this path (a deny-with-
+  guidance fallback is configurable per permission mode for hosts that do
+  not render `ask`). The `Boundary` record is the session's launch directory
+  with its source; inference and supersession stay in Week 17.
+- **Live gates passed (October 12; plan §7.1):** under root-owned managed
+  settings on Claude Code 2.1.296, `doctor` reported `mandatory`, and the
+  real host honoured `deny` (Bash and `Edit`), showed its own confirmation
+  dialog for `ask` with Sentinel's reason, refused every tool call with
+  `onFailure: "block"` while Sentinel was stopped, and kept firing the
+  managed hook with `disableAllHooks: true` in a local settings file. Nested
+  `claude -p` tripped `F2.session_escape`. **Coverage claim for Claude Code
+  on this machine: mandatory.** Live hook-side latency on 43 real calls: p50
+  0.57 ms, p95 5.1 ms, max 21 ms; 37/37 actions had their decision row
+  written first. Still unverified: `deny` under `bypassPermissions` and
+  skill-frontmatter hooks.
 - A thin Claude Code adapter translating hook events into one Sentinel
   decision API and verdicts back; `confirm` delivered as deny with an approval
-  reference and retry guidance, exactly as the Week 12 MCP path does.
+  reference and retry guidance, exactly as the Week 12 MCP path does. Writes
+  the decision record for every verdict.
 - The `Boundary` record with its default only (working directory, containing
   repository, launch environment); no inference yet. States `inferred →
   superseded`; supersession invalidates pending approvals.
@@ -784,6 +829,25 @@ numbers, and an honest coverage statement (advisory without managed
 settings; unsupported elsewhere).
 
 ### Week 17: Hear, Tell, and Stuck
+
+**Status (October 12): closed.** Planned, reviewed twice, built, reviewed
+again (security + correctness, 12 findings fixed), verified live on Claude
+Code 2.1.296. Plan and review log: `docs/Week 17 Plan.md`. Verified:
+`src/sentinel/boundary/`, `src/sentinel/detectors/`, routes
+`user-prompt-submit` and `post-tool-use-failure`, 146 new tests (862 total),
+harness 5/5 loops and 0/8 benign twins under a per-step check, Week 16
+numbers unchanged. Spike S2 passed before build (3.7% of 164 real sessions
+under the upper bound; kill was 10%). Spike S3 passed live: all five hook
+payload shapes parse. Live gates H1, H2, H3, H5 passed through `claude -p`
+(narrowing, caution without widening, negation, nudge at the 3rd failure
+and one `systemMessage` at the 4th). **Carried to Week 18:** H4 (TUI paste
+strip) and H6 (twenty-minute benign task, zero messages) need an interactive
+session; Spike S1 (boundary-line A/B, n=20, pre-registered pass line) is
+measurement, not a ship gate, and runs inside Week 18's evaluation pack. One change from the
+sketch below, forced by review: there is **no widening path** in this week
+(the `include <path>` answer was forgeable from Bash and a prompt `block`
+would discard the person's words); an outside path yields a caution to the
+agent, and widening waits for the monitor.
 
 **Goal:** Infer the boundary from the prompt (narrowing only), tell it to the
 agent, and surface stuck agents, each behind its own spike.
@@ -814,9 +878,58 @@ trip → raise thresholds before any message is shown).
 **Deliverable:** the hear → tell → watch loop on Claude Code with the floor
 and the stuck detector, measured.
 
-## Phase 8: Validation and Release
+## Phase 8: Sentinel Where the Person Works, Then Release
 
-### Week 18: Validation, Hardening, and Release Decision
+### Week 18: Sentinel on Cursor
+
+**Status (October 13):** built and reviewed; live gates C-H0, C-H0b, C-H2
+passed; C-H3 exposed that Cursor ignores `ask` on `preToolUse` (a confirmed
+`Delete` ran with no popup), Spike C2 (`spikes/week18/cursor_ask/RESULTS.md`)
+found the working channel (`beforeShellExecution` / `beforeMCPExecution`,
+same `tool_use_id`, 72–124 ms later), and the adapter was reworked the same
+evening: shell and MCP confirms are held and delivered there, file-tool
+confirms are a deny with "ask the user in chat" guidance. C-H3, C-H5, C-H1,
+C-H4, C-H6 still owed. Plan: `docs/Week 18 Plan.md`; verified
+implementation: `docs/Product Architecture.md` §16.4.
+
+**Why inserted:** the release week's central test is a person living with
+Sentinel on for a week, and the person lives in Cursor. Claude Code proved
+the floor and the advisory layer under lockable hooks (Weeks 16-17, live
+gates passed); Cursor gets the same supervisor through a translation layer
+over the same service, with `enforcement: advisory` stated plainly because
+the user-level Cursor hooks file is writable by the agent's user.
+
+**Spike C1 (verified October 13, Cursor 3.24.12):** `additional_context`
+reaches the agent on `beforeSubmitPrompt`, `preToolUse`, `postToolUse`, and
+`postToolUseFailure`; no person-facing text on `allow`; payload shapes
+logged. Hear, Tell, and Stuck port one-for-one; the single budgeted stuck
+message is delivered as Cursor's own `ask` popup.
+
+**Built (October 13):** dependency-free forwarder (`sentinel_forward.py`,
+stdlib only, 3 s timeout, proxy-free loopback, exit 2 with a stderr reason
+on gating events when Sentinel is unreachable; pass-through on non-gating
+events); `hosts/cursor/` adapter that translates Cursor payloads into the
+Claude Code envelope and delegates every decision to the shared service;
+`Delete` judged as a delete, `ApplyPatch` as an opaque write,
+`.cursor/mcp.json` added to the protected-config rule; `sentinel cursor
+install | doctor`; `scripts/hook_harness.py --host both` reports 0 verdict
+mismatches on 230 cases and 0 stuck-signal mismatches on 13 sequences
+between the two hosts; 104 adapter tests plus the full suite (966) pass.
+Two independent review passes (correctness, authority) found and fixed
+seven defects before the docs were written, the most important being a
+narrowing of the launch directory that did not re-derive the environment
+(a session launched at `/` could keep `dev` rules on a production path).
+
+**Still owed:** live gates C-H3 (rerun), C-H5, C-H1, C-H4, C-H6 on this
+machine with a real Cursor process, `doctor` timing its synthetic event end
+to end (the in-row `forwarder_ms` misses interpreter start), the week of
+real work in Week 19, and the H4/H6/S1 gates carried from Week 17.
+
+**Kill condition:** a stopped Sentinel lets a Cursor action through; or the
+Cursor path produces a different floor verdict than the Claude Code path on
+any incident or benign twin.
+
+### Week 19: Validation, Hardening, and Release Decision (on Cursor)
 
 **Goal:** Freeze new features, test the complete verified path, and decide
 whether the result is ready to label a release candidate.
@@ -828,8 +941,10 @@ Do not change thresholds after inspecting failures.
 
 **Planned outcome:**
 
-- Run the Claude Code hook path (floor, boundary, stuck), the MCP fixture
-  path, and the Docker executor path end to end.
+- Run the Cursor hook path (floor, boundary, stuck) for a week of real work,
+  the Claude Code path interactively under root-owned managed settings
+  (`enforcement: mandatory`; closes Week 17's carried gates H4 and H6 and
+  Spike S1), the MCP fixture path, and the Docker executor path end to end.
 - Measure dangerous recall on incidents and held-out cases, false-flag rate
   per benign session, messages per hour against the host's prompts, decision
   latency at the hook, and audit integrity under a deliberate deletion.
@@ -848,15 +963,47 @@ research prototype, not a release candidate.
 **Deliverable:** a hardened, measured local package and an explicit release
 decision, with the evaluation numbers as the public artifact.
 
-### Next phase (after Week 18, in order)
+> **Amendment (Week 18, October 14).** The Week 18 gates and the corpus
+> review (`spikes/week18/prompt_corpus/`, Direction §3.1 and §3.4
+> amendments) moved four fixes into the end of Week 18 and three items into
+> Week 19 ahead of the freeze. End of Week 18, before C-H6: the `.cursor/`
+> carve-out split, credential-taint decay, and launch-directory boundary with
+> per-prompt focus hint (removes the sticky narrowing). Week 19, in this
+> order, each with its own gate and the last with an independent authority
+> review: `ApplyPatch` path parsing (gate: the corpus's 1,759 patches judged
+> with 0 `opaque_write`); hook `confirm` denies create a one-use pending
+> approval and carry its link (gate: a denied `rm` outside the repo is
+> approvable from the paired tab and the retry allows exactly once); the
+> after-action summary per session, pushed where a notification is paired.
+> The `adjacent_repo` warn zone is deferred pending the corpus split. The
+> "messages per hour" gate is restated per session as well, checked on a
+> ~4-turn session (the published median) and not only on the person's long
+> ones. The off-track detector is reframed: the launch directory is its unit,
+> and its primary surface is the after-action summary, not a message.
+>
+> **Built (Week 19 item 1, October 15):** `ApplyPatch` path parsing
+> (`src/sentinel/floor/patch.py`). The Cursor translator reads the
+> `*** Update File:` / `*** Add File:` / `*** Delete File:` (and `*** Move
+> to:`) headers into a `files` list, so patch bodies still never enter the
+> envelope; `decide_patch` judges each path through `decide_path` as `Write`
+> or `Delete` and the most severe verdict wins (most severe zone among
+> blocks, as in the shell floor). No readable header stays `F5.opaque_write`;
+> an empty or relative-only path is denied as unresolved, not skipped. Gate
+> met: 2,276 corpus patches (the corpus grew past 1,759) judged with 0
+> `opaque_write`; 2,245 allow, 27 block (all writes to `.cursor/hooks*` or
+> the `.cursor/skills/` carve-out, the same answer `Write` gives), 4 confirm
+> (outside-workspace writes); p95 0.07 ms. Not yet re-run live against
+> Cursor 3.24.12; the unit path uses the recorded raw-string shape.
+
+### Next phase (after Week 19, in order)
 
 Off-track detector (`warn`, `confirm` only for out-of-boundary writes or
-sends); Cursor hook adapter (advisory until enterprise hooks are installed);
-hash-chained audit; the web app's monitor view; Codex adapter via the
+sends); hash-chained audit; the web app's monitor view; Codex adapter via the
 app-server approval protocol; a calibrated model for gray areas once the
-evaluation set is large enough.
+evaluation set is large enough. The Cursor adapter stays advisory until
+enterprise or MDM hooks lock the hooks file against the agent.
 
-## Local Product Non-Goals Through Week 18
+## Local Product Non-Goals Through Week 19
 
 These are intentionally excluded from the local product proof:
 
@@ -872,7 +1019,7 @@ These are intentionally excluded from the local product proof:
 - Production-ready real-agent framework adapters.
 - Production provider credentials or customer accounts.
 - A claim that Sentinel observes or controls unmediated agent behavior.
-- Public marketing before the Week 18 release gate.
+- Public marketing before the Week 19 release gate.
 - Any model-based judge before an evaluation set exists to calibrate it.
 - A general-purpose prompt-writing or prompt-restructuring assistant; Sentinel adds one boundary line and never edits the person's words.
 - Treating an inferred boundary as authority, or widening one without the person's answer.
@@ -881,11 +1028,11 @@ These are intentionally excluded from the local product proof:
 - A phone or menu-bar application; verdicts travel through existing notification channels.
 - Monitoring closed consumer assistants that expose no hook.
 - Agent orchestration (launching, sequencing, scheduling agents).
-- Cursor and Codex hook adapters, the off-track detector, the hash-chained audit, and the monitor view before Week 18; they are the next phase.
+- The Codex hook adapter, the off-track detector, the hash-chained audit, and the monitor view before Week 19; they are the next phase.
 
 ## Post-Gate Local Follow-Up
 
-If Week 18 passes its preregistered release gates:
+If Week 19 passes its preregistered release gates:
 
 - Build and publish the separate public marketing site using sanitized
   screenshots, measured claims, clear installation guidance, and no protected
@@ -903,7 +1050,7 @@ If Week 18 passes its preregistered release gates:
 
 ## Part 2: Hosted/Hybrid Production Scaling
 
-After Week 18, the roadmap turns the validated local product into a
+After Week 19, the roadmap turns the validated local product into a
 hosted/hybrid platform while preserving enforcement close to the agent.
 
 ### Stage 1: Hosted Control Plane and Multi-Tenant Web App

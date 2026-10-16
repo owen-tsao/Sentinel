@@ -14,7 +14,11 @@ dependencies = [
     "uvicorn[standard]",
     "onnxruntime",
     "transformers",
+    "bashlex>=0.18",
 ]
+
+[project.scripts]
+sentinel = "sentinel.cli:main"
 
 [project.optional-dependencies]
 test = [
